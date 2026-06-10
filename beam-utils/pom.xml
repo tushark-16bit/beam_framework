@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.yourco.beam</groupId>
+        <artifactId>beam-pipeline-framework</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>beam-utils</artifactId>
+    <name>Beam Utils — Shared Utilities</name>
+    <description>
+        Stateless utility helpers used by transforms, the runner, and custom external
+        transform modules. Contains: BigQuery schema fetching, GCS helpers, row validation,
+        GCP Secret Manager access, Beam metrics helpers, calendar/working-day calculations,
+        and date utilities for report pipelines.
+
+        This module depends only on beam-core and GCP client libraries.
+        It does NOT contain any Beam pipeline graph code (no PTransform, no DoFn).
+        Utilities here run in the driver JVM at pipeline-assembly time, or inside
+        DoFns where explicitly noted.
+    </description>
+
+    <dependencies>
+
+        <!-- Core contracts (FrameworkOptions, etc.) -->
+        <dependency>
+            <groupId>com.yourco.beam</groupId>
+            <artifactId>beam-core</artifactId>
+        </dependency>
+
+        <!-- Beam SDK — needed for Schema, Row, Metrics types -->
+        <dependency>
+            <groupId>org.apache.beam</groupId>
+            <artifactId>beam-sdks-java-core</artifactId>
+        </dependency>
+
+        <!-- BigQuery + GCS client libraries (versions managed by GCP BOM in parent) -->
+        <dependency>
+            <groupId>com.google.cloud</groupId>
+            <artifactId>google-cloud-bigquery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.cloud</groupId>
+            <artifactId>google-cloud-storage</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.cloud</groupId>
+            <artifactId>google-cloud-secretmanager</artifactId>
+        </dependency>
+
+    </dependencies>
+</project>
