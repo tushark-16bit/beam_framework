@@ -226,6 +226,15 @@ Grant `roles/secretmanager.secretAccessor` to the Dataflow + Cloud Composer serv
 
 ---
 
+## Agent / AI guide
+
+[`CLAUDE.md`](CLAUDE.md) is the primary reference for any AI agent working in this repository.
+It covers: file reading order, the mandatory README update rule, the complete file map, all
+architecture rules, serialization rules, how to make every type of change, and what never to do.
+It is written in plain language and is readable by any capable language model (Claude, GPT, Gemini, etc).
+
+---
+
 ## Project layout deep-dive
 
 Each module has its own `README.md` explaining its internals:
