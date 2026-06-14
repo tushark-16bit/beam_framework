@@ -1,11 +1,19 @@
 package com.yourco.beam.utils.db;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yourco.beam.model.AggregationConfig;
+import com.yourco.beam.model.BncRule;
 import com.yourco.beam.model.ApiSourceConfig;
 import com.yourco.beam.model.BqFetchConfig;
 import com.yourco.beam.model.FileSourceConfig;
+import com.yourco.beam.model.LookupConfig;
+import com.yourco.beam.model.OutputConfig;
+import com.yourco.beam.model.QueryConfig;
 import com.yourco.beam.model.SourceConfig;
+import com.yourco.beam.model.SourceTransformConfig;
+import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.SourceType;
 import org.slf4j.Logger;
@@ -23,56 +31,27 @@ import java.util.Map;
  * the schema and table names from {@link FrameworkOptions} so the same framework
  * binary works against different DB environments without recompilation.
  *
- * <h2>Expected DB schema</h2>
+ * <h2>DB connection lifecycle</h2>
+ * The {@link DatabaseAdapter} passed to the constructor is <em>not</em> owned by this
+ * class — callers are responsible for closing it. The recommended pattern is:
  * <pre>{@code
- * -- One row per (datasource, period, subprocess) combination:
- * CREATE TABLE source_config (
- *   datasource_name          VARCHAR(100)  NOT NULL,
- *   period_id                VARCHAR(50)   NOT NULL,
- *   subprocess_name          VARCHAR(100)  NOT NULL,
- *   source_type              VARCHAR(20)   NOT NULL,  -- API | FILE | BQ
- *   -- API columns:
- *   api_endpoint             TEXT,
- *   api_auth_type            VARCHAR(20),             -- NONE | BEARER | BASIC | API_KEY
- *   api_auth_secret_id       TEXT,
- *   api_headers_json         TEXT,                    -- JSON object: {"X-Custom": "value"}
- *   api_query_params_json    TEXT,                    -- JSON object: {"format": "json"}
- *   api_pagination_enabled   BOOLEAN,
- *   api_pagination_strategy  VARCHAR(20),             -- PAGE_NUMBER | CURSOR | OFFSET
- *   api_page_size            INT,
- *   api_next_page_field      VARCHAR(100),
- *   api_data_array_field     VARCHAR(100),
- *   -- FILE columns:
- *   file_type                VARCHAR(20),             -- CSV | EXCEL
- *   file_location            TEXT,                    -- gs://bucket/raw/
- *   file_prefix              TEXT,
- *   file_suffix              TEXT,
- *   file_delimiter           VARCHAR(5),
- *   file_has_header          BOOLEAN,
- *   file_sheet_index         INT,
- *   -- BQ columns:
- *   bq_project_id            VARCHAR(100),
- *   bq_dataset               VARCHAR(100),
- *   bq_table                 VARCHAR(100),
- *   bq_query                 TEXT,
- *   PRIMARY KEY (datasource_name, period_id, subprocess_name)
- * );
- *
- * -- Optional required-parameters guard:
- * CREATE TABLE required_parameters (
- *   datasource_name  VARCHAR(100) NOT NULL,
- *   period_id        VARCHAR(50)  NOT NULL,
- *   subprocess_name  VARCHAR(100) NOT NULL,
- *   parameter_key    VARCHAR(200) NOT NULL,  -- e.g. "api_endpoint"
- *   PRIMARY KEY (datasource_name, period_id, subprocess_name, parameter_key)
- * );
+ * try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
+ *     ParameterRepository repo = new ParameterRepository(db, options);
+ *     List<SourceConfig> configs = repo.fetchSourceConfigs(...);
+ * } // db.close() called automatically
  * }</pre>
+ * Each call to this repository creates a connection from the pool, runs one query,
+ * and returns the connection immediately — it does not hold a long-lived connection.
+ *
+ * <h2>Required DB tables</h2>
+ * See {@code beam-utils/README.md} for the full DDL including all new columns.
  */
 public final class ParameterRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(ParameterRepository.class);
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final TypeReference<Map<String, String>> MAP_TYPE = new TypeReference<>() {};
+    private static final TypeReference<Map<String, String>> STR_MAP = new TypeReference<>() {};
+    private static final TypeReference<List<String>>        STR_LIST = new TypeReference<>() {};
 
     private final DatabaseAdapter db;
     private final String schema;
@@ -88,28 +67,11 @@ public final class ParameterRepository {
 
     // ── Validation ───────────────────────────────────────────────────────────
 
-    /**
-     * Returns true if the {@code source_config} table has at least one row for the
-     * given key AND the required_parameters table has no unmet entries.
-     *
-     * <p>Call this before fetching configs — fail fast with a clear message rather
-     * than letting the pipeline start with missing configuration.
-     */
     public boolean allRequiredParametersExist(String datasourceName, String periodId, String subprocess) {
         return getMissingParameters(datasourceName, periodId, subprocess).isEmpty();
     }
 
-    /**
-     * Returns the list of parameter keys that are declared as required but absent in
-     * {@code source_config}. An empty list means everything is present.
-     *
-     * <p>Strategy: query the required_parameters table; for each key, check that the
-     * matching column in source_config is non-null for this (datasource, period, subprocess).
-     * If the required_parameters table is empty or absent, falls back to checking that
-     * at least one source_config row exists.
-     */
     public List<String> getMissingParameters(String datasourceName, String periodId, String subprocess) {
-        // Step 1: check a source_config row exists
         String existsSql = "SELECT COUNT(*) AS cnt FROM " + sourceConfigTable
             + " WHERE datasource_name = ? AND period_id = ? AND subprocess_name = ?";
         Map<String, Object> countRow = db.queryOne(existsSql, datasourceName, periodId, subprocess)
@@ -119,10 +81,10 @@ public final class ParameterRepository {
         if (rowCount == 0) {
             LOG.warn("No source_config row found for datasource={}, period={}, subprocess={}",
                      datasourceName, periodId, subprocess);
-            return List.of("source_config row missing for (" + datasourceName + ", " + periodId + ", " + subprocess + ")");
+            return List.of("source_config row missing for ("
+                + datasourceName + ", " + periodId + ", " + subprocess + ")");
         }
 
-        // Step 2: check required_parameters table if it exists
         try {
             String requiredSql = "SELECT parameter_key FROM " + requiredParamsTable
                 + " WHERE datasource_name = ? AND period_id = ? AND subprocess_name = ?";
@@ -130,7 +92,6 @@ public final class ParameterRepository {
 
             if (required.isEmpty()) return Collections.emptyList();
 
-            // For each required key, check the column is non-null in source_config
             List<String> missing = new ArrayList<>();
             for (Map<String, Object> reqRow : required) {
                 String paramKey = (String) reqRow.get("parameter_key");
@@ -139,9 +100,7 @@ public final class ParameterRepository {
                 try {
                     Map<String, Object> valueRow = db.queryOne(checkSql, datasourceName, periodId, subprocess)
                         .orElse(Collections.emptyMap());
-                    if (valueRow.get(paramKey) == null) {
-                        missing.add(paramKey);
-                    }
+                    if (valueRow.get(paramKey) == null) missing.add(paramKey);
                 } catch (DatabaseException e) {
                     LOG.warn("Could not check parameter '{}': {}", paramKey, e.getMessage());
                     missing.add(paramKey + " (column not found)");
@@ -149,7 +108,6 @@ public final class ParameterRepository {
             }
             return missing;
         } catch (DatabaseException e) {
-            // required_parameters table may not exist — treat as no constraints
             LOG.debug("required_parameters table not accessible, skipping validation: {}", e.getMessage());
             return Collections.emptyList();
         }
@@ -157,13 +115,8 @@ public final class ParameterRepository {
 
     // ── Config fetch ─────────────────────────────────────────────────────────
 
-    /**
-     * Fetches all source configurations for the given key triple.
-     *
-     * <p>In most setups there is one row per key. Multiple rows are supported
-     * for datasources with multiple sub-feeds registered under the same name/period/subprocess.
-     */
-    public List<SourceConfig> fetchSourceConfigs(String datasourceName, String periodId, String subprocess) {
+    public List<SourceConfig> fetchSourceConfigs(String datasourceName, String periodId,
+                                                  String subprocess) {
         String sql = "SELECT * FROM " + sourceConfigTable
             + " WHERE datasource_name = ? AND period_id = ? AND subprocess_name = ?";
 
@@ -198,14 +151,28 @@ public final class ParameterRepository {
             throw new DatabaseException("Unknown source_type '" + sourceTypeStr + "' in source_config");
         }
 
-        return switch (sourceType) {
-            case API  -> SourceConfig.forApi(datasourceName, periodId, subprocessName, toApiConfig(row));
-            case FILE -> SourceConfig.forFile(datasourceName, periodId, subprocessName, toFileConfig(row));
-            case BQ   -> SourceConfig.forBq(datasourceName, periodId, subprocessName, toBqConfig(row));
+        SourceConfig.Builder builder = SourceConfig.builder()
+            .datasourceName(datasourceName)
+            .periodId(periodId)
+            .subprocessName(subprocessName)
+            .sourceType(sourceType)
+            .queryConfig(toQueryConfig(row))
+            .outputConfig(toOutputConfig(row))
+            .sourceTransforms(toSourceTransforms(str(row, "source_transforms_json")))
+            .validationConfig(toValidationConfig(row));
+
+        switch (sourceType) {
+            case API  -> builder.apiConfig(toApiConfig(row));
+            case FILE -> builder.fileConfig(toFileConfig(row));
+            case BQ   -> builder.bqFetchConfig(toBqConfig(row));
             default   -> throw new DatabaseException(
                 "source_type " + sourceType + " is not supported in DATA_SOURCE_DOWNLOAD mode");
-        };
+        }
+
+        return builder.build();
     }
+
+    // ── Source-type-specific mappings ─────────────────────────────────────────
 
     private ApiSourceConfig toApiConfig(Map<String, Object> row) {
         return new ApiSourceConfig(
@@ -239,11 +206,127 @@ public final class ParameterRepository {
             str(row, "bq_project_id"),
             str(row, "bq_dataset"),
             str(row, "bq_table"),
-            str(row, "bq_query")
+            str(row, "bq_query"),
+            parseJsonMap(str(row, "query_params_json"))
         );
     }
 
-    // ── Small type helpers ───────────────────────────────────────────────────
+    // ── New column mappings ───────────────────────────────────────────────────
+
+    private QueryConfig toQueryConfig(Map<String, Object> row) {
+        return new QueryConfig(
+            str(row, "bq_query"),
+            parseJsonMap(str(row, "query_params_json"))
+        );
+    }
+
+    private OutputConfig toOutputConfig(Map<String, Object> row) {
+        String outputType = str(row, "output_type");
+        if (outputType == null || outputType.isBlank()) return null;
+        return new OutputConfig(
+            outputType,
+            str(row, "output_bq_project"),
+            str(row, "output_bq_dataset"),
+            str(row, "output_bq_table"),
+            str(row, "output_gcs_path"),
+            str(row, "output_write_mode")
+        );
+    }
+
+    private List<SourceTransformConfig> toSourceTransforms(String json) {
+        if (json == null || json.isBlank()) return Collections.emptyList();
+        try {
+            JsonNode array = JSON.readTree(json);
+            if (!array.isArray()) return Collections.emptyList();
+
+            List<SourceTransformConfig> transforms = new ArrayList<>();
+            for (JsonNode node : array) {
+                String type = node.path("type").asText();
+                switch (type.toUpperCase()) {
+                    case SourceTransformConfig.GROUP_BY -> {
+                        List<String> fields = parseStringList(node.path("groupByFields").toString());
+                        List<AggregationConfig> aggs = parseAggregations(node.path("aggregations").toString());
+                        transforms.add(SourceTransformConfig.groupBy(fields, aggs));
+                    }
+                    case SourceTransformConfig.SORT_BY -> {
+                        List<String> fields = parseStringList(node.path("sortByFields").toString());
+                        boolean desc = node.path("sortDescending").asBoolean(false);
+                        transforms.add(SourceTransformConfig.sortBy(fields, desc));
+                    }
+                    case SourceTransformConfig.LOOKUP -> {
+                        LookupConfig lookupCfg = parseLookupConfig(node);
+                        transforms.add(SourceTransformConfig.lookup(lookupCfg));
+                    }
+                    default -> LOG.warn("Unknown source transform type '{}' — skipping", type);
+                }
+            }
+            return transforms;
+        } catch (Exception e) {
+            LOG.error("Failed to parse source_transforms_json: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private LookupConfig parseLookupConfig(JsonNode node) {
+        List<String> outputFields = parseStringList(node.path("lookupOutputFields").toString());
+        return new LookupConfig(
+            node.path("lookupSourceType").asText(LookupConfig.SOURCE_BQ),
+            node.path("lookupBqTableRef").asText(null),
+            node.path("lookupJdbcQuery").asText(null),
+            node.path("lookupKeyField").asText(),
+            node.path("dataKeyField").asText(),
+            outputFields
+        );
+    }
+
+    private List<AggregationConfig> parseAggregations(String json) {
+        if (json == null || json.isBlank() || json.equals("null")) return Collections.emptyList();
+        try {
+            JsonNode array = JSON.readTree(json);
+            if (!array.isArray()) return Collections.emptyList();
+            List<AggregationConfig> aggs = new ArrayList<>();
+            for (JsonNode node : array) {
+                aggs.add(new AggregationConfig(
+                    node.path("field").asText(),
+                    node.path("function").asText(),
+                    node.path("outputField").asText()
+                ));
+            }
+            return aggs;
+        } catch (Exception e) {
+            return Collections.emptyList();
+        }
+    }
+
+    private ValidationConfig toValidationConfig(Map<String, Object> row) {
+        long minRows = toLong(row.get("min_row_count"));
+        long maxRows = row.get("max_row_count") != null ? toLong(row.get("max_row_count")) : ValidationConfig.NO_MAX;
+        List<String> requiredHeaders = parseStringList(str(row, "required_headers_json"));
+        List<BncRule> bncRules = parseBncRules(str(row, "bnc_rules_json"));
+        return new ValidationConfig(minRows, maxRows, requiredHeaders, bncRules);
+    }
+
+    private List<BncRule> parseBncRules(String json) {
+        if (json == null || json.isBlank()) return Collections.emptyList();
+        try {
+            JsonNode array = JSON.readTree(json);
+            if (!array.isArray()) return Collections.emptyList();
+            List<BncRule> rules = new ArrayList<>();
+            for (JsonNode node : array) {
+                rules.add(new BncRule(
+                    node.path("field").asText(),
+                    node.path("expectedTotal").asDouble(),
+                    node.path("tolerancePct").asDouble(0.01)
+                ));
+            }
+            return rules;
+        } catch (Exception e) {
+            LOG.error("Failed to parse bnc_rules_json: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    // ── Type helpers ─────────────────────────────────────────────────────────
 
     private static String str(Map<String, Object> row, String col) {
         Object v = row.get(col);
@@ -270,9 +353,18 @@ public final class ParameterRepository {
     private static Map<String, String> parseJsonMap(String json) {
         if (json == null || json.isBlank()) return Collections.emptyMap();
         try {
-            return JSON.readValue(json, MAP_TYPE);
+            return JSON.readValue(json, STR_MAP);
         } catch (Exception e) {
             return Collections.emptyMap();
+        }
+    }
+
+    private static List<String> parseStringList(String json) {
+        if (json == null || json.isBlank() || json.equals("null")) return Collections.emptyList();
+        try {
+            return JSON.readValue(json, STR_LIST);
+        } catch (Exception e) {
+            return Collections.emptyList();
         }
     }
 

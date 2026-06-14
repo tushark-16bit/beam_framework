@@ -1,22 +1,12 @@
 package com.yourco.beam.runner;
 
-import com.yourco.beam.io.checkpoint.BigQueryCheckpointAdapter;
-import com.yourco.beam.io.checkpoint.CheckpointAdapter;
-import com.yourco.beam.model.CheckpointRecord;
-import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.SourceType;
-import com.yourco.beam.utils.db.DatabaseAdapter;
-import com.yourco.beam.utils.db.DatabaseAdapterFactory;
-import com.yourco.beam.utils.db.ParameterRepository;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.Collections;
-import java.util.List;
 
 /**
  * Entry point for the Beam Pipeline Framework.
@@ -24,23 +14,28 @@ import java.util.List;
  * <h2>Routing by process type</h2>
  * <pre>
  *   --processType=DATA_SOURCE_DOWNLOAD  →  DataSourcePipelineFactory
- *   --processType=REPORT_PROCESSING     →  PipelineFactory (existing general-purpose factory)
+ *   --processType=REPORT_PROCESSING     →  PipelineFactory (general-purpose factory)
  * </pre>
  *
- * <h2>DATA_SOURCE_DOWNLOAD lifecycle with checkpoints</h2>
+ * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
  * <pre>
- *   1. DataSourcePipelineFactory.assemble()   — validates, fetches configs, writes
- *                                               STARTED checkpoints, assembles graph
- *   2. pipeline.run().waitUntilFinish()        — data flows
- *   3. On success: write FINISHED checkpoints
- *   4. On failure: write FAILED checkpoints
+ *   1. DataSourcePipelineFactory.assemble()
+ *        ├─ Validate params in DB
+ *        ├─ Fetch source configs (each carrying outputConfig, transforms, validationConfig)
+ *        ├─ Filter by checkpoint (skip already-finished sources)
+ *        ├─ Write STARTED checkpoints + PENDING process_status rows
+ *        └─ Assemble independent per-source Beam branches (no merge)
+ *   2. pipeline.run().waitUntilFinish()
+ *   3. DataSourcePipelineFactory.runPostPipelineSteps()
+ *        ├─ On success: validate output (row count, BnC) per source
+ *        └─ Write FINISHED/FAILED checkpoints + COMPLETED/VALIDATION_FAILED/FAILED status
  * </pre>
  *
  * <h2>REPORT_PROCESSING lifecycle</h2>
  * <pre>
- *   1. PipelineFactory.assemble()             — assembles transform chain
- *   2. pipeline.run()                         — data flows
- *   3. waitUntilFinish() for batch; streaming runs indefinitely
+ *   1. PipelineFactory.assemble()     — assembles source → transform chain → sink
+ *   2. pipeline.run()
+ *   3. waitUntilFinish() for batch; streaming runs indefinitely until cancelled
  * </pre>
  */
 public final class Main {
@@ -55,9 +50,8 @@ public final class Main {
                 .withValidation()
                 .as(FrameworkOptions.class);
 
-        LOG.info("Process type:  {}", options.getProcessType());
-        LOG.info("Job run ID:    {}", options.getJobRunId());
-        LOG.info("Sink:          {}", options.getSinkType());
+        LOG.info("Process type: {}", options.getProcessType());
+        LOG.info("Job run ID:   {}", options.getJobRunId());
 
         switch (options.getProcessType()) {
             case DATA_SOURCE_DOWNLOAD -> runDataSourceDownload(options);
@@ -68,48 +62,67 @@ public final class Main {
     // ── DATA_SOURCE_DOWNLOAD ─────────────────────────────────────────────────
 
     private static void runDataSourceDownload(FrameworkOptions options) {
-        LOG.info("DATA_SOURCE_DOWNLOAD | datasource={} | period={} | subprocess={}",
-                 options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
+        LOG.info("DATA_SOURCE_DOWNLOAD | datasource={} | period={} | periodStart={} | periodEnd={}",
+                 options.getDatasourceName(), options.getPeriodId(),
+                 options.getPeriodStart(), options.getPeriodEnd());
 
         DataSourcePipelineFactory factory = new DataSourcePipelineFactory();
         Pipeline pipeline = factory.assemble(options);
 
-        // Fetch source configs again for checkpoint writing after the run.
-        // We need the configs to write FINISHED/FAILED records per-source.
-        List<SourceConfig> processedConfigs = fetchProcessedConfigs(options);
-
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
         PipelineResult result = pipeline.run();
 
-        CheckpointAdapter checkpoint = new BigQueryCheckpointAdapter(options);
+        PipelineResult.State finalState = PipelineResult.State.UNKNOWN;
+        Throwable pipelineError = null;
+
         try {
             result.waitUntilFinish();
-
-            // All sources succeeded — write FINISHED checkpoints
-            PipelineResult.State state = result.getState();
-            if (state == PipelineResult.State.DONE) {
-                LOG.info("Pipeline finished successfully.");
-                processedConfigs.forEach(config -> {
-                    LOG.info("Writing FINISHED checkpoint for: {}", config.datasourceName);
-                    checkpoint.writeCheckpoint(
-                        CheckpointRecord.finished(options.getJobRunId(), config, 0L));
-                });
-            } else {
-                LOG.warn("Pipeline finished with state: {} — writing FAILED checkpoints.", state);
-                writeFailedCheckpoints(processedConfigs, options, checkpoint,
-                    "Pipeline finished with state: " + state);
-            }
+            finalState = result.getState();
+            LOG.info("Pipeline finished with state: {}", finalState);
         } catch (Exception e) {
-            LOG.error("Pipeline run failed: {}", e.getMessage(), e);
-            writeFailedCheckpoints(processedConfigs, options, checkpoint, e.getMessage());
-            throw new RuntimeException("DATA_SOURCE_DOWNLOAD failed", e);
+            pipelineError = e;
+            LOG.error("Pipeline run threw exception: {}", e.getMessage(), e);
+            try {
+                finalState = result.getState();
+            } catch (Exception ignored) {}
+        }
+
+        // Post-pipeline: validate output tables, write final checkpoints + status rows.
+        // This runs regardless of success/failure — the factory handles each case.
+        try {
+            factory.runPostPipelineSteps(finalState, pipelineError);
+        } catch (Exception e) {
+            // Best-effort — don't mask a pipeline failure with a status-write failure
+            LOG.error("Post-pipeline steps failed (status rows may be incomplete): {}", e.getMessage(), e);
+        }
+
+        if (pipelineError != null) {
+            throw new RuntimeException("DATA_SOURCE_DOWNLOAD pipeline failed", pipelineError);
         }
     }
 
     // ── REPORT_PROCESSING ────────────────────────────────────────────────────
 
+    /**
+     * Routes REPORT_PROCESSING to one of two modes:
+     * <ul>
+     *   <li>When {@code --reportName} is set: uses {@link ReportPipelineFactory} which
+     *       reads full report configuration from the parameter DB and orchestrates BQ
+     *       jobs + email sending in the driver JVM. No Beam pipeline is submitted.</li>
+     *   <li>When {@code --reportName} is blank: falls back to the generic
+     *       {@link PipelineFactory} (source → transform chain → sink Beam pipeline).</li>
+     * </ul>
+     */
     private static void runReportProcessing(FrameworkOptions options) {
-        LOG.info("REPORT_PROCESSING | source={} | chain={} | sink={}",
+        String reportName = options.getReportName();
+        if (reportName != null && !reportName.isBlank()) {
+            LOG.info("REPORT_PROCESSING (DB-configured) | report={} subprocess={} period={}",
+                     reportName, options.getReportSubprocess(), options.getPeriodId());
+            new ReportPipelineFactory().execute(options);
+            return;
+        }
+
+        LOG.info("REPORT_PROCESSING (legacy transform-chain) | source={} | chain={} | sink={}",
                  options.getSourceType(), options.getTransformChain(), options.getSinkType());
 
         Pipeline pipeline = new PipelineFactory().assemble(options);
@@ -125,33 +138,9 @@ public final class Main {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // ── Helper ───────────────────────────────────────────────────────────────
 
-    /**
-     * Re-fetches the source configs that were processed in this run.
-     * Used to write FINISHED/FAILED checkpoints after the pipeline completes.
-     * If the DB is unavailable, returns empty list (checkpoints best-effort).
-     */
-    private static List<SourceConfig> fetchProcessedConfigs(FrameworkOptions options) {
-        if (options.getParamDbUrl() == null) return Collections.emptyList();
-        try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
-            ParameterRepository repo = new ParameterRepository(db, options);
-            return repo.fetchSourceConfigs(
-                options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
-        } catch (Exception e) {
-            LOG.warn("Could not fetch source configs for post-run checkpoint update: {}", e.getMessage());
-            return Collections.emptyList();
-        }
-    }
-
-    private static void writeFailedCheckpoints(List<SourceConfig> configs, FrameworkOptions options,
-                                                CheckpointAdapter checkpoint, String errorMsg) {
-        configs.forEach(config ->
-            checkpoint.writeCheckpoint(
-                CheckpointRecord.failed(options.getJobRunId(), config, errorMsg)));
-    }
-
-    /** Returns {@code true} for bounded sources. Null sourceType defaults to batch. */
+    /** Returns {@code true} for bounded sources; false for streaming. */
     private static boolean isBatchSource(SourceType sourceType) {
         if (sourceType == null) return true;
         return switch (sourceType) {

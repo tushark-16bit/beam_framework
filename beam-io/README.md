@@ -29,8 +29,19 @@ io/checkpoint/
     CheckpointAdapter         — interface for reading/writing pipeline run checkpoints
     BigQueryCheckpointAdapter — BQ streaming insert (write) + interactive query (read)
 
+io/status/
+    ProcessStatusAdapter         — interface: write per-source status rows, query row count, query sums
+    BigQueryProcessStatusAdapter — BQ-backed impl; also provides queryRowCount() and querySum() for BnC validation
+
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer
+
+io/email/
+    ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>)
+    EmailAttachment           — attachment model (InputStream + fileName + contentType)
+
+io/report/
+    BigQueryJobService        — driver-JVM BQ jobs: query→table, table→GCS export (CSV/JSON)
 ```
 
 ### Adapter pattern

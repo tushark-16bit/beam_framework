@@ -1,144 +1,202 @@
 # Agent Guide — beam-pipeline-framework
 
 This file is the primary reference for any AI agent working in this repository.
-Read it fully before making any changes. It is written to be followed by any
-capable language model, not only Claude.
+Read it fully before making any changes. Written for any capable language model (Claude, GPT, Gemini, etc.).
 
-For human-readable documentation, see [`README.md`](README.md) and the per-module
-`README.md` files. This file is specifically optimised for agent comprehension.
+For human-readable documentation, see [`README.md`](README.md), [`WALKTHROUGH.md`](WALKTHROUGH.md),
+and the per-module `README.md` files.
 
 ---
 
-## 1. What this project is (3-sentence orientation)
+## 1. What this project is
 
-This is a configurable Apache Beam ETL pipeline framework written in Java 17 that runs
-on GCP Dataflow and is triggered by Apache Airflow DAGs. Everything the pipeline does —
-what it reads, which transforms it applies, where it writes — is controlled by CLI flags
-at runtime with no code changes. New data transformations are added by implementing a
-single Java interface and registering a class name in a text file; the framework discovers
-and wires them automatically.
+A configurable Apache Beam ETL pipeline framework in Java 17, running on GCP Dataflow and
+triggered by Apache Airflow. It supports two process types:
+
+- **DATA_SOURCE_DOWNLOAD** — fetches raw data from external sources (API, file, BigQuery),
+  applies per-source transforms (lookup, group-by, sort), validates output, and writes to
+  per-source BQ tables. Entirely configured from a JDBC parameter DB — no code changes for
+  new sources.
+- **REPORT_PROCESSING** — reads downloaded data, applies a chained BigQuery transformation
+  sequence, exports results to GCS files, and sends email with attachments. When `--reportName`
+  is set, runs entirely in the driver JVM (no Dataflow job). Falls back to a generic
+  source → transform chain → sink Beam pipeline when `--reportName` is blank.
 
 ---
 
 ## 2. Mandatory directive — README updates
 
-> **Every code change in this repository MUST be reflected in the README files.**
-> This is not optional. Before committing, update every README that is affected.
-
-### Which README to update
+> **Every code change MUST be reflected in the README files. This is non-negotiable.**
 
 | Type of change | READMEs to update |
 |---|---|
-| New transform added | `beam-transforms/README.md` (add to table), root `README.md` (Built-in transforms table) |
-| New source or sink | `beam-io/README.md` (update table and SourceRouter/SinkRouter sections) |
-| New utility class | `beam-utils/README.md` (add to Utilities table with description) |
-| New pipeline option (flag) | `beam-core/README.md` (Adding a new flag section), root `README.md` (config table) |
-| Change to pipeline assembly | `beam-runner/README.md` (PipelineFactory section) |
-| New module added | Root `README.md` (Module structure section), parent `pom.xml` `<modules>` |
-| Any architectural change | Root `README.md` (Architecture section) |
-| Change to serialization contract | `beam-core/README.md` (Serialization rules table) |
-| Change to build or run steps | `beam-runner/README.md` (Building, Running sections) |
+| New transform | `beam-transforms/README.md` + root `README.md` |
+| New source or sink connector | `beam-io/README.md` |
+| New utility class | `beam-utils/README.md` |
+| New pipeline option / CLI flag | `beam-core/README.md` + root `README.md` |
+| Change to pipeline assembly logic | `beam-runner/README.md` |
+| New module | Root `README.md` (module structure + dependency diagram) |
+| Any architectural change | Root `README.md` + `WALKTHROUGH.md` (update the relevant diagram) |
+| New DB table or column | `beam-utils/README.md` (DDL section) + root `README.md` |
+| New model class | `beam-core/README.md` (model table) + this file (section 4 file map) |
 
-### The update rule in plain terms
-
-If you add a class → describe it in the module's README.
-If you add a flag → add it to the config table in root README.
-If you change how something works → update the section that describes it.
-If you're unsure which README → update all that mention the affected area.
-If a README becomes wrong due to your change → fix it, do not leave it stale.
+If you add a class → describe it.
+If you add a flag → add it to the config table.
+If you change behavior → update the section that describes it.
+If a README becomes wrong → fix it. Do not leave it stale.
 
 ---
 
 ## 3. File reading order — fastest path to understanding
 
-To understand this codebase from scratch, read these files in this order:
+Read in this order for a complete mental model:
 
 ```
-1.  beam-core/.../options/FrameworkOptions.java       — all CLI flags; the config contract
-2.  beam-core/.../transform/BeamTransform.java         — the SPI interface; the extension contract
-3.  beam-runner/.../runner/PipelineFactory.java        — how the pipeline is assembled end-to-end
-4.  beam-runner/.../runner/Main.java                   — the entry point; how options become a run
-5.  beam-core/.../transform/TransformRegistry.java     — how transforms are discovered at startup
-6.  beam-io/.../source/SourceRouter.java               — how source type maps to a connector
-7.  beam-io/.../sink/SinkRouter.java                   — how sink type maps to a connector
-8.  beam-transforms/.../FilterNullsTransform.java      — simplest real transform; the pattern to follow
-9.  beam-transforms/.../MaskPiiTransform.java          — transform with runtime config from options
-10. beam-transforms/.../EnrichFromExternalApiTransform.java — @Setup/@Teardown lifecycle pattern
-11. beam-core/.../retry/RetryingDoFn.java              — how DLQ routing works element-by-element
-12. beam-utils/.../CalendarUtils.java                  — the stubs that need implementation
+1.  WALKTHROUGH.md                                    — UML diagrams + execution flows (read this first)
+2.  beam-core/.../options/FrameworkOptions.java       — all CLI flags; the config contract
+3.  beam-runner/.../runner/Main.java                  — entry point; how process type routes
+4.  beam-runner/.../runner/DataSourcePipelineFactory  — DATA_SOURCE_DOWNLOAD orchestration
+5.  beam-runner/.../runner/ReportPipelineFactory      — REPORT_PROCESSING orchestration
+6.  beam-core/.../transform/BeamTransform.java        — SPI interface; the extension contract
+7.  beam-runner/.../runner/PipelineFactory.java       — legacy REPORT_PROCESSING (transform chain)
+8.  beam-utils/.../db/ParameterRepository.java        — how source config is loaded from DB
+9.  beam-utils/.../db/ReportRepository.java           — how report config is loaded from DB
+10. beam-io/.../io/source/SourceRouter.java            — source type → connector mapping
+11. beam-runner/.../runner/SourceTransformChainAssembler — LOOKUP/GROUP_BY/SORT_BY assembly
+12. beam-io/.../io/report/BigQueryJobService.java      — how BQ jobs run for reports
+13. beam-io/.../io/status/ProcessStatusAdapter.java    — status tracking interface
 ```
 
 ---
 
 ## 4. Complete file map
 
-Every source file in the project, one line each:
+Every source file, one line each.
 
 ### beam-core — contracts only, no GCP code
 
 ```
-options/FrameworkOptions.java          All CLI flags. Every pipeline option lives here.
-options/SourceType.java                Enum: GCS | BQ | PUBSUB
-options/SinkType.java                  Enum: GCS | BQ | PUBSUB
-options/RetryPolicyType.java           Enum: NONE | FIXED | EXPONENTIAL
-options/WriteDispositionType.java      Enum: APPEND | TRUNCATE
+options/FrameworkOptions.java         All CLI flags. Every pipeline option. Read this first.
+options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCESSING
+options/SourceType.java               Enum: GCS | BQ | PUBSUB | API | FILE
+options/SinkType.java                 Enum: GCS | BQ | PUBSUB
+options/RetryPolicyType.java          Enum: NONE | FIXED | EXPONENTIAL
+options/WriteDispositionType.java     Enum: APPEND | TRUNCATE
 
-transform/BeamTransform.java           SPI interface. Defines name(), toComposite(). Has SUCCESS_TAG and DEAD_LETTER_TAG.
-transform/TransformRegistry.java       Loads BeamTransform impls via ServiceLoader. resolve(chainSpec) → List<BeamTransform>.
+transform/BeamTransform.java          SPI interface. name() + toComposite(). SUCCESS_TAG + DEAD_LETTER_TAG.
+transform/TransformRegistry.java      ServiceLoader discovery. resolve(chainSpec) → List<BeamTransform>.
 
-retry/RetryPolicy.java                 Interface: shouldRetry(attempt, cause), delayMs(attempt). Delay capped at 200ms.
-retry/ExponentialRetryPolicy.java      Exponential back-off, ThreadLocalRandom jitter, hard 200ms cap.
-retry/FixedRetryPolicy.java            Fixed delay, also capped at 200ms.
-retry/RetryingDoFn.java                DoFn wrapping a SerializableFunction with retry + DLQ routing via TupleTag.
+retry/RetryPolicy.java                Interface: shouldRetry(attempt, cause), delayMs(attempt).
+retry/ExponentialRetryPolicy.java     Exponential back-off, ThreadLocalRandom jitter, 200ms cap.
+retry/FixedRetryPolicy.java           Fixed delay, 200ms cap.
+retry/RetryingDoFn.java               Generic retry + DLQ routing via TupleTag.
 
-model/FailedRecord.java                DLQ envelope. @DefaultCoder(SerializableCoder.class). Has of() and ofRaw() factories.
-model/Schemas.java                     Shared constants. RAW_JSON = single-field Schema for GCS/PubSub sources.
+model/FailedRecord.java               DLQ envelope. @DefaultCoder(SerializableCoder.class).
+model/Schemas.java                    RAW_JSON schema constant.
+model/CheckpointRecord.java           Checkpoint row: job_run_id, datasource, state, etc.
+model/CheckpointState.java            Enum: STARTED_ACCESSING | FINISHED_ACCESSING | FAILED_DOWNLOADING
+
+-- DATA_SOURCE_DOWNLOAD models --
+model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config.
+model/ApiSourceConfig.java            REST API config: endpoint, auth, pagination.
+model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header.
+model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map.
+model/OutputConfig.java               Per-source output: BQ or GCS, write mode.
+model/QueryConfig.java                Query template + paramMappings for token injection.
+model/SourceTransformConfig.java      One transform step: GROUP_BY | SORT_BY | LOOKUP.
+model/AggregationConfig.java          SUM/COUNT/AVG/MIN/MAX per field (used by GROUP_BY).
+model/LookupConfig.java               Lookup table config: BQ or JDBC source, key fields.
+model/ValidationConfig.java           Post-fetch validation: header check, row count, BnC rules.
+model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
+model/ProcessStatusRecord.java        Status row with Builder. pending()/pendingReport()/completed()/failed().
+
+-- REPORT_PROCESSING models --
+model/ReportConfig.java               Full report config assembled from 6 DB tables.
+model/ReportDatasourceRef.java        Required DS for a report + transform alias.
+model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
+model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
+model/ReportOutputConfig.java         File output: CSV/JSON, GCS path, prefix, suffix.
+model/ReportEmailConfig.java          Email: to, cc, subject/body templates with tokens.
 ```
 
-### beam-io — connectors
+### beam-io — connectors and I/O adapters
 
 ```
-source/SourceRouter.java               Stateless factory. switch(sourceType) → source PTransform.
-source/BigQuerySourceTransform.java    Extends PTransform<PBegin,PCollection<Row>>. Reads BQ table or SQL query.
-source/GcsSourceTransform.java         Extends PTransform<PBegin,PCollection<Row>>. Reads GCS glob as JSON lines.
-source/PubSubSourceTransform.java      Extends PTransform<PBegin,PCollection<Row>>. Reads Pub/Sub subscription.
+source/SourceRouter.java              Stateless factory: routeByOptions() + routeFromConfig().
+source/BigQuerySourceTransform.java   BigQueryIO.read() with typed schema.
+source/GcsSourceTransform.java        GCS glob → newline-delimited JSON rows.
+source/PubSubSourceTransform.java     Pub/Sub subscription → streaming rows.
+source/ApiSourceAdapter.java          Pure HTTP adapter: auth, PAGE_NUMBER/CURSOR/OFFSET pagination.
+source/ApiSourceTransform.java        Beam wrapper for ApiSourceAdapter. @Setup/@Teardown for HttpClient.
+source/FileSourceAdapter.java         CSV (Commons CSV) + Excel (Apache POI) from GCS bytes.
+source/FileSourceTransform.java       Beam wrapper for FileSourceAdapter.
 
-sink/SinkRouter.java                   Stateless factory. switch(sinkType) → sink PTransform.
-sink/BigQuerySinkTransform.java        Writes PCollection<Row> to BQ. Reads --writeDisposition (TRUNCATE default).
-sink/GcsSinkTransform.java             Writes PCollection<Row> as newline-delimited JSON to GCS.
-sink/PubSubSinkTransform.java          Publishes each Row as a JSON string to a Pub/Sub topic.
-sink/DeadLetterSinkTransform.java      Writes PCollection<FailedRecord> as JSON lines to GCS DLQ path.
+sink/SinkRouter.java                  Stateless factory: route(data, options).
+sink/BigQuerySinkTransform.java       Writes PCollection<Row> to BQ. Returns WriteResult.
+sink/GcsSinkTransform.java            Writes PCollection<Row> as newline-delimited JSON.
+sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
+sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
 
-util/JsonUtils.java                    Shared Row→JSON serializer. Handles types correctly (not everything quoted).
+checkpoint/CheckpointAdapter.java         Interface: write(record), getLatest(jobRunId, source, period).
+checkpoint/BigQueryCheckpointAdapter.java BQ streaming insert + interactive query.
+
+status/ProcessStatusAdapter.java          Interface: write(record), getLatest(), queryRowCount(), querySum().
+status/BigQueryProcessStatusAdapter.java  BQ-backed: streaming inserts + interactive queries for BnC.
+
+email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
+email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
+
+report/BigQueryJobService.java        Driver-JVM BQ jobs: runQueryToTable(), exportToCsv(), exportToJson().
+
+util/JsonUtils.java                   Row → JSON with correct type handling.
 ```
 
 ### beam-utils — stateless helpers, no pipeline graph code
 
 ```
-BigQuerySchemaUtils.java    Fetch real BQ Schema at pipeline-build time. fetchBeamSchema(), tableExists(), fetchRowCount().
-GcsUtils.java               GCS operations for driver JVM: pathHasFiles(), listFiles(), writeTextFile(), deletePrefix().
-SecretManagerUtils.java     Fetch secrets from GCP Secret Manager by ID. Never store secret values in options.
-RowValidationUtils.java     Row validators for use inside DoFns: requireFields(), matchesPattern(), inRange(), oneOf().
-MetricsUtils.java           Factory for consistently-named Beam counters/distributions: transformCounter(), pipelineDlqTotal().
-CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyOffset(), businessDaysInRange(). Implement these.
-DateUtils.java              Run date resolution, formatting (ISO/compact/display), partitionedPath(), shardedTable().
+BigQuerySchemaUtils.java    fetchBeamSchema(), tableExists(), fetchRowCount(). Call in driver JVM only.
+GcsUtils.java               pathHasFiles(), listFiles(), writeTextFile(), readTextFile(), readBytes(), deletePrefix().
+SecretManagerUtils.java     fetchSecret(secretId). Never log result. Never store in options value.
+RowValidationUtils.java     requireFields(), matchesPattern(), inRange(), oneOf(). Thread-safe.
+MetricsUtils.java           transformCounter(), pipelineDlqTotal(). Consistent naming for Dataflow UI.
+CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyOffset(). Must be implemented.
+DateUtils.java              resolveRunDate(), partitionedPath(), shardedTable(), toDisplayString().
+QueryParameterResolver.java resolve(template, paramMappings, options). Two-pass: standard then custom tokens.
+
+db/DatabaseAdapter.java         Interface: query(), queryOne(), update(), close().
+db/JdbcDatabaseAdapter.java     JDBC + HikariCP. One pool per instance. Always try-with-resources.
+db/DatabaseAdapterFactory.java  Static factory: reads --paramDb* options, fetches password from Secret Manager.
+db/ParameterRepository.java     Source config queries: validate params, fetchSourceConfigs() with all columns.
+db/ReportRepository.java        Report config queries: fetchReportConfig(), fetchDatasourceOutputTable().
+db/DatabaseException.java       Unchecked wrapper for SQLException.
 ```
 
 ### beam-transforms — pluggable transform implementations
 
 ```
-FilterNullsTransform.java             Token: filter-nulls. Drops rows with any null. Routes dropped to DLQ. Counter metric.
-MaskPiiTransform.java                 Token: mask-pii. SHA-256 hashes fields listed in --piiFields. Configurable at runtime.
-EnrichFromExternalApiTransform.java   Token: enrich-from-api. SAMPLE ONLY — shows @Setup/@Teardown for HTTP clients.
+FilterNullsTransform.java           Token: filter-nulls. Drops null rows → DLQ. Counter metric.
+MaskPiiTransform.java               Token: mask-pii. SHA-256 hashes --piiFields list.
+EnrichFromExternalApiTransform.java Token: enrich-from-api. SAMPLE — shows @Setup/@Teardown pattern.
 
-META-INF/services/com.yourco.beam.transform.BeamTransform   SPI manifest — one class name per line.
+source/GroupByTransform.java        MapElements → GroupByKey → AggregateDoFn. SUM/COUNT/AVG/MIN/MAX.
+source/SortByTransform.java         Per-bundle sort (@StartBundle/@FinishBundle). NOT global. Logs warning.
+source/LookupEnrichTransform.java   Left-join via PCollectionView<Map<String,String>> (key → JSON blob).
+
+side/SideEffectEmailTransform.java  Sends SMTP email per Row. No attachments. Best-effort (logs on fail).
+side/SideEffectDbWriteTransform.java Inserts each Row into a JDBC table.
+
+META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 ```
 
-### beam-runner — entry point only
+### beam-runner — entry point and orchestrators
 
 ```
-Main.java             Parses CLI args → PipelineFactory → pipeline.run() → waitUntilFinish() for batch only.
-PipelineFactory.java  Assembles graph: source → transform loop → sink + DLQ flatten. Wires retry policy.
+Main.java                       Parses CLI → routes by processType + reportName.
+PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink.
+DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches, post-pipeline validation.
+ReportPipelineFactory.java      REPORT_PROCESSING (DB-configured): driver-JVM BQ jobs + email.
+SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
+SmtpReportEmailAdapter.java     SMTP impl of ReportEmailAdapter. MimeMultipart for attachments.
 ```
 
 ---
@@ -150,288 +208,347 @@ PipelineFactory.java  Assembles graph: source → transform loop → sink + DLQ 
 ```
 beam-runner → beam-core, beam-io, beam-utils, beam-transforms
 beam-transforms → beam-core, beam-utils
-beam-io → beam-core
+beam-io → beam-core   (NOT beam-utils, NOT beam-transforms)
 beam-utils → beam-core
 beam-core → (nothing internal)
 ```
 
-**Never violate this.** If `beam-core` imports from `beam-io`, you have introduced a circular dependency. If `beam-utils` imports from `beam-transforms`, you have coupled utilities to business logic. The compiler will catch circular deps; architectural violations it will not.
+**Violations**: if `beam-io` imports from `beam-utils`, it breaks this rule. The compiler will
+not catch it — but it creates a circular risk and violates the isolation contract.
+`SmtpReportEmailAdapter` is in `beam-runner` (not `beam-io`) precisely because it needs
+`SecretManagerUtils` from `beam-utils` and `angus-mail` from `beam-transforms`.
 
-### The wire type
+### Wire type
 
-All transforms communicate via `PCollection<Row>` with a declared `Schema`.
-`Row` is Beam's schema-aware type. Every transform input and output must call `.setRowSchema()`.
-Do not use raw bytes, Strings, or Avro as the inter-transform wire format.
+All Beam transforms communicate via `PCollection<Row>` with a declared `Schema`.
+Call `.setRowSchema()` on every output. Do not use raw bytes, Strings, or Avro.
 
-### The output contract
+### Output contract (BeamTransform SPI)
 
-Every `BeamTransform.toComposite()` returns a `PTransform<PCollection<Row>, PCollectionTuple>`.
-The tuple MUST contain outputs for exactly these two tags (defined as constants on `BeamTransform`):
+Every `BeamTransform.toComposite()` returns `PTransform<PCollection<Row>, PCollectionTuple>`.
+The tuple MUST include both:
+- `BeamTransform.SUCCESS_TAG` — `TupleTag<Row>`
+- `BeamTransform.DEAD_LETTER_TAG` — `TupleTag<FailedRecord>`
 
-```java
-BeamTransform.SUCCESS_TAG      TupleTag<Row>          — successfully processed rows
-BeamTransform.DEAD_LETTER_TAG  TupleTag<FailedRecord> — failed rows after all retries
-```
+### Per-source independence (DATA_SOURCE_DOWNLOAD)
 
-`PipelineFactory` collects all `DEAD_LETTER_TAG` outputs, flattens them, and writes to DLQ.
-If your transform cannot produce failures, emit an empty `PCollection<FailedRecord>`:
-```java
-PCollection<FailedRecord> empty = input.getPipeline()
-    .apply(Create.empty(SerializableCoder.of(FailedRecord.class)));
-return PCollectionTuple.of(SUCCESS_TAG, successRows).and(DEAD_LETTER_TAG, empty);
-```
+Sources are **never merged**. Each `SourceConfig` is an independent Beam DAG branch.
+`Flatten.pCollections()` across different sources is **forbidden**.
 
 ---
 
-## 6. Serialization rules — violations fail silently at build time and loudly at runtime
-
-Beam serializes every `DoFn` instance and ships it to remote Dataflow workers.
-Violations cause `NotSerializableException` at runtime, not at compile time.
+## 6. Serialization rules
 
 | Rule | Correct | Wrong |
 |---|---|---|
 | DoFn class type | Named `static final` inner class | Anonymous class or lambda |
-| DoFn field types | All `Serializable` (String, int, List, etc.) | Non-serializable objects (HttpClient, Connection) |
-| Non-serializable resources | Declare `transient`, create in `@Setup`, close in `@Teardown` | Hold in a non-transient field |
-| TupleTag instances | `static final` on the class | Created inline in `processElement` |
-| Function interfaces | `SerializableFunction<A,B>` (Beam's) | `java.util.function.Function<A,B>` |
-| Lambda captures | Capture only serializable local variables | Capture `this` of an outer non-serializable class |
-
-See `EnrichFromExternalApiTransform` for a fully annotated example of the `@Setup`/`@Teardown` pattern.
+| DoFn field types | All `Serializable` (String, int, List, Map) | Non-serializable (HttpClient, Connection) |
+| Non-serializable resources | `transient` field, create in `@Setup`, close in `@Teardown` | Non-transient field |
+| TupleTag instances | `static final` on the DoFn class | Created inside `@ProcessElement` |
+| Function interfaces | `SerializableFunction<A,B>` (Beam) | `java.util.function.Function<A,B>` |
+| Models in `PCollection` | `@DefaultCoder(SerializableCoder.class)` on the class | No coder annotation |
 
 ---
 
 ## 7. How to make each type of change
 
-### Add a new transform
+### Add a new data source type (DATA_SOURCE_DOWNLOAD)
 
-1. Create class in `beam-transforms/src/main/java/com/yourco/beam/transforms/`
-2. Implement `BeamTransform` — `name()` returns the CLI token, `toComposite()` returns the `PTransform`
-3. Use only named `static final` inner classes for composites and DoFns
-4. Output to `SUCCESS_TAG` and `DEAD_LETTER_TAG` in every code path
-5. Call `.setRowSchema()` on the success output inside the composite's `expand()`
-6. Add the fully-qualified class name to `beam-transforms/src/main/resources/META-INF/services/com.yourco.beam.transform.BeamTransform`
-7. **Update `beam-transforms/README.md`** — add a row to the Built-in transforms table
-8. **Update root `README.md`** — add a row to the Built-in transforms reference table
+1. Insert a row in `source_config` with `source_type = MY_TYPE`
+2. Add `MY_TYPE` to `SourceType` enum in `beam-core`
+3. Create `MySourceAdapter` (pure Java, no Beam) in `beam-io/source/`
+4. Create `MySourceTransform` (thin Beam wrapper) in `beam-io/source/`
+5. Add a case to `SourceRouter.routeFromConfig()` switch
+6. Add required config fields to `SourceConfig` model and `ParameterRepository`
+7. Update `beam-io/README.md` and root `README.md`
 
-### Add a new pipeline option (CLI flag)
+### Add a new per-source transform type
 
-1. Add getter + setter pair in `beam-core/.../options/FrameworkOptions.java`
-2. Annotate with `@Description("...")` — describe what it does and give an example value
-3. Add `@Default.String/Integer/Enum(...)` if it has a sensible default; `@Validation.Required` if mandatory
-4. Read it in the transform or utility via `options.getMyNewFlag()`
-5. **Update `beam-core/README.md`** — add to the Adding a new flag section
-6. **Update root `README.md`** — add to the How to configure behaviour table
+1. Create the transform class in `beam-transforms/source/` extending `PTransform<PCollection<Row>, PCollection<Row>>`
+2. Add the type constant to `SourceTransformConfig` (e.g., `public static final String MY_TYPE = "MY_TYPE"`)
+3. Add a case to `SourceTransformChainAssembler.assemble()` switch
+4. Add config fields to `SourceTransformConfig` and its JSON parsing in `ParameterRepository.parseSourceTransforms()`
+5. Update `beam-transforms/README.md`
 
-### Add a new source connector
+### Add a new report transformation step type
 
-1. Create class in `beam-io/src/main/java/com/yourco/beam/io/source/`
-2. Extend `PTransform<PBegin, PCollection<Row>>`
-3. Use `Schemas.RAW_JSON` for raw text sources, or `BigQuerySchemaUtils.fetchBeamSchema()` for typed sources
-4. Call `.setRowSchema()` on the returned `PCollection<Row>`
-5. Use named `static final SerializableFunction` — never anonymous lambdas — for `MapElements.via()`
-6. Add a value to `SourceType` enum in `beam-core`
-7. Add a case to `SourceRouter.route()` switch expression
-8. Add required flags to `FrameworkOptions`
-9. **Update `beam-io/README.md`** — update the connectors table and SourceRouter section
-10. **Update root `README.md`** — update the source config flags table
+The report transformation chain uses raw BQ SQL — no new Java code needed.
+Add a row to `report_transformation_config` with a new `query_template` referencing any alias
+in the registry. Custom tokens go in `query_params_json`.
 
-### Add a new utility class
+### Add a new BeamTransform (pluggable, SPI-registered)
 
-1. Create class in `beam-utils/src/main/java/com/yourco/beam/utils/`
-2. Make it a `final` class with a `private` constructor — all methods static
-3. No Beam pipeline graph code — no `PTransform`, no `DoFn`, no `Pipeline`
-4. If called from a `DoFn`, ensure every method called inside `@ProcessElement` is thread-safe and stateless
-5. **Update `beam-utils/README.md`** — add to the Utilities table
+1. Create class implementing `BeamTransform` in `beam-transforms/`
+2. Use named `static final` inner classes for composite and DoFn
+3. Output to both `SUCCESS_TAG` and `DEAD_LETTER_TAG`
+4. Add to `META-INF/services/com.yourco.beam.transform.BeamTransform`
+5. Update `beam-transforms/README.md`
 
-### Add a new module
+### Add a new CLI flag
 
-1. Create directory `beam-newmodule/` with `pom.xml`, `src/main/java/`, `src/test/java/`
-2. Add `<module>beam-newmodule</module>` to root `pom.xml` `<modules>` in the correct dependency order
-3. Add `<dependency>` entry to root `pom.xml` `<dependencyManagement>`
-4. Add the dependency to whichever module needs it
-5. Create `beam-newmodule/README.md`
-6. **Update root `README.md`** — add to Module structure section and dependency diagram
+1. Add getter + setter in `FrameworkOptions.java` with `@Description`
+2. Add `@Default.*` if it has a sensible default; `@Validation.Required` if mandatory
+3. Update `beam-core/README.md` and root `README.md`
 
-### Implement a CalendarUtils stub
+### Add a new report type
 
-1. Open `beam-utils/src/main/java/com/yourco/beam/utils/CalendarUtils.java`
-2. Replace the `throw new UnsupportedOperationException(...)` body with real logic
-3. The Javadoc in each method describes what it should do and suggests integration approaches
-4. Once implemented, `CalendarUtils.resolveEffectiveDate(options)` and `DateUtils` work automatically
-5. **Update `beam-utils/README.md`** — remove the "stubs" label, describe the integration
+1. Insert rows in the 6 report DB tables (see DDL in `README.md`)
+2. No Java code changes needed unless a new preprocessing step type is required
+3. For new preprocessing types, add a `case` in `ReportPipelineFactory.runPreprocessing()`
 
 ---
 
-## 8. How the pipeline runs — the full execution path
-
-Understanding this is essential before changing `PipelineFactory` or `Main`.
+## 8. DATA_SOURCE_DOWNLOAD — execution path
 
 ```
-Step 1: Main.main(args)
-        PipelineOptionsFactory.fromArgs(args).withValidation().as(FrameworkOptions.class)
-        → produces a typed FrameworkOptions object
-        → validation fails fast here if @Validation.Required flags are missing
-
-Step 2: PipelineFactory.assemble(options)
-        → Pipeline.create(options)                   — creates an empty pipeline
-        → SourceRouter.route(pipeline, options)      — adds source node to graph, returns PCollection<Row>
-        → TransformRegistry.load()                   — ServiceLoader discovers all registered BeamTransforms
-        → registry.resolve(options.getTransformChain()) — splits "a,b,c" → [transformA, transformB, transformC]
-
-Step 3: Transform loop (for each transform in chain)
-        → transform.toComposite(options)             — creates the PTransform
-        → current = current.apply(name, composite)  — adds node to graph; returns PCollectionTuple
-        → deadLetterOutputs.add(result.get(DEAD_LETTER_TAG))
-        → current = result.get(SUCCESS_TAG)          — next transform sees the success path only
-
-Step 4: SinkRouter.route(current, options)           — adds sink node to graph
-
-Step 5: DLQ wiring (if deadLetterOutputs is not empty and --deadLetterSink is set)
-        → PCollectionList.of(deadLetterOutputs).apply(Flatten.pCollections())
-        → allFailures.apply(new DeadLetterSinkTransform(options))
-
-Step 6: pipeline.run()                               — NOW data actually moves
-        DirectRunner  → runs in this JVM
-        DataflowRunner → serialises graph, submits to GCP Dataflow, workers download fat JAR
-
-Step 7: result.waitUntilFinish()   — only for batch (GCS, BQ sources)
-        PUBSUB source → streaming, never blocks
+Main.runDataSourceDownload(options)
+│
+├─ DataSourcePipelineFactory.assemble(options)
+│   ├─ DatabaseAdapterFactory.create(options)          JDBC connection pool (open)
+│   ├─ ParameterRepository.allRequiredParametersExist  fail fast if config missing
+│   ├─ ParameterRepository.fetchSourceConfigs()        load all SourceConfig rows
+│   ├─ db.close()
+│   │
+│   └─ for each SourceConfig:
+│       ├─ BigQueryCheckpointAdapter.getCheckpoint()   skip if FINISHED_ACCESSING
+│       ├─ BigQueryCheckpointAdapter.write(STARTED)
+│       ├─ BigQueryProcessStatusAdapter.write(PENDING)
+│       ├─ SourceRouter.routeFromConfig()              API / FILE / BQ → PCollection<Row>
+│       │   └─ QueryParameterResolver.resolve()        inject {periodStart}, custom tokens
+│       ├─ SourceTransformChainAssembler.assemble()    LOOKUP → GROUP_BY → SORT_BY chain
+│       └─ wirePerSourceSink()                         BigQueryIO.writeTableRows() per source
+│
+├─ Pipeline assembled. No data has moved.
+├─ pipeline.run()                                      submit to Dataflow (or DirectRunner)
+├─ result.waitUntilFinish()
+│
+└─ DataSourcePipelineFactory.runPostPipelineSteps(state, error)
+    └─ for each SourceConfig that ran:
+        ├─ ProcessStatusAdapter.queryRowCount(outputTable)
+        ├─ ValidationConfig checks (row count bounds, BnC SUM checks)
+        ├─ write COMPLETED / VALIDATION_FAILED / FAILED to process_status
+        └─ write FINISHED_ACCESSING / FAILED_DOWNLOADING to pipeline_checkpoints
 ```
-
-Nothing in steps 1–5 processes any data. They only describe the computation graph.
 
 ---
 
-## 9. SPI registration — how transforms are discovered
+## 9. REPORT_PROCESSING — execution path (DB-configured mode)
 
-The framework uses Java's `ServiceLoader` to discover `BeamTransform` implementations.
-This means you NEVER need to modify `PipelineFactory`, `TransformRegistry`, or `Main`
-when adding a new transform. Only the manifest file changes.
+Triggered when `--reportName` is set. Runs entirely in driver JVM — **no Beam pipeline**.
 
-**The manifest file (one class name per line):**
 ```
-beam-transforms/src/main/resources/META-INF/services/com.yourco.beam.transform.BeamTransform
+Main.runReportProcessing(options)
+│
+└─ ReportPipelineFactory.execute(options)
+    ├─ DatabaseAdapterFactory.create()
+    ├─ ReportRepository.fetchReportConfig()            load all 6 report tables
+    ├─ db.close()
+    ├─ BigQueryProcessStatusAdapter.write(PENDING)
+    │
+    ├─ Phase 1: Preprocessing (optional)
+    │   └─ for each ReportPreprocessingStep (by step_order):
+    │       └─ BigQueryJobService.runQueryToTable(resolvedSQL, outputTable)
+    │
+    ├─ Phase 2: Datasource availability check
+    │   └─ for each required ReportDatasourceRef:
+    │       └─ ProcessStatusAdapter.getLatest() → must be COMPLETED or FAIL
+    │
+    ├─ Phase 3: Build alias registry
+    │   └─ ReportRepository.fetchDatasourceOutputTable() × N
+    │       → alias → "project.dataset.table"
+    │
+    ├─ Phase 4: Transformation chain
+    │   └─ for each ReportTransformStep (by step_order):
+    │       ├─ resolveAliasTokens({alias} → `project.dataset.table`)
+    │       ├─ QueryParameterResolver.resolve(sql, step.queryParams, options)
+    │       ├─ BigQueryJobService.runQueryToTable(resolvedSQL, step.outputBqTable)
+    │       └─ aliasRegistry.put(step.outputAlias, step.outputBqTable)
+    │
+    ├─ Phase 5: File export
+    │   └─ for each ReportOutputConfig:
+    │       ├─ BigQueryJobService.exportToCsv() or exportToJson()
+    │       └─ record ExportedFile(gcsUri, fileName, contentType)
+    │
+    ├─ Phase 6: Email (optional)
+    │   ├─ GcsUtils.readBytes(gcsUri) for each exported file
+    │   ├─ resolve subject/body templates ({reportName}, {periodId}, etc.)
+    │   └─ SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
+    │
+    └─ BigQueryProcessStatusAdapter.write(COMPLETED)
+       or write(FAILED) if any phase threw
 ```
-
-**Current contents:**
-```
-com.yourco.beam.transforms.FilterNullsTransform
-com.yourco.beam.transforms.MaskPiiTransform
-com.yourco.beam.transforms.EnrichFromExternalApiTransform
-```
-
-**Critical build note:** the `maven-shade-plugin` in `beam-runner/pom.xml` uses
-`ServicesResourceTransformer`. This merges all `META-INF/services` files from all
-JARs on the classpath into one combined file. If you add a new transform module,
-add it as a Maven dependency in `beam-runner/pom.xml` and the merger handles the rest.
 
 ---
 
-## 10. Things you must never do
+## 10. Query token resolution — three layers in order
 
-| Never do this | Do this instead |
+For both DATA_SOURCE_DOWNLOAD (BQ queries) and REPORT_PROCESSING (transform chain):
+
+```
+Layer 1 — Alias tokens (REPORT_PROCESSING only)
+    resolveAliasTokens(template, aliasRegistry)
+    {trades} → `project.dataset.trades_output`
+
+Layer 2 — Standard tokens (both process types)
+    QueryParameterResolver.resolve() — pass 1
+    {periodStart} → options.getPeriodStart()
+    {periodEnd}   → options.getPeriodEnd()
+    {periodId}    → options.getPeriodId()
+    {runDate}     → DateUtils.resolveRunDate(options).toString()
+
+Layer 3 — Custom tokens (both process types, from query_params_json column)
+    QueryParameterResolver.resolve() — pass 2
+    {exchange}  → "NYSE"    (from query_params_json)
+    {threshold} → "10000"   (from query_params_json)
+    Note: param values may reference standard tokens — those are resolved first.
+
+Any number of custom tokens are supported. Unknown tokens are left unchanged.
+```
+
+---
+
+## 11. Things you must never do
+
+| Never | Do instead |
 |---|---|
-| Anonymous class or lambda as a DoFn | Named `static final` inner class |
-| `java.util.function.Function` as a DoFn field | `org.apache.beam.sdk.transforms.SerializableFunction` |
-| `Thread.sleep()` for more than 200ms inside a DoFn | Cap at 200ms or use retry-topic pattern |
-| Import from `beam-io` or `beam-transforms` inside `beam-core` | `beam-core` has no internal dependencies |
-| Import from `beam-io` inside `beam-utils` | `beam-utils` depends only on `beam-core` |
-| Hold secrets as pipeline options values | Pass the Secret Manager ID; fetch the value at runtime |
-| Call `BigQuerySchemaUtils` or `GcsUtils` inside a `DoFn` `@ProcessElement` | Call in driver JVM (constructors/PipelineFactory) |
-| Create a `TupleTag` inside `@ProcessElement` | `static final` fields on the DoFn class |
-| Modify `PipelineFactory` to hardcode a new transform | Register via SPI manifest |
-| Call `result.waitUntilFinish()` for streaming pipelines | Check source type first (`Main.isBatchSource()`) |
-| Commit version changes only in child `pom.xml` | All versions in parent `pom.xml` `<dependencyManagement>` |
-| Bypass `@DefaultCoder` on custom types used in `PCollection` | Annotate with `@DefaultCoder(SerializableCoder.class)` |
-| Leave a README out of date after a code change | Update the README in the same commit |
+| Anonymous DoFn (lambda or anon class) | Named `static final` inner class |
+| `java.util.function.Function` as DoFn field | `SerializableFunction` (Beam) |
+| Import from `beam-utils` or `beam-transforms` inside `beam-io` | Keep `beam-io → beam-core` only |
+| Import from `beam-io` inside `beam-utils` | `beam-utils → beam-core` only |
+| Merge per-source outputs with `Flatten.pCollections()` | Keep each source as an independent branch |
+| Hold secrets in FrameworkOptions values | Pass Secret Manager ID, fetch value at runtime |
+| Call `BigQuerySchemaUtils`, `GcsUtils`, `ReportRepository` inside a DoFn | Call in driver JVM only |
+| Create `TupleTag` inside `@ProcessElement` | `static final` field on the DoFn |
+| Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
+| Call `result.waitUntilFinish()` for streaming | Check source type first |
+| Leave READMEs stale after a code change | Update in the same commit |
+| Add `query_params_json` custom tokens that shadow alias names | Use distinct token names |
+| Put SMTP credentials in pipeline options | Use `--smtpPasswordSecretId` + Secret Manager |
 
 ---
 
-## 11. Retry and dead-letter pattern
+## 12. ProcessStatusAdapter — status tracking contract
 
-The DLQ system works at the element level. Every transform that can fail routes
-failures to `DEAD_LETTER_TAG`. `PipelineFactory` collects all dead-letter streams,
-flattens them, and writes to GCS via `DeadLetterSinkTransform`.
+One `process_status` BQ row per source (DATA_SOURCE_DOWNLOAD) or per report (REPORT_PROCESSING).
 
 ```
-element enters transform
-    │
-    ├─ success path ──────────────────────────────────────────── SUCCESS_TAG → next transform
-    │
-    └─ failure path
-           │
-           ├─ RetryPolicy.shouldRetry(attempt, exception)?
-           │       yes → wait RetryPolicy.delayMs(attempt) (≤200ms) → retry
-           │       no  → FailedRecord.of(row, exception, attemptCount)
-           │                    └──────────────────────────── DEAD_LETTER_TAG → DLQ sink
-```
+ProcessStatusAdapter.write(ProcessStatusRecord.pending(...))   — before data moves
+ProcessStatusAdapter.write(ProcessStatusRecord.completed(...)) — success + validation passed
+ProcessStatusAdapter.write(ProcessStatusRecord.validationFailed(...)) — BnC/row check failed
+ProcessStatusAdapter.write(ProcessStatusRecord.failed(...))    — exception thrown
 
-`RetryingDoFn` implements this pattern generically. Transforms use it by passing a
-`SerializableFunction<Row, Row>` to `new RetryingDoFn(fn, retryPolicy)`.
+For reports:
+ProcessStatusRecord.pendingReport(jobRunId, processType, reportName, subprocess, periodId, ...)
+    datasource_name = reportName
+    subprocess_name = reportSubprocess
+    process_type    = "REPORT_PROCESSING"
+
+queryRowCount(bqTableRef) — used for row count validation (DATA_SOURCE_DOWNLOAD)
+querySum(bqTableRef, field) — used for BnC validation (DATA_SOURCE_DOWNLOAD)
+getLatest(jobRunId, datasourceName, subprocessName) — used by REPORT_PROCESSING to check DS availability
+    Note: jobRunId=null matches any run — finds the most recent status for that datasource/period
+```
 
 ---
 
-## 12. Calendar and date options for report pipelines
+## 13. BigQueryJobService — BQ job contract
 
-These options are consumed by `CalendarUtils` and `DateUtils` in `beam-utils`:
+Used exclusively in driver JVM (ReportPipelineFactory). Not used in Beam workers.
 
-```
---runDate=2024-01-15      Business date for this run. ISO-8601. Defaults to today UTC.
---calendarName=NYSE        Which holiday calendar to use. DEFAULT = Mon-Fri, no holidays.
---businessDayOffset=-1     Move N business days from runDate. -1 = previous business day (T-1).
-```
-
-`DateUtils.resolveRunDate(options)` — parses `--runDate` or returns today.
-`CalendarUtils.resolveEffectiveDate(options)` — applies the offset using the calendar.
-`CalendarUtils.*` methods are stubs. See `beam-utils/CalendarUtils.java` Javadoc for how to implement.
-
----
-
-## 13. Email and notification options
-
-```
---businessEmail=reports@co.com            Stakeholder / report delivery address
---devErrorEmail=oncall@co.com             Developer / failure alert address
---emailSmtpHost=smtp.gmail.com            SMTP server
---emailSmtpPort=587                       SMTP port
---smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
-```
-
-Fetch the SMTP password at runtime:
 ```java
-String password = SecretManagerUtils.fetchSecret(options.getSmtpPasswordSecretId());
+// Run a query and materialise result to a BQ table
+bqJobService.runQueryToTable(resolvedSql, "project.dataset.table");
+
+// Run a query with no destination (DDL, DML)
+bqJobService.runQuery(resolvedSql);
+
+// Export BQ table to GCS as CSV
+bqJobService.exportToCsv("project.dataset.table", "gs://bucket/path/file.csv", includeHeader);
+
+// Export BQ table to GCS as newline-delimited JSON
+bqJobService.exportToJson("project.dataset.table", "gs://bucket/path/file.json");
 ```
 
-Never log `password`. Never store it in any field. Pass it directly to the SMTP client constructor.
-The Dataflow and Cloud Composer service accounts need `roles/secretmanager.secretAccessor`.
+Table refs use `project.dataset.table` (dot-separated, 3 parts) or `dataset.table` (2 parts).
+All methods block until the BQ job completes. Failures throw `RuntimeException`.
 
 ---
 
-## 14. Build and run reference
+## 14. Email adapter contract
+
+```java
+// Interface (beam-io)
+ReportEmailAdapter.send(subject, body, to, cc, attachments);
+
+// EmailAttachment — InputStream is consumed exactly once by the adapter
+EmailAttachment.csv(inputStream, "report.csv")    // contentType=text/csv
+EmailAttachment.json(inputStream, "report.json")  // contentType=application/json
+
+// Concrete impl (beam-runner — needs jakarta.mail from beam-transforms transitive dep)
+SmtpReportEmailAdapter(options)  // reads --emailSmtpHost, --emailSmtpPort, --smtpPasswordSecretId
+```
+
+To add a different email provider (SendGrid, SES), implement `ReportEmailAdapter` and
+inject it into `ReportPipelineFactory` via constructor.
+
+---
+
+## 15. Checkpoint vs process_status — what each tracks
+
+| Concept | Table | Written by | Read by |
+|---|---|---|---|
+| "Did we start/finish downloading this source?" | `pipeline_checkpoints` | `DataSourcePipelineFactory` | `DataSourcePipelineFactory` (skip logic) |
+| "Did validation pass? How many rows?" | `process_status` | `BigQueryProcessStatusAdapter` | `ReportPipelineFactory` (DS availability check) |
+
+Checkpoints use `STARTED_ACCESSING → FINISHED_ACCESSING / FAILED_DOWNLOADING`.
+Process status uses `PENDING → COMPLETED / VALIDATION_FAILED / FAILED`.
+
+---
+
+## 16. Build and run reference
 
 ```bash
-# Build the fat JAR (from project root)
+# Build fat JAR from project root
 mvn package -pl beam-runner -am -DskipTests
 
-# Run locally
+# Run locally (DirectRunner)
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
-  --runner=DirectRunner --sourceType=GCS --gcsSourcePath=gs://b/in/*.json \
-  --transformChain=filter-nulls --sinkType=GCS --gcsSinkPath=gs://b/out/
+  --runner=DirectRunner \
+  --processType=DATA_SOURCE_DOWNLOAD \
+  --datasourceName=trades \
+  --periodId=2024-01 \
+  --periodStart=2024-01-01 \
+  --periodEnd=2024-01-31 \
+  --paramDbUrl=jdbc:postgresql://localhost:5432/params \
+  --paramDbUser=user \
+  --checkpointBqDataset=pipeline_metadata \
+  --processStatusBqDataset=pipeline_metadata
 
-# Upload to GCS for Dataflow
-gsutil cp beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
-  gs://my-bucket/jars/beam-runner-latest.jar
+# Run REPORT_PROCESSING (DB-configured)
+java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
+  --runner=DirectRunner \
+  --processType=REPORT_PROCESSING \
+  --reportName=daily_trades_report \
+  --reportSubprocess=eod \
+  --periodId=2024-01 \
+  --periodStart=2024-01-01 \
+  --periodEnd=2024-01-31 \
+  --paramDbUrl=jdbc:postgresql://localhost:5432/params \
+  --emailSmtpHost=smtp.gmail.com \
+  --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
 ```
 
 ---
 
-## 15. Key invariants to preserve
+## 17. Key invariants to preserve
 
 1. `beam-core` has zero dependencies on sibling modules — it is the root.
-2. All sources return `PCollection<Row>` with `setRowSchema()` called.
-3. All transforms receive and return `PCollection<Row>` (via `PCollectionTuple`).
-4. The transform chain is dynamic — never hardcoded in `PipelineFactory`.
-5. Dead-letter records are never silently dropped — they route to `DEAD_LETTER_TAG`.
-6. Secrets are never stored in `FrameworkOptions` values — only Secret Manager IDs are.
-7. Every code change is accompanied by a README update.
+2. `beam-io` depends only on `beam-core` — never on `beam-utils` or `beam-transforms`.
+3. All Beam sources return `PCollection<Row>` with `.setRowSchema()` called.
+4. Each `SourceConfig` produces exactly one independent Beam branch — never merged.
+5. `BeamTransform` implementations always output to both `SUCCESS_TAG` and `DEAD_LETTER_TAG`.
+6. Secrets are never stored in `FrameworkOptions` values — only Secret Manager IDs.
+7. `BigQueryJobService`, `GcsUtils`, and `ReportRepository` are driver-JVM only — never inside DoFns.
+8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
+9. Every code change is accompanied by a README update in the same commit.
+10. `process_status` rows are written before and after every source download and every report run.

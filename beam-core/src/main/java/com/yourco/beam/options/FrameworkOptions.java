@@ -94,6 +94,39 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setOverrideDownload(boolean value);
 
     // =========================================================================
+    // REPORT SELECTION (REPORT_PROCESSING — DB-configured reports only)
+    // When --reportName is set, ReportPipelineFactory runs instead of the
+    // generic PipelineFactory. Leave blank to use the legacy transform-chain mode.
+    // =========================================================================
+
+    @Description("Report name as registered in the report_config DB table. "
+                 + "When set together with --processType=REPORT_PROCESSING, "
+                 + "the DB-configured ReportPipelineFactory is used. "
+                 + "Example: daily_trades_report, monthly_pnl_summary")
+    @Default.String("")
+    String getReportName();
+    void setReportName(String value);
+
+    @Description("Report subprocess name. Allows the same report_name to have "
+                 + "multiple variants (e.g. intraday vs eod). Matched against "
+                 + "report_config.report_subprocess in the parameter DB.")
+    @Default.String("default")
+    String getReportSubprocess();
+    void setReportSubprocess(String value);
+
+    @Description("Period start date in ISO-8601 format (YYYY-MM-DD). "
+                 + "Injected into query templates as the {periodStart} token. "
+                 + "Example: 2024-01-01")
+    String getPeriodStart();
+    void setPeriodStart(String value);
+
+    @Description("Period end date in ISO-8601 format (YYYY-MM-DD). "
+                 + "Injected into query templates as the {periodEnd} token. "
+                 + "Example: 2024-01-31")
+    String getPeriodEnd();
+    void setPeriodEnd(String value);
+
+    // =========================================================================
     // PARAMETER DATABASE
     // The parameter DB holds all source configuration (API endpoints, file paths,
     // pagination rules, etc.) keyed by (datasourceName, periodId, subprocessName).
@@ -160,6 +193,27 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     @Default.String("pipeline_checkpoints")
     String getCheckpointBqTable();
     void setCheckpointBqTable(String value);
+
+    // =========================================================================
+    // PROCESS STATUS TABLE
+    // Tracks per-source fetch status and validation results, separate from the
+    // checkpoint table. One row is written per source per pipeline run.
+    // =========================================================================
+
+    @Description("BigQuery dataset for the process status table. "
+                 + "Defaults to the same dataset as the checkpoint table if not set.")
+    @Default.String("pipeline_metadata")
+    String getProcessStatusBqDataset();
+    void setProcessStatusBqDataset(String value);
+
+    @Description("BigQuery table name for per-source process status rows. "
+                 + "Required schema: job_run_id STRING, process_type STRING, datasource_name STRING, "
+                 + "subprocess_name STRING, period_id STRING, period_start STRING, period_end STRING, "
+                 + "status STRING, row_count INT64, error_message STRING, "
+                 + "validation_details STRING, started_at TIMESTAMP, completed_at TIMESTAMP.")
+    @Default.String("process_status")
+    String getProcessStatusBqTable();
+    void setProcessStatusBqTable(String value);
 
     // =========================================================================
     // SOURCE CONFIGURATION

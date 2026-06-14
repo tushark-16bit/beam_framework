@@ -4,11 +4,11 @@ import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.WriteDispositionType;
 import com.google.api.services.bigquery.model.TableRow;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
+import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
 
@@ -26,7 +26,7 @@ import java.util.Objects;
  * <p>The table must already exist ({@code CREATE_NEVER}). For auto-creation,
  * switch to {@code CREATE_IF_NEEDED} and supply a {@code TableSchema}.
  */
-public final class BigQuerySinkTransform extends PTransform<PCollection<Row>, PDone> {
+public final class BigQuerySinkTransform extends PTransform<PCollection<Row>, WriteResult> {
 
     private static final long serialVersionUID = 1L;
 
@@ -42,7 +42,7 @@ public final class BigQuerySinkTransform extends PTransform<PCollection<Row>, PD
     }
 
     @Override
-    public PDone expand(PCollection<Row> input) {
+    public WriteResult expand(PCollection<Row> input) {
         return input
                 .apply("Row-to-TableRow", MapElements
                         .into(TypeDescriptor.of(TableRow.class))

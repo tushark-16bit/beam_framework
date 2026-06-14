@@ -24,8 +24,10 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `DatabaseAdapter` | Interface for relational DB operations: `query`, `queryOne`, `update`, `close` |
 | `JdbcDatabaseAdapter` | JDBC + HikariCP implementation. One pool per instance; always use try-with-resources |
 | `DatabaseAdapterFactory` | Static factory: reads `--paramDb*` options, fetches password from Secret Manager |
-| `ParameterRepository` | Business queries: validate required params, fetch `SourceConfig` list from `source_config` table |
+| `ParameterRepository` | Business queries: validate required params, fetch `SourceConfig` list with full per-source config |
+| `ReportRepository` | Report queries: fetch `ReportConfig` (all report tables), look up datasource output BQ table |
 | `DatabaseException` | Unchecked wrapper for `SQLException` — callers don't need to declare checked exceptions |
+| `QueryParameterResolver` | Resolves `{periodStart}`, `{periodEnd}`, `{periodId}`, `{runDate}` tokens in query templates |
 
 ```java
 // Pattern for parameter DB access (always try-with-resources):
@@ -44,22 +46,73 @@ try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
 ```sql
 -- Source configuration (one row per datasource/period/subprocess):
 CREATE TABLE source_config (
-  datasource_name VARCHAR(100), period_id VARCHAR(50), subprocess_name VARCHAR(100),
-  source_type VARCHAR(20),   -- API | FILE | BQ
-  api_endpoint TEXT, api_auth_type VARCHAR(20), api_auth_secret_id TEXT,
-  api_headers_json TEXT, api_query_params_json TEXT,
-  api_pagination_enabled BOOLEAN, api_pagination_strategy VARCHAR(20),
-  api_page_size INT, api_next_page_field VARCHAR(100), api_data_array_field VARCHAR(100),
-  file_type VARCHAR(20), file_location TEXT, file_prefix TEXT, file_suffix TEXT,
-  file_delimiter VARCHAR(5), file_has_header BOOLEAN, file_sheet_index INT,
-  bq_project_id VARCHAR(100), bq_dataset VARCHAR(100), bq_table VARCHAR(100), bq_query TEXT,
+  -- Identity
+  datasource_name         VARCHAR(100)  NOT NULL,
+  period_id               VARCHAR(50)   NOT NULL,
+  subprocess_name         VARCHAR(100)  NOT NULL,
+  source_type             VARCHAR(20)   NOT NULL,  -- API | FILE | BQ
+
+  -- API source
+  api_endpoint            TEXT,
+  api_auth_type           VARCHAR(20),             -- NONE | BEARER | BASIC | API_KEY
+  api_auth_secret_id      TEXT,
+  api_headers_json        TEXT,                    -- {"X-Custom": "value"}
+  api_query_params_json   TEXT,                    -- {"format": "json"}
+  api_pagination_enabled  BOOLEAN,
+  api_pagination_strategy VARCHAR(20),             -- PAGE_NUMBER | CURSOR | OFFSET
+  api_page_size           INT,
+  api_next_page_field     VARCHAR(100),
+  api_data_array_field    VARCHAR(100),
+
+  -- FILE source
+  file_type               VARCHAR(20),             -- CSV | EXCEL
+  file_location           TEXT,
+  file_prefix             TEXT,
+  file_suffix             TEXT,
+  file_delimiter          VARCHAR(5),
+  file_has_header         BOOLEAN,
+  file_sheet_index        INT,
+
+  -- BQ source
+  bq_project_id           VARCHAR(100),
+  bq_dataset              VARCHAR(100),
+  bq_table                VARCHAR(100),
+  bq_query                TEXT,                    -- SQL template (may contain {periodStart} etc)
+
+  -- Query parameter injection (applied to bq_query before execution)
+  query_params_json       TEXT,                    -- {"startDate":"{periodStart}","exchange":"NYSE"}
+
+  -- Per-source output destination
+  output_type             VARCHAR(20),             -- BQ | GCS
+  output_bq_project       VARCHAR(100),
+  output_bq_dataset       VARCHAR(100),
+  output_bq_table         VARCHAR(100),
+  output_gcs_path         TEXT,
+  output_write_mode       VARCHAR(20),             -- TRUNCATE | APPEND
+
+  -- Per-source transform chain (ordered JSON array)
+  source_transforms_json  TEXT,
+  -- Example:
+  -- [{"type":"LOOKUP","lookupSourceType":"BQ","lookupBqTableRef":"proj:ds.fx",
+  --   "lookupKeyField":"ccy_code","dataKeyField":"currency"},
+  --  {"type":"GROUP_BY","groupByFields":["currency","date"],
+  --   "aggregations":[{"field":"amount","function":"SUM","outputField":"total_amount"}]}]
+
+  -- Validation rules
+  min_row_count           BIGINT,                  -- 0 = no check
+  max_row_count           BIGINT,                  -- -1 = no check
+  required_headers_json   TEXT,                    -- ["trade_id","amount","currency"]
+  bnc_rules_json          TEXT,                    -- [{"field":"amount","expectedTotal":1000000,"tolerancePct":0.01}]
+
   PRIMARY KEY (datasource_name, period_id, subprocess_name)
 );
 
 -- Optional required-parameter guard:
 CREATE TABLE required_parameters (
-  datasource_name VARCHAR(100), period_id VARCHAR(50), subprocess_name VARCHAR(100),
-  parameter_key VARCHAR(200),
+  datasource_name   VARCHAR(100) NOT NULL,
+  period_id         VARCHAR(50)  NOT NULL,
+  subprocess_name   VARCHAR(100) NOT NULL,
+  parameter_key     VARCHAR(200) NOT NULL,
   PRIMARY KEY (datasource_name, period_id, subprocess_name, parameter_key)
 );
 ```

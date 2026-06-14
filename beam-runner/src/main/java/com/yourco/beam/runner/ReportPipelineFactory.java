@@ -1,0 +1,315 @@
+package com.yourco.beam.runner;
+
+import com.yourco.beam.io.email.EmailAttachment;
+import com.yourco.beam.io.email.ReportEmailAdapter;
+import com.yourco.beam.io.report.BigQueryJobService;
+import com.yourco.beam.io.status.BigQueryProcessStatusAdapter;
+import com.yourco.beam.io.status.ProcessStatusAdapter;
+import com.yourco.beam.model.ProcessStatusRecord;
+import com.yourco.beam.model.ReportConfig;
+import com.yourco.beam.model.ReportDatasourceRef;
+import com.yourco.beam.model.ReportOutputConfig;
+import com.yourco.beam.model.ReportPreprocessingStep;
+import com.yourco.beam.model.ReportTransformStep;
+import com.yourco.beam.options.FrameworkOptions;
+import com.yourco.beam.utils.DateUtils;
+import com.yourco.beam.utils.GcsUtils;
+import com.yourco.beam.utils.QueryParameterResolver;
+import com.yourco.beam.utils.db.DatabaseAdapter;
+import com.yourco.beam.utils.db.DatabaseAdapterFactory;
+import com.yourco.beam.utils.db.ReportRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayInputStream;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Orchestrates the full REPORT_PROCESSING lifecycle in the driver JVM.
+ *
+ * <p>Unlike {@link DataSourcePipelineFactory} (which submits a Beam pipeline),
+ * this factory executes entirely in the driver JVM using:
+ * <ul>
+ *   <li>BigQuery Jobs API — for transformation queries and GCS exports</li>
+ *   <li>GCS client — to download exported files for email attachment</li>
+ *   <li>Jakarta Mail — to send the report email</li>
+ * </ul>
+ * This makes reports fast to start (no Dataflow cluster spin-up) and suitable
+ * for aggregated output tables that are too small to need distributed processing.
+ *
+ * <h2>Execution phases</h2>
+ * <ol>
+ *   <li>Load {@link ReportConfig} from parameter DB</li>
+ *   <li>Write {@code PENDING} status to {@code process_status}</li>
+ *   <li>Run preprocessing steps (BQ queries or API enrichment)</li>
+ *   <li>Verify each required datasource has {@code COMPLETED} status for this period</li>
+ *   <li>Build alias registry: alias → BQ output table ref of its data</li>
+ *   <li>Run transformation chain (BQ jobs, each materialised to a BQ table)</li>
+ *   <li>Export each output to GCS (BQ extract job)</li>
+ *   <li>Download GCS files and send email with attachments</li>
+ *   <li>Write {@code COMPLETED} or {@code FAILED} status</li>
+ * </ol>
+ */
+public final class ReportPipelineFactory {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ReportPipelineFactory.class);
+    private static final String PROCESS_TYPE = "REPORT_PROCESSING";
+
+    private final BigQueryJobService bqJobService;
+
+    public ReportPipelineFactory() {
+        this(new BigQueryJobService());
+    }
+
+    ReportPipelineFactory(BigQueryJobService bqJobService) {
+        this.bqJobService = bqJobService;
+    }
+
+    // ── Entry point ───────────────────────────────────────────────────────────
+
+    /**
+     * Executes the full report run for the given options.
+     *
+     * @throws RuntimeException if any phase fails (status is marked FAILED before throwing)
+     */
+    public void execute(FrameworkOptions options) {
+        String reportName      = options.getReportName();
+        String reportSubprocess = options.getReportSubprocess();
+        String periodId         = options.getPeriodId();
+
+        LOG.info("REPORT_PROCESSING | report={} subprocess={} period={}",
+                 reportName, reportSubprocess, periodId);
+
+        // ── 1. Load config ────────────────────────────────────────────────────
+        ReportConfig config;
+        try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
+            ReportRepository repo = new ReportRepository(db, options);
+            config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
+        }
+
+        // ── 2. Status: PENDING ────────────────────────────────────────────────
+        ProcessStatusAdapter statusAdapter = new BigQueryProcessStatusAdapter(options);
+        ProcessStatusRecord pending = ProcessStatusRecord.pendingReport(
+            options.getJobRunId(), PROCESS_TYPE,
+            reportName, reportSubprocess, periodId,
+            options.getPeriodStart(), options.getPeriodEnd());
+        statusAdapter.write(pending);
+
+        int outputCount = 0;
+        try {
+            // ── 3. Preprocessing ──────────────────────────────────────────────
+            if (config.hasPreprocessing()) {
+                runPreprocessing(config, options);
+            }
+
+            // ── 4. Datasource availability check ──────────────────────────────
+            checkDatasourceAvailability(config, options, statusAdapter);
+
+            // ── 5. Build alias registry ───────────────────────────────────────
+            Map<String, String> aliasRegistry = buildAliasRegistry(config, options);
+
+            // ── 6. Transformation chain ───────────────────────────────────────
+            if (config.hasTransforms()) {
+                runTransformChain(config, options, aliasRegistry);
+            }
+
+            // ── 7 + 8. Export outputs and send email ──────────────────────────
+            List<ExportedFile> exportedFiles = exportOutputs(config, options, aliasRegistry);
+            outputCount = exportedFiles.size();
+
+            if (config.hasEmail()) {
+                sendEmail(config, options, exportedFiles);
+            }
+
+            // ── 9. Status: COMPLETED ──────────────────────────────────────────
+            statusAdapter.write(ProcessStatusRecord.completed(pending, outputCount, null));
+            LOG.info("REPORT_PROCESSING completed: {} files exported", outputCount);
+
+        } catch (Exception e) {
+            LOG.error("REPORT_PROCESSING failed: {}", e.getMessage(), e);
+            statusAdapter.write(ProcessStatusRecord.failed(pending, e.getMessage()));
+            throw new RuntimeException("REPORT_PROCESSING failed for report=" + reportName, e);
+        }
+    }
+
+    // ── Phase implementations ─────────────────────────────────────────────────
+
+    private void runPreprocessing(ReportConfig config, FrameworkOptions options) {
+        LOG.info("Running {} preprocessing step(s)", config.preprocessingSteps.size());
+        for (ReportPreprocessingStep step : config.preprocessingSteps) {
+            LOG.info("Preprocessing step {}: type={} name={}",
+                     step.stepOrder, step.stepType, step.stepName);
+            switch (step.stepType) {
+                case ReportPreprocessingStep.BQ_QUERY -> {
+                    String sql = QueryParameterResolver.resolve(
+                            step.bqQuery, step.queryParams, options);
+                    if (step.bqOutputTable != null && !step.bqOutputTable.isBlank()) {
+                        bqJobService.runQueryToTable(sql, step.bqOutputTable);
+                    } else {
+                        bqJobService.runQuery(sql);
+                    }
+                }
+                case ReportPreprocessingStep.API_ENRICHMENT ->
+                    LOG.warn("API_ENRICHMENT preprocessing step is not yet implemented: {}",
+                             step.stepName);
+                default ->
+                    throw new IllegalArgumentException(
+                        "Unknown preprocessing step type: " + step.stepType);
+            }
+        }
+    }
+
+    private void checkDatasourceAvailability(ReportConfig config, FrameworkOptions options,
+                                              ProcessStatusAdapter statusAdapter) {
+        LOG.info("Checking availability of {} datasource(s)", config.datasources.size());
+        List<String> missing = new ArrayList<>();
+        for (ReportDatasourceRef ref : config.datasources) {
+            if (!ref.required) continue;
+            ProcessStatusRecord latest = statusAdapter.getLatest(
+                null, ref.datasourceName, ref.datasourceSubprocess);
+            if (latest == null
+                    || !ProcessStatusRecord.STATUS_COMPLETED.equals(latest.status)) {
+                String status = latest == null ? "NOT_FOUND" : latest.status;
+                missing.add(ref.datasourceName + "/" + ref.datasourceSubprocess
+                            + " (status=" + status + ")");
+            }
+        }
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException(
+                "Required datasource(s) not yet COMPLETED for period="
+                + config.periodId + ": " + missing);
+        }
+        LOG.info("All required datasources are available");
+    }
+
+    private Map<String, String> buildAliasRegistry(ReportConfig config,
+                                                    FrameworkOptions options) {
+        Map<String, String> registry = new LinkedHashMap<>();
+        try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
+            ReportRepository repo = new ReportRepository(db, options);
+            for (ReportDatasourceRef ref : config.datasources) {
+                String tableRef = repo.fetchDatasourceOutputTable(
+                    ref.datasourceName, ref.datasourceSubprocess, config.periodId, options);
+                registry.put(ref.transformAlias, tableRef);
+                LOG.info("Alias '{}' → {}", ref.transformAlias, tableRef);
+            }
+        }
+        return registry;
+    }
+
+    private void runTransformChain(ReportConfig config, FrameworkOptions options,
+                                   Map<String, String> aliasRegistry) {
+        LOG.info("Running {} transformation step(s)", config.transformSteps.size());
+        for (ReportTransformStep step : config.transformSteps) {
+            LOG.info("Transform step {}: '{}' → alias '{}'",
+                     step.stepOrder, step.stepName, step.outputAlias);
+
+            // Alias tokens first ({trades} → `project.dataset.table`),
+            // then standard + custom params ({periodStart}, {exchange}, etc.)
+            String sql = resolveAliasTokens(step.queryTemplate, aliasRegistry);
+            sql = QueryParameterResolver.resolve(sql, step.queryParams, options);
+
+            bqJobService.runQueryToTable(sql, step.outputBqTable);
+            aliasRegistry.put(step.outputAlias, step.outputBqTable);
+            LOG.info("Step '{}' result registered as alias '{}' → {}",
+                     step.stepName, step.outputAlias, step.outputBqTable);
+        }
+    }
+
+    private List<ExportedFile> exportOutputs(ReportConfig config, FrameworkOptions options,
+                                              Map<String, String> aliasRegistry) {
+        LocalDate runDate = DateUtils.resolveRunDate(options);
+        List<ExportedFile> result = new ArrayList<>();
+
+        for (ReportOutputConfig output : config.outputConfigs) {
+            String sourceTable = aliasRegistry.get(output.inputAlias);
+            if (sourceTable == null) {
+                throw new IllegalArgumentException(
+                    "Output alias '" + output.inputAlias + "' not found in alias registry. "
+                    + "Available: " + aliasRegistry.keySet());
+            }
+
+            String ext       = output.isCsv() ? "csv" : "json";
+            String fileName  = output.filePrefix
+                             + config.reportName + "_" + config.periodId + "_"
+                             + runDate
+                             + output.fileSuffix
+                             + "." + ext;
+            String gcsDir    = output.gcsPath.endsWith("/") ? output.gcsPath
+                                                             : output.gcsPath + "/";
+            String gcsUri    = gcsDir + fileName;
+
+            LOG.info("Exporting alias '{}' ({}) → {}", output.inputAlias, sourceTable, gcsUri);
+
+            if (output.isCsv()) {
+                bqJobService.exportToCsv(sourceTable, gcsUri, output.includeHeader);
+            } else {
+                bqJobService.exportToJson(sourceTable, gcsUri);
+            }
+
+            result.add(new ExportedFile(gcsUri, fileName,
+                                        output.isCsv() ? "text/csv" : "application/json"));
+        }
+        return result;
+    }
+
+    private void sendEmail(ReportConfig config, FrameworkOptions options,
+                           List<ExportedFile> exportedFiles) {
+        String subject = resolveEmailTokens(config.emailConfig.subjectTemplate, config, options);
+        String body    = resolveEmailTokens(config.emailConfig.bodyTemplate,    config, options);
+
+        List<EmailAttachment> attachments = new ArrayList<>();
+        for (ExportedFile file : exportedFiles) {
+            byte[] bytes = GcsUtils.readBytes(file.gcsUri);
+            attachments.add(new EmailAttachment(
+                new ByteArrayInputStream(bytes), file.fileName, file.contentType));
+        }
+
+        ReportEmailAdapter emailAdapter = new SmtpReportEmailAdapter(options);
+        emailAdapter.send(subject, body,
+                          config.emailConfig.toList,
+                          config.emailConfig.ccList,
+                          attachments);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Replaces {@code {alias}} tokens in a query template with backtick-quoted BQ table refs.
+     * e.g. {@code {trades}} → {@code `project.dataset.table`}
+     */
+    private static String resolveAliasTokens(String template,
+                                              Map<String, String> aliasRegistry) {
+        String result = template;
+        for (Map.Entry<String, String> entry : aliasRegistry.entrySet()) {
+            result = result.replace("{" + entry.getKey() + "}",
+                                    "`" + entry.getValue() + "`");
+        }
+        return result;
+    }
+
+    /**
+     * Replaces email template tokens with actual values.
+     */
+    private static String resolveEmailTokens(String template, ReportConfig config,
+                                              FrameworkOptions options) {
+        if (template == null) return "";
+        return template
+            .replace("{reportName}",       config.reportName)
+            .replace("{reportSubprocess}", config.reportSubprocess)
+            .replace("{periodId}",         config.periodId)
+            .replace("{periodStart}",      nvl(options.getPeriodStart()))
+            .replace("{periodEnd}",        nvl(options.getPeriodEnd()))
+            .replace("{runDate}",          nvl(options.getRunDate()));
+    }
+
+    private static String nvl(String v) { return v != null ? v : ""; }
+
+    // ── Inner types ───────────────────────────────────────────────────────────
+
+    private record ExportedFile(String gcsUri, String fileName, String contentType) {}
+}

@@ -14,6 +14,22 @@ other module.
 | `mask-pii` | `MaskPiiTransform` | SHA-256 hashes fields listed in `--piiFields`; configurable at runtime |
 | `enrich-from-api` | `EnrichFromExternalApiTransform` | **Sample** showing the `@Setup`/`@Teardown` lifecycle pattern for HTTP clients |
 
+## Per-source data transforms (`source/` sub-package)
+
+These transforms are assembled into a per-source chain by `SourceTransformChainAssembler`
+in beam-runner. They run after the data is fetched from the source and before the data
+is written to the per-source output table.
+
+| Class | Transform type in DB | What it does |
+|---|---|---|
+| `GroupByTransform` | `GROUP_BY` | Groups rows by fields; applies SUM/COUNT/AVG/MIN/MAX aggregations. Output schema = group key fields + aggregated fields. |
+| `SortByTransform` | `SORT_BY` | Per-bundle sort. **Not global** — use a BQ view with `ORDER BY` for global ordering. Logs a warning when used. |
+| `LookupEnrichTransform` | `LOOKUP` | Left-joins rows with a pre-built side input. Accepts `PCollectionView<Map<String,String>>` (key → JSON of lookup row). Name collisions prefixed with `lookup_`. |
+
+The side input for `LookupEnrichTransform` is built by `SourceTransformChainAssembler`:
+- `JDBC` lookup: loaded in driver JVM via `DatabaseAdapterFactory`, wrapped in `Create.of()` + `View.asMap()`
+- `BQ` lookup: read via `BigQueryIO.readTableRows()` as part of the pipeline graph
+
 ## Side-effect transforms
 
 Side effects branch off the main pipeline and run concurrently — they produce `PDone`

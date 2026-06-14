@@ -1,9 +1,10 @@
 package com.yourco.beam.io.source;
 
+import com.google.cloud.secretmanager.v1.AccessSecretVersionResponse;
+import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
 import com.yourco.beam.model.ApiSourceConfig;
 import com.yourco.beam.model.Schemas;
 import com.yourco.beam.model.SourceConfig;
-import com.yourco.beam.utils.SecretManagerUtils;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -90,10 +91,9 @@ public final class ApiSourceTransform extends PTransform<PBegin, PCollection<Row
             httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .build();
-            // Fetch auth credentials from Secret Manager once per worker
-            authToken = (apiConfig.authSecretId != null && !apiConfig.authSecretId.isBlank())
-                ? SecretManagerUtils.fetchSecret(apiConfig.authSecretId)
-                : "";
+            // Fetch auth credentials from Secret Manager once per worker.
+            // Inlined here to avoid beam-utils dependency in beam-io (module boundary).
+            authToken = fetchSecret(apiConfig.authSecretId);
             adapter = new ApiSourceAdapter(httpClient);
             LOG.info("ApiSourceAdapter initialised for endpoint: {}", apiConfig.endpoint);
         }
@@ -114,6 +114,16 @@ public final class ApiSourceTransform extends PTransform<PBegin, PCollection<Row
             httpClient = null;
             authToken  = null;
             adapter    = null;
+        }
+
+        private static String fetchSecret(String secretId) {
+            if (secretId == null || secretId.isBlank()) return "";
+            try (SecretManagerServiceClient client = SecretManagerServiceClient.create()) {
+                AccessSecretVersionResponse response = client.accessSecretVersion(secretId);
+                return response.getPayload().getData().toStringUtf8();
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to fetch secret: " + secretId, e);
+            }
         }
     }
 }

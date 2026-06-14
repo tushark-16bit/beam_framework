@@ -116,6 +116,25 @@ public final class GcsUtils {
     }
 
     /**
+     * Reads a GCS object and returns its raw bytes.
+     * Suitable for binary files (Excel, compressed CSV) as well as text.
+     * For pure text, prefer {@link #readTextFile(String)}.
+     *
+     * @param gcsPath path to the GCS object, e.g. {@code gs://bucket/reports/file.csv}
+     * @return raw file bytes
+     * @throws IllegalArgumentException if the object does not exist
+     */
+    public static byte[] readBytes(String gcsPath) {
+        BucketAndPrefix bp = parse(gcsPath);
+        Storage storage = StorageOptions.getDefaultInstance().getService();
+        Blob blob = storage.get(BlobId.of(bp.bucket, bp.prefix));
+        if (blob == null) {
+            throw new IllegalArgumentException("GCS object not found: " + gcsPath);
+        }
+        return blob.getContent();
+    }
+
+    /**
      * Deletes all objects under a GCS prefix. Useful for clearing output paths
      * before a re-run to ensure idempotency (when not using WRITE_TRUNCATE).
      *

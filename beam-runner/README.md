@@ -9,37 +9,63 @@ You should rarely need to edit this module.
 
 | Class | Purpose |
 |---|---|
-| `Main` | Parses CLI args, routes by `--processType`, runs the pipeline, writes post-run checkpoints |
-| `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, assembles parallel sources |
-| `PipelineFactory` | `REPORT_PROCESSING`: assembles transform chain pipeline (existing general-purpose factory) |
+| `Main` | Parses CLI args, routes by `--processType` and `--reportName`, delegates to the right factory |
+| `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, assembles per-source Beam branches |
+| `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; no Beam pipeline submitted |
+| `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` |
+| `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline |
 
 ---
 
 ## DataSourcePipelineFactory — DATA_SOURCE_DOWNLOAD
 
+Sources are **never merged**. Each `SourceConfig` is an independent Beam DAG branch
+that reads, transforms, validates, and writes to its own output table.
+
 ```
 DataSourcePipelineFactory.assemble(options)
     │
-    ├─ 1. DatabaseAdapterFactory.create()     JDBC pool + Secret Manager password
-    ├─ 2. ParameterRepository.validate()      fail fast if source config incomplete in DB
-    ├─ 3. ParameterRepository.fetchSourceConfigs()  one SourceConfig per source
-    │       DB closed here (no live connection needed during graph assembly)
+    ├─ 1. DatabaseAdapterFactory.create()  JDBC + Secret Manager (open → fetch → close)
+    ├─ 2. ParameterRepository.validate()  fail fast if source config missing
+    ├─ 3. ParameterRepository.fetchSourceConfigs()
+    │       Each SourceConfig now also carries: outputConfig, queryConfig,
+    │       sourceTransforms (LOOKUP/GROUP_BY/SORT_BY), validationConfig
+    │       DB closed here.
     │
-    ├─ 4. BigQueryCheckpointAdapter.isDownloadComplete()  filter already-done sources
-    │       (skip unless --overrideDownload=true)
+    ├─ 4. BigQueryCheckpointAdapter.isDownloadComplete()  skip finished sources
     │
-    ├─ 5. Write STARTED checkpoints → BQ
+    ├─ 5. Write STARTED checkpoints + PENDING process_status rows → BQ
     │
-    ├─ 6. For each SourceConfig (parallel Beam branches):
-    │       SourceRouter.routeFromConfig()  →  ApiSourceTransform | FileSourceTransform | BigQuerySourceTransform
+    ├─ 6. For each SourceConfig independently (no merge!):
+    │       a. SourceRouter.routeFromConfig()         read raw data
+    │       b. QueryParameterResolver                 inject {periodStart}/{periodEnd}
+    │       c. SourceTransformChainAssembler.assemble()
+    │              ├─ LOOKUP: load lookup table (JDBC/BQ) → side input → LookupEnrichTransform
+    │              ├─ GROUP_BY:  GroupByTransform
+    │              └─ SORT_BY:   SortByTransform (per-bundle, not global)
+    │       d. Per-source sink (BigQueryIO.writeTableRows() or GcsSinkTransform)
     │
-    ├─ 7. PCollectionList.of(branches).apply(Flatten)   merge all sources
-    ├─ 8. SinkRouter.route()                             write to sink
-    └─ 9. Optional DLQ branch
+    └─ 7. Return pipeline (run() called by Main)
 
 After pipeline.run() + waitUntilFinish():
-    → Write FINISHED or FAILED checkpoints to BQ
+    DataSourcePipelineFactory.runPostPipelineSteps()
+    ├─ On success: for each source
+    │    ├─ Query row count from output BQ table (COUNT(*))
+    │    ├─ Query sums for each BnC rule (SUM(field))
+    │    ├─ Compare against ValidationConfig bounds
+    │    └─ Write COMPLETED or VALIDATION_FAILED → process_status + checkpoint BQ tables
+    └─ On failure: write FAILED → process_status + checkpoint BQ tables
 ```
+
+## SourceTransformChainAssembler
+
+| Transform | What it does | Beam mechanism |
+|---|---|---|
+| `LOOKUP` | Left-join rows with a lookup table from BQ or JDBC param DB | Side input (`PCollectionView<Map<String,String>>`) |
+| `GROUP_BY` | Group by fields + aggregate (SUM, COUNT, AVG, MIN, MAX) | `GroupByKey` + `ParDo(AggregateDoFn)` |
+| `SORT_BY` | Sort within each Beam bundle (per-bundle, not global) | Buffer + sort in `@FinishBundle` |
+
+For global ordering, use an `ORDER BY` clause in the downstream BQ view instead of `SORT_BY`.
 
 ## PipelineFactory — REPORT_PROCESSING
 

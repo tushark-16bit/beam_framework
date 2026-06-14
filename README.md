@@ -316,22 +316,209 @@ substitutions:
 
 | `--processType` | What runs | Source config from |
 |---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | Fetches raw data from external sources and persists it | Parameter DB (`source_config` table) |
-| `REPORT_PROCESSING` | Reads downloaded data, applies transform chain, writes reports | `--sourceType` CLI flag |
+| `DATA_SOURCE_DOWNLOAD` | Fetches raw data from external sources and persists it per-source | Parameter DB (`source_config` table) |
+| `REPORT_PROCESSING` (DB-configured) | Checks datasource availability, runs BQ transformation chain, exports files, sends email | Parameter DB (`report_config` + related tables) |
+| `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
 
-The two types are designed to be scheduled as **separate, parallel Airflow DAGs** so a download
-failure never blocks a report run, and vice versa.
+The two process types are designed to be scheduled as **separate, sequential Airflow DAGs**:
+first `DATA_SOURCE_DOWNLOAD`, then `REPORT_PROCESSING` once all sources are `COMPLETED`.
 
-## Supported source types in DATA_SOURCE_DOWNLOAD
+## DATA_SOURCE_DOWNLOAD — per-source independent pipelines
 
-Configuration for API and file sources is stored in the parameter DB and fetched at runtime.
-No code change is needed to add a new datasource — just add a row to `source_config`.
+Sources are **never merged**. Each source in `source_config` produces its own independent
+Beam branch: read → transform chain → per-source output table. Adding a new datasource
+requires only a DB row — no code change.
 
-| Source type | What it reads | Key config fields in DB |
+### Supported source types
+
+| Source type | What it reads | Key config fields |
 |---|---|---|
 | `API` | REST API with pagination | `api_endpoint`, `api_auth_type`, `api_auth_secret_id`, `api_pagination_strategy` |
 | `FILE` | CSV or Excel on GCS | `file_type`, `file_location`, `file_prefix`, `file_suffix` (support `{date}`, `{periodId}` placeholders) |
-| `BQ` | BigQuery table or SQL query | `bq_project_id`, `bq_dataset`, `bq_table`, `bq_query` |
+| `BQ` | BigQuery table or SQL query | `bq_project_id`, `bq_dataset`, `bq_table`, `bq_query` (may contain `{periodStart}`, `{periodEnd}`, `{periodId}` tokens) |
+
+### Query parameter injection
+
+Pass `--periodStart=2024-01-01` and `--periodEnd=2024-01-31` as pipeline options. These are
+injected into the `bq_query` template at runtime via `QueryParameterResolver`:
+
+```sql
+-- In source_config.bq_query:
+SELECT * FROM trades WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'
+```
+
+Additional named params go in `source_config.query_params_json`:
+```json
+{"startDate": "{periodStart}", "exchange": "NYSE"}
+```
+
+### Per-source transform chain
+
+Each source can have an ordered list of transforms stored in `source_transforms_json`:
+
+| Transform type | What it does |
+|---|---|
+| `LOOKUP` | Left-joins rows with a lookup table (from BQ or param JDBC DB). Config: lookup source, key fields, which output fields to merge. |
+| `GROUP_BY` | Groups rows by specified fields and applies aggregations: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`. |
+| `SORT_BY` | Sorts rows per-bundle by specified fields. For global ordering, use a BQ view with `ORDER BY` instead. |
+
+### Per-source validation
+
+After the pipeline writes data, the driver JVM validates against the output table:
+
+| Check | Configuration | Result on failure |
+|---|---|---|
+| Header check | `required_headers_json` | Logged at pipeline-assembly time |
+| Row count | `min_row_count`, `max_row_count` | `VALIDATION_FAILED` status |
+| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `VALIDATION_FAILED` status |
+
+### Process status tracking
+
+Every fetched source writes a row to the `process_status` BQ table
+(configured via `--processStatusBqDataset`, `--processStatusBqTable`):
+
+| Status | Written when |
+|---|---|
+| `PENDING` | Before `pipeline.run()` |
+| `COMPLETED` | Pipeline succeeded + all validation checks passed |
+| `VALIDATION_FAILED` | Pipeline succeeded but row count or BnC check failed |
+| `FAILED` | Pipeline threw an exception |
+
+Create the table before first run:
+```sql
+CREATE TABLE pipeline_metadata.process_status (
+  job_run_id STRING, process_type STRING, datasource_name STRING,
+  subprocess_name STRING, period_id STRING, period_start STRING, period_end STRING,
+  status STRING, row_count INT64, error_message STRING, validation_details STRING,
+  started_at TIMESTAMP, completed_at TIMESTAMP
+) PARTITION BY DATE(started_at);
+```
+
+## REPORT_PROCESSING — DB-configured reports
+
+When `--reportName` is set alongside `--processType=REPORT_PROCESSING`, the
+`ReportPipelineFactory` runs entirely in the driver JVM (no Dataflow job submission).
+
+### Execution flow
+
+```
+1. Fetch ReportConfig from parameter DB  (report_config + related tables)
+2. Write PENDING status                  (process_status BQ table)
+3. Run preprocessing steps               (BQ jobs — BQ_QUERY or API_ENRICHMENT)
+4. Check datasource availability         (all required DSes must be COMPLETED)
+5. Build alias registry                  (alias → BQ output table of each datasource)
+6. Run transformation chain              (BQ jobs; each step materialises to a BQ table)
+7. Export outputs to GCS                 (BQ extract jobs → CSV or JSON files)
+8. Send email                            (SMTP; GCS files attached as InputStream)
+9. Write COMPLETED / FAILED status
+```
+
+### DB tables required (create before first run)
+
+```sql
+CREATE TABLE report_config (
+  report_name       VARCHAR(100) NOT NULL,
+  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
+  period_id         VARCHAR(50)  NOT NULL,
+  override_key      BOOLEAN      DEFAULT FALSE,
+  PRIMARY KEY (report_name, report_subprocess, period_id)
+);
+
+CREATE TABLE report_datasource_ref (
+  report_name           VARCHAR(100) NOT NULL,
+  report_subprocess     VARCHAR(100) NOT NULL DEFAULT 'default',
+  period_id             VARCHAR(50)  NOT NULL,
+  datasource_name       VARCHAR(100) NOT NULL,
+  datasource_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
+  transform_alias       VARCHAR(100) NOT NULL,  -- used as {alias} in query templates
+  is_required           BOOLEAN      DEFAULT TRUE,
+  PRIMARY KEY (report_name, report_subprocess, period_id, datasource_name, datasource_subprocess)
+);
+
+CREATE TABLE report_preprocessing_config (
+  report_name       VARCHAR(100) NOT NULL,
+  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
+  period_id         VARCHAR(50)  NOT NULL,
+  step_order        INT NOT NULL,
+  step_type         VARCHAR(30)  NOT NULL,  -- BQ_QUERY | API_ENRICHMENT
+  step_name         VARCHAR(200),
+  bq_query          TEXT,
+  bq_output_table   VARCHAR(500),
+  api_endpoint      TEXT,
+  api_params_json   TEXT,
+  PRIMARY KEY (report_name, report_subprocess, period_id, step_order)
+);
+
+CREATE TABLE report_transformation_config (
+  report_name       VARCHAR(100) NOT NULL,
+  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
+  period_id         VARCHAR(50)  NOT NULL,
+  step_order        INT NOT NULL,
+  step_name         VARCHAR(200),
+  input_alias       VARCHAR(100) NOT NULL,
+  output_alias      VARCHAR(100) NOT NULL,
+  query_template    TEXT,         -- SQL; {alias} → BQ table ref, {periodStart} etc.
+  output_bq_table   VARCHAR(500), -- project.dataset.table
+  PRIMARY KEY (report_name, report_subprocess, period_id, step_order)
+);
+
+CREATE TABLE report_output_config (
+  report_name       VARCHAR(100) NOT NULL,
+  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
+  period_id         VARCHAR(50)  NOT NULL,
+  output_order      INT NOT NULL,
+  input_alias       VARCHAR(100) NOT NULL,
+  output_format     VARCHAR(20)  NOT NULL,  -- CSV | JSON
+  gcs_path          TEXT         NOT NULL,
+  file_prefix       VARCHAR(200),
+  file_suffix       VARCHAR(200),
+  include_header    BOOLEAN      DEFAULT TRUE,
+  PRIMARY KEY (report_name, report_subprocess, period_id, output_order)
+);
+
+CREATE TABLE report_email_config (
+  report_name       VARCHAR(100) NOT NULL,
+  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
+  period_id         VARCHAR(50)  NOT NULL,
+  to_list           TEXT         NOT NULL,  -- comma-separated or JSON array
+  cc_list           TEXT,
+  subject_template  TEXT,  -- tokens: {reportName} {reportSubprocess} {periodId} {periodStart} {periodEnd} {runDate}
+  body_template     TEXT,
+  PRIMARY KEY (report_name, report_subprocess, period_id)
+);
+```
+
+### Query template example
+
+```sql
+-- report_transformation_config.query_template
+SELECT
+  t.trade_id,
+  t.amount * f.rate AS amount_usd,
+  t.trade_date
+FROM {trades} t
+JOIN {fx_rates} f ON t.currency = f.currency_code
+WHERE t.trade_date BETWEEN '{periodStart}' AND '{periodEnd}'
+```
+
+`{trades}` and `{fx_rates}` are `transform_alias` values from `report_datasource_ref`.
+They resolve to `` `project.dataset.table` `` BQ standard SQL references at runtime.
+
+### Trigger from Airflow
+
+```python
+options={
+    "--processType":       "REPORT_PROCESSING",
+    "--reportName":        "daily_trades_report",
+    "--reportSubprocess":  "eod",
+    "--periodId":          "2024-01",
+    "--periodStart":       "2024-01-01",
+    "--periodEnd":         "2024-01-31",
+    "--runDate":           "{{ ds }}",
+    "--paramDbUrl":        "jdbc:postgresql://...",
+    # ... other standard options
+}
+```
 
 ## Built-in transforms reference
 
