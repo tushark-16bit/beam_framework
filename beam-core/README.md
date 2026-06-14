@@ -9,18 +9,79 @@ Every other module depends on this one — it defines the language the whole fra
 
 | Package | Contents | Purpose |
 |---|---|---|
-| `options` | `FrameworkOptions`, `SourceType`, `SinkType`, `RetryPolicyType`, `WriteDispositionType` | Every CLI flag the framework understands |
+| `options` | `FrameworkOptions`, `ProcessType`, `SourceType`, `SinkType`, `RetryPolicyType`, `WriteDispositionType` | Every CLI flag the framework understands |
 | `transform` | `BeamTransform` (SPI interface), `TransformRegistry` | The extension point for adding new transforms |
 | `retry` | `RetryPolicy`, `ExponentialRetryPolicy`, `FixedRetryPolicy`, `RetryingDoFn` | Retry logic and dead-letter routing |
-| `model` | `FailedRecord`, `Schemas` | Shared data types used across all modules |
+| `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig`, `CheckpointRecord`, `CheckpointState` | Shared data types used across all modules |
+
+---
+
+## ProcessType — two execution modes
+
+| Value | CLI flag | Source config comes from | Use case |
+|---|---|---|---|
+| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Parameter DB (`source_config` table) | Fetch raw data from APIs/files/BQ |
+| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | `--sourceType` CLI flag | Transform downloaded data into reports |
+
+```bash
+# Download raw trades from an external API
+java -jar beam-runner-bundled.jar \
+  --processType=DATA_SOURCE_DOWNLOAD \
+  --datasourceName=trades \
+  --periodId=2024-01-15 \
+  --subprocessName=eod \
+  --sinkType=GCS \
+  --gcsSinkPath=gs://bucket/raw/
+
+# Run the report on the downloaded data
+java -jar beam-runner-bundled.jar \
+  --processType=REPORT_PROCESSING \
+  --sourceType=GCS \
+  --gcsSourcePath=gs://bucket/raw/*.json \
+  --transformChain=filter-nulls,mask-pii \
+  --sinkType=BQ \
+  --bqSinkTable=project:dataset.report
+```
 
 ---
 
 ## Key concept: FrameworkOptions
 
 `FrameworkOptions` is the single source of truth for all CLI flags.
-Every pipeline config — source, sink, transforms, retry, calendar, email — lives here.
+Every pipeline config — process type, source, sink, transforms, DB, checkpoints, retry, calendar, email — lives here.
 
+### Process control
+```
+--processType=DATA_SOURCE_DOWNLOAD
+--jobRunId=etl-trades-2024-01-15-run1
+```
+
+### Data source selection (DATA_SOURCE_DOWNLOAD only)
+```
+--datasourceName=trades
+--periodId=2024-01-15
+--subprocessName=eod
+--overrideDownload=false
+```
+
+### Parameter database
+```
+--paramDbUrl=jdbc:postgresql://db-host:5432/pipeline_params
+--paramDbUser=pipeline_svc
+--paramDbCredentialSecretId=projects/p/secrets/db-pass/versions/latest
+--paramDbSchema=public
+--paramDbSourceConfigTable=source_config
+--paramDbRequiredParamsTable=required_parameters
+```
+
+### Checkpoint storage
+```
+--checkpointBqProject=my-project
+--checkpointBqDataset=pipeline_metadata
+--checkpointBqTable=pipeline_checkpoints
+```
+
+### Source / transform / sink (REPORT_PROCESSING)
 ```
 --sourceType=BQ
 --bqSourceTable=my-project:my-dataset.orders
@@ -33,7 +94,6 @@ Every pipeline config — source, sink, transforms, retry, calendar, email — l
 --deadLetterSink=gs://bucket/dlq/
 --runDate=2024-01-15
 --calendarName=NYSE
---businessDayOffset=-1
 --businessEmail=reports@company.com
 --devErrorEmail=oncall@company.com
 ```

@@ -19,9 +19,24 @@
             <groupId>com.yourco.beam</groupId>
             <artifactId>beam-core</artifactId>
         </dependency>
+        <!-- Utilities for side-effect DB writes and metrics naming -->
+        <dependency>
+            <groupId>com.yourco.beam</groupId>
+            <artifactId>beam-utils</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.beam</groupId>
             <artifactId>beam-sdks-java-core</artifactId>
+        </dependency>
+        <!-- Secret Manager for SMTP password in SideEffectEmailTransform -->
+        <dependency>
+            <groupId>com.google.cloud</groupId>
+            <artifactId>google-cloud-secretmanager</artifactId>
+        </dependency>
+        <!-- SMTP email in SideEffectEmailTransform -->
+        <dependency>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>angus-mail</artifactId>
         </dependency>
     </dependencies>
 </project>

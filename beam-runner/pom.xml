@@ -27,6 +27,11 @@
             <groupId>com.yourco.beam</groupId>
             <artifactId>beam-transforms</artifactId>
         </dependency>
+        <!-- DataSourcePipelineFactory uses DateUtils, DatabaseAdapterFactory, ParameterRepository -->
+        <dependency>
+            <groupId>com.yourco.beam</groupId>
+            <artifactId>beam-utils</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.beam</groupId>
             <artifactId>beam-sdks-java-core</artifactId>

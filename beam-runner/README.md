@@ -9,34 +9,49 @@ You should rarely need to edit this module.
 
 | Class | Purpose |
 |---|---|
-| `Main` | Parses CLI args, calls `PipelineFactory`, runs the pipeline |
-| `PipelineFactory` | Assembles the Beam graph: source → transform chain → sink + DLQ |
+| `Main` | Parses CLI args, routes by `--processType`, runs the pipeline, writes post-run checkpoints |
+| `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, assembles parallel sources |
+| `PipelineFactory` | `REPORT_PROCESSING`: assembles transform chain pipeline (existing general-purpose factory) |
 
 ---
 
-## How PipelineFactory assembles the pipeline
+## DataSourcePipelineFactory — DATA_SOURCE_DOWNLOAD
+
+```
+DataSourcePipelineFactory.assemble(options)
+    │
+    ├─ 1. DatabaseAdapterFactory.create()     JDBC pool + Secret Manager password
+    ├─ 2. ParameterRepository.validate()      fail fast if source config incomplete in DB
+    ├─ 3. ParameterRepository.fetchSourceConfigs()  one SourceConfig per source
+    │       DB closed here (no live connection needed during graph assembly)
+    │
+    ├─ 4. BigQueryCheckpointAdapter.isDownloadComplete()  filter already-done sources
+    │       (skip unless --overrideDownload=true)
+    │
+    ├─ 5. Write STARTED checkpoints → BQ
+    │
+    ├─ 6. For each SourceConfig (parallel Beam branches):
+    │       SourceRouter.routeFromConfig()  →  ApiSourceTransform | FileSourceTransform | BigQuerySourceTransform
+    │
+    ├─ 7. PCollectionList.of(branches).apply(Flatten)   merge all sources
+    ├─ 8. SinkRouter.route()                             write to sink
+    └─ 9. Optional DLQ branch
+
+After pipeline.run() + waitUntilFinish():
+    → Write FINISHED or FAILED checkpoints to BQ
+```
+
+## PipelineFactory — REPORT_PROCESSING
 
 ```
 PipelineFactory.assemble(options)
-    │
-    ├─ 1. SourceRouter.route()          reads --sourceType, returns PCollection<Row>
-    │
-    ├─ 2. TransformRegistry.load()      ServiceLoader scans META-INF/services
-    │      .resolve(chainSpec)          splits "filter-nulls,mask-pii" → List<BeamTransform>
-    │
-    ├─ 3. for each transform:
-    │      transform.toComposite(options) → PTransform
-    │      current = current.apply(name, composite)  → PCollectionTuple
-    │      deadLetterOutputs.add(result.get(DEAD_LETTER_TAG))
-    │      current = result.get(SUCCESS_TAG)
-    │
-    ├─ 4. SinkRouter.route(current, options)   writes success path
-    │
-    └─ 5. Flatten all DLQ outputs → DeadLetterSinkTransform   writes failures
+    ├─ 1. SourceRouter.route()          reads --sourceType
+    ├─ 2. TransformRegistry + chain loop
+    ├─ 3. SinkRouter.route()
+    └─ 4. Flatten DLQ → DeadLetterSinkTransform
 ```
 
-No data moves during this method — it only describes the computation graph.
-Data flows after `pipeline.run()` in `Main`.
+No data moves during assembly — it only describes the computation graph.
 
 ---
 

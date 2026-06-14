@@ -17,6 +17,53 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `CalendarUtils` | Business calendar stubs: `isBusinessDay`, `nextBusinessDay`, `applyOffset`, etc. |
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
 
+### DB adapter sub-package (`db/`)
+
+| Class | Purpose |
+|---|---|
+| `DatabaseAdapter` | Interface for relational DB operations: `query`, `queryOne`, `update`, `close` |
+| `JdbcDatabaseAdapter` | JDBC + HikariCP implementation. One pool per instance; always use try-with-resources |
+| `DatabaseAdapterFactory` | Static factory: reads `--paramDb*` options, fetches password from Secret Manager |
+| `ParameterRepository` | Business queries: validate required params, fetch `SourceConfig` list from `source_config` table |
+| `DatabaseException` | Unchecked wrapper for `SQLException` — callers don't need to declare checked exceptions |
+
+```java
+// Pattern for parameter DB access (always try-with-resources):
+try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
+    ParameterRepository repo = new ParameterRepository(db, options);
+    if (!repo.allRequiredParametersExist(datasource, period, subprocess)) {
+        List<String> missing = repo.getMissingParameters(datasource, period, subprocess);
+        throw new RuntimeException("Missing: " + missing);
+    }
+    List<SourceConfig> configs = repo.fetchSourceConfigs(datasource, period, subprocess);
+}
+```
+
+**Required DB tables** (must be created before first run):
+
+```sql
+-- Source configuration (one row per datasource/period/subprocess):
+CREATE TABLE source_config (
+  datasource_name VARCHAR(100), period_id VARCHAR(50), subprocess_name VARCHAR(100),
+  source_type VARCHAR(20),   -- API | FILE | BQ
+  api_endpoint TEXT, api_auth_type VARCHAR(20), api_auth_secret_id TEXT,
+  api_headers_json TEXT, api_query_params_json TEXT,
+  api_pagination_enabled BOOLEAN, api_pagination_strategy VARCHAR(20),
+  api_page_size INT, api_next_page_field VARCHAR(100), api_data_array_field VARCHAR(100),
+  file_type VARCHAR(20), file_location TEXT, file_prefix TEXT, file_suffix TEXT,
+  file_delimiter VARCHAR(5), file_has_header BOOLEAN, file_sheet_index INT,
+  bq_project_id VARCHAR(100), bq_dataset VARCHAR(100), bq_table VARCHAR(100), bq_query TEXT,
+  PRIMARY KEY (datasource_name, period_id, subprocess_name)
+);
+
+-- Optional required-parameter guard:
+CREATE TABLE required_parameters (
+  datasource_name VARCHAR(100), period_id VARCHAR(50), subprocess_name VARCHAR(100),
+  parameter_key VARCHAR(200),
+  PRIMARY KEY (datasource_name, period_id, subprocess_name, parameter_key)
+);
+```
+
 ---
 
 ## BigQuerySchemaUtils

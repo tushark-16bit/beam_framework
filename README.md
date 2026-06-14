@@ -312,6 +312,27 @@ substitutions:
 
 ---
 
+## Process types
+
+| `--processType` | What runs | Source config from |
+|---|---|---|
+| `DATA_SOURCE_DOWNLOAD` | Fetches raw data from external sources and persists it | Parameter DB (`source_config` table) |
+| `REPORT_PROCESSING` | Reads downloaded data, applies transform chain, writes reports | `--sourceType` CLI flag |
+
+The two types are designed to be scheduled as **separate, parallel Airflow DAGs** so a download
+failure never blocks a report run, and vice versa.
+
+## Supported source types in DATA_SOURCE_DOWNLOAD
+
+Configuration for API and file sources is stored in the parameter DB and fetched at runtime.
+No code change is needed to add a new datasource — just add a row to `source_config`.
+
+| Source type | What it reads | Key config fields in DB |
+|---|---|---|
+| `API` | REST API with pagination | `api_endpoint`, `api_auth_type`, `api_auth_secret_id`, `api_pagination_strategy` |
+| `FILE` | CSV or Excel on GCS | `file_type`, `file_location`, `file_prefix`, `file_suffix` (support `{date}`, `{periodId}` placeholders) |
+| `BQ` | BigQuery table or SQL query | `bq_project_id`, `bq_dataset`, `bq_table`, `bq_query` |
+
 ## Built-in transforms reference
 
 | Token | Options | Description |
@@ -319,3 +340,10 @@ substitutions:
 | `filter-nulls` | none | Drops rows with any null field; routes to DLQ with metrics |
 | `mask-pii` | `--piiFields=email,phone,...` | SHA-256 hashes listed fields |
 | `enrich-from-api` | (sample only) | Demonstrates `@Setup`/`@Teardown` lifecycle for HTTP clients |
+
+## Side-effect transforms (parallel pipeline branches)
+
+| Class | Produces | Use for |
+|---|---|---|
+| `SideEffectEmailTransform` | `PDone` | SMTP notifications (success/failure summary emails) |
+| `SideEffectDbWriteTransform` | `PDone` | Writing audit logs or status updates back to the parameter DB |

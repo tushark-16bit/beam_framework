@@ -14,6 +14,39 @@ other module.
 | `mask-pii` | `MaskPiiTransform` | SHA-256 hashes fields listed in `--piiFields`; configurable at runtime |
 | `enrich-from-api` | `EnrichFromExternalApiTransform` | **Sample** showing the `@Setup`/`@Teardown` lifecycle pattern for HTTP clients |
 
+## Side-effect transforms
+
+Side effects branch off the main pipeline and run concurrently — they produce `PDone`
+(no data output) and are used for notifications, audit logging, and status updates.
+
+| Class | Input Row schema | What it does |
+|---|---|---|
+| `side/SideEffectEmailTransform` | `to`, `subject`, `body`, `cc` (optional) | Sends SMTP email per row; credentials from Secret Manager via `--smtpPasswordSecretId` |
+| `side/SideEffectDbWriteTransform` | any Row (columns mapped to DB columns) | Inserts each row into a JDBC table; credentials from `--paramDb*` options |
+
+```java
+// Wire a side effect into any pipeline factory:
+PCollection<Row> notifications = successRows.apply("BuildNotification", myTransform);
+notifications.apply("SendEmail", new SideEffectEmailTransform(options));
+```
+
+## SideInputFactory — sharing data with transforms
+
+`SideInputFactory` creates `PCollectionView` instances from driver-JVM data
+(lists, maps, singletons) so transforms can access them as side inputs:
+
+```java
+// Create a view from a list fetched in driver JVM
+PCollectionView<List<SourceConfig>> configView =
+    SideInputFactory.asList(pipeline, "SourceConfigs", configs,
+                            SerializableCoder.of(SourceConfig.class));
+
+// Pass to any DoFn that needs per-element config access
+rows.apply("Enrich", ParDo.of(new MyFn(configView)).withSideInputs(configView));
+```
+
+Use `asSingleton()`, `asList()`, or `asMap()` depending on the access pattern.
+
 ---
 
 ## How transforms are discovered (SPI)

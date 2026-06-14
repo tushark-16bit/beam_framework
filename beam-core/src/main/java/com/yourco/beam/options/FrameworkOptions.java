@@ -27,7 +27,11 @@ import org.apache.beam.sdk.options.Validation;
  *
  * <h2>Option groups</h2>
  * <ul>
- *   <li><b>Source</b>   — what to read and from where</li>
+ *   <li><b>Process control</b> — processType, jobRunId</li>
+ *   <li><b>Data source selection</b> — datasourceName, periodId, subprocessName, overrideDownload</li>
+ *   <li><b>Parameter DB</b> — JDBC URL, user, credential, schema, table names</li>
+ *   <li><b>Checkpoint</b> — BigQuery project/dataset/table for run state tracking</li>
+ *   <li><b>Source</b>   — what to read and from where (REPORT_PROCESSING only)</li>
  *   <li><b>Transform</b> — which transforms to apply and their config</li>
  *   <li><b>Sink</b>     — where to write output</li>
  *   <li><b>Retry/DLQ</b> — failure handling behaviour</li>
@@ -38,11 +42,132 @@ import org.apache.beam.sdk.options.Validation;
 public interface FrameworkOptions extends DataflowPipelineOptions {
 
     // =========================================================================
+    // PROCESS CONTROL
+    // =========================================================================
+
+    @Description("Which pipeline process to run. "
+                 + "DATA_SOURCE_DOWNLOAD: fetch raw data from external sources (API, file, BQ) "
+                 + "using configuration from the parameter DB. --sourceType is not used. "
+                 + "REPORT_PROCESSING: read downloaded data, apply the transform chain, and write reports. "
+                 + "--sourceType is required.")
+    @Validation.Required
+    ProcessType getProcessType();
+    void setProcessType(ProcessType value);
+
+    @Description("Unique identifier for this job run. Used for checkpoint correlation and log tracing. "
+                 + "Auto-generated UUID if not provided. "
+                 + "Example: etl-trades-2024-01-15-run1")
+    @Default.String("")
+    String getJobRunId();
+    void setJobRunId(String value);
+
+    // =========================================================================
+    // DATA SOURCE SELECTION (DATA_SOURCE_DOWNLOAD only)
+    // =========================================================================
+
+    @Description("Name of the data source as registered in the parameter DB source_config table. "
+                 + "Required for DATA_SOURCE_DOWNLOAD. Used as the lookup key alongside "
+                 + "--periodId and --subprocessName to fetch source configuration. "
+                 + "Example: trades, market-data, fx-rates, customer-positions")
+    String getDatasourceName();
+    void setDatasourceName(String value);
+
+    @Description("Period identifier passed to the parameter DB for source config lookup. "
+                 + "Represents the time window this run is processing. "
+                 + "Required for DATA_SOURCE_DOWNLOAD. "
+                 + "Example: 2024-Q1, 2024-01, 2024-01-15")
+    String getPeriodId();
+    void setPeriodId(String value);
+
+    @Description("Subprocess identifier for data sources that have multiple distinct sub-feeds "
+                 + "within the same datasource and period. "
+                 + "Example: intraday, eod, positions, reference")
+    @Default.String("default")
+    String getSubprocessName();
+    void setSubprocessName(String value);
+
+    @Description("When true, re-downloads data even if a FINISHED_ACCESSING checkpoint exists. "
+                 + "Use for forced reprocessing. Default is false: sources with a "
+                 + "FINISHED_ACCESSING checkpoint in the current period are skipped.")
+    @Default.Boolean(false)
+    boolean getOverrideDownload();
+    void setOverrideDownload(boolean value);
+
+    // =========================================================================
+    // PARAMETER DATABASE
+    // The parameter DB holds all source configuration (API endpoints, file paths,
+    // pagination rules, etc.) keyed by (datasourceName, periodId, subprocessName).
+    // Credentials are never stored in options — only the Secret Manager path.
+    // =========================================================================
+
+    @Description("JDBC URL for the parameter/configuration database. "
+                 + "Example: jdbc:postgresql://db-host:5432/pipeline_params "
+                 + "or jdbc:mysql://db-host:3306/pipeline_params. "
+                 + "The password is fetched from Secret Manager via --paramDbCredentialSecretId.")
+    String getParamDbUrl();
+    void setParamDbUrl(String value);
+
+    @Description("Username for the parameter database.")
+    String getParamDbUser();
+    void setParamDbUser(String value);
+
+    @Description("GCP Secret Manager resource name for the parameter DB password. "
+                 + "Format: projects/{project}/secrets/{secret}/versions/{version}. "
+                 + "Example: projects/my-project/secrets/param-db-password/versions/latest")
+    String getParamDbCredentialSecretId();
+    void setParamDbCredentialSecretId(String value);
+
+    @Description("Database schema containing the source config tables. "
+                 + "Default: public (PostgreSQL). Set to empty string for MySQL/databases without schemas.")
+    @Default.String("public")
+    String getParamDbSchema();
+    void setParamDbSchema(String value);
+
+    @Description("Name of the source configuration table in the parameter DB. "
+                 + "Queried by (datasource_name, period_id, subprocess_name) to get source configs.")
+    @Default.String("source_config")
+    String getParamDbSourceConfigTable();
+    void setParamDbSourceConfigTable(String value);
+
+    @Description("Name of the required-parameters validation table. "
+                 + "Queried to check all mandatory parameters exist before the pipeline starts.")
+    @Default.String("required_parameters")
+    String getParamDbRequiredParamsTable();
+    void setParamDbRequiredParamsTable(String value);
+
+    // =========================================================================
+    // CHECKPOINT STORAGE
+    // State of each data-source download attempt is persisted to BigQuery so
+    // subsequent runs can skip already-completed sources (unless overrideDownload=true).
+    // The table must be created manually — the framework only reads and writes it.
+    // =========================================================================
+
+    @Description("GCP project for the checkpoint BigQuery table. "
+                 + "Defaults to the --project flag if not set.")
+    String getCheckpointBqProject();
+    void setCheckpointBqProject(String value);
+
+    @Description("BigQuery dataset for the checkpoint table.")
+    @Default.String("pipeline_metadata")
+    String getCheckpointBqDataset();
+    void setCheckpointBqDataset(String value);
+
+    @Description("BigQuery table name for pipeline checkpoints. "
+                 + "Required schema: job_run_id STRING, datasource_name STRING, period_id STRING, "
+                 + "subprocess_name STRING, state STRING, source_type STRING, "
+                 + "created_at TIMESTAMP, error_message STRING, records_processed INT64. "
+                 + "The table is never created automatically — provision it before the first run.")
+    @Default.String("pipeline_checkpoints")
+    String getCheckpointBqTable();
+    void setCheckpointBqTable(String value);
+
+    // =========================================================================
     // SOURCE CONFIGURATION
     // =========================================================================
 
-    @Description("Input source type. One of: GCS | BQ | PUBSUB")
-    @Validation.Required
+    @Description("Input source type. One of: GCS | BQ | PUBSUB. "
+                 + "Required for REPORT_PROCESSING. Not used for DATA_SOURCE_DOWNLOAD — "
+                 + "source types are fetched per-datasource from the parameter DB.")
     SourceType getSourceType();
     void setSourceType(SourceType value);
 

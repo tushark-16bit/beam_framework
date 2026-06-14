@@ -9,10 +9,14 @@ Also contains the `DeadLetterSinkTransform` for writing failed records.
 
 ```
 io/source/
-    SourceRouter              — factory: picks the right source from --sourceType
+    SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD)
     BigQuerySourceTransform   — reads from BQ table or SQL query
     GcsSourceTransform        — reads newline-delimited JSON from GCS glob
     PubSubSourceTransform     — reads from a Pub/Sub subscription (streaming)
+    ApiSourceAdapter          — pure HTTP adapter: auth, pagination (PAGE_NUMBER/CURSOR/OFFSET)
+    ApiSourceTransform        — Beam wrapper for ApiSourceAdapter (@Setup/@Teardown for HttpClient)
+    FileSourceAdapter         — pure file adapter: CSV (Commons CSV) + Excel (Apache POI)
+    FileSourceTransform       — Beam wrapper for FileSourceAdapter (downloads GCS bytes, parses)
 
 io/sink/
     SinkRouter                — factory: picks the right sink from --sinkType
@@ -21,9 +25,21 @@ io/sink/
     PubSubSinkTransform       — publishes each Row as a JSON message
     DeadLetterSinkTransform   — writes FailedRecords as JSON lines to GCS
 
+io/checkpoint/
+    CheckpointAdapter         — interface for reading/writing pipeline run checkpoints
+    BigQueryCheckpointAdapter — BQ streaming insert (write) + interactive query (read)
+
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer
 ```
+
+### Adapter pattern
+
+Every external I/O boundary has **two layers**:
+- **Adapter** (`ApiSourceAdapter`, `FileSourceAdapter`) — pure Java, no Beam, unit-testable without a pipeline
+- **Transform** (`ApiSourceTransform`, `FileSourceTransform`) — thin Beam wrapper, only handles `@Setup`/`@Teardown` lifecycle
+
+This separation keeps Beam boilerplate out of business logic and makes adapters easy to test independently.
 
 ---
 
