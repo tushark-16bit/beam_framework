@@ -29,7 +29,7 @@ import org.apache.beam.sdk.options.Validation;
  * <ul>
  *   <li><b>Process control</b> — processType, jobRunId</li>
  *   <li><b>Data source selection</b> — datasourceName, periodId, subprocessName, overrideDownload</li>
- *   <li><b>Parameter DB</b> — JDBC URL, user, credential, schema, table names</li>
+ *   <li><b>Parameter BQ store</b> — BQ project/dataset/table names for parameter_store, required_parameters_index, source_config</li>
  *   <li><b>Checkpoint</b> — BigQuery project/dataset/table for run state tracking</li>
  *   <li><b>Source</b>   — what to read and from where (REPORT_PROCESSING only)</li>
  *   <li><b>Transform</b> — which transforms to apply and their config</li>
@@ -127,46 +127,55 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setPeriodEnd(String value);
 
     // =========================================================================
-    // PARAMETER DATABASE
-    // The parameter DB holds all source configuration (API endpoints, file paths,
-    // pagination rules, etc.) keyed by (datasourceName, periodId, subprocessName).
-    // Credentials are never stored in options — only the Secret Manager path.
+    // PARAMETER BIGQUERY STORE
+    // All pipeline configuration (source config, report config, key-value params)
+    // is stored in BigQuery tables and fetched at runtime using the BQ client.
+    //
+    // Two kinds of tables live in the same BQ dataset:
+    //   parameter_store          — generic key-value params per (process, subprocess, period)
+    //   required_parameters_index — which param_keys are mandatory for each (process, subprocess)
+    //   report_config + related   — structured report configuration (6 tables)
+    //   source_config             — structured data-source configuration
+    //
+    // Table names are configurable via options so the same code works in dev/staging/prod.
     // =========================================================================
 
-    @Description("JDBC URL for the parameter/configuration database. "
-                 + "Example: jdbc:postgresql://db-host:5432/pipeline_params "
-                 + "or jdbc:mysql://db-host:3306/pipeline_params. "
-                 + "The password is fetched from Secret Manager via --paramDbCredentialSecretId.")
-    String getParamDbUrl();
-    void setParamDbUrl(String value);
+    @Description("GCP project that contains the parameter BigQuery dataset. "
+                 + "Defaults to the pipeline's --project if not set. "
+                 + "Example: my-gcp-project")
+    String getParamBqProject();
+    void setParamBqProject(String value);
 
-    @Description("Username for the parameter database.")
-    String getParamDbUser();
-    void setParamDbUser(String value);
+    @Description("BigQuery dataset that contains all parameter and config tables. "
+                 + "Example: pipeline_config")
+    @Default.String("pipeline_config")
+    String getParamBqDataset();
+    void setParamBqDataset(String value);
 
-    @Description("GCP Secret Manager resource name for the parameter DB password. "
-                 + "Format: projects/{project}/secrets/{secret}/versions/{version}. "
-                 + "Example: projects/my-project/secrets/param-db-password/versions/latest")
-    String getParamDbCredentialSecretId();
-    void setParamDbCredentialSecretId(String value);
+    @Description("BQ table name for the generic key-value parameter store. "
+                 + "Schema: process_name STRING, subprocess_name STRING, period_id STRING, "
+                 + "param_key STRING, param_value STRING. "
+                 + "Queried by (process_name, subprocess_name, period_id) to get run parameters.")
+    @Default.String("parameter_store")
+    String getParamStoreTable();
+    void setParamStoreTable(String value);
 
-    @Description("Database schema containing the source config tables. "
-                 + "Default: public (PostgreSQL). Set to empty string for MySQL/databases without schemas.")
-    @Default.String("public")
-    String getParamDbSchema();
-    void setParamDbSchema(String value);
+    @Description("BQ table name for the required-parameters index. "
+                 + "Schema: process_name STRING, subprocess_name STRING, param_key STRING, "
+                 + "is_required BOOL, description STRING. "
+                 + "Defines which param_keys each (process, subprocess) must have in parameter_store.")
+    @Default.String("required_parameters_index")
+    String getParamRequiredTable();
+    void setParamRequiredTable(String value);
 
-    @Description("Name of the source configuration table in the parameter DB. "
-                 + "Queried by (datasource_name, period_id, subprocess_name) to get source configs.")
+    @Description("BQ table name for the source configuration table. "
+                 + "Schema: datasource_name STRING, subprocess_name STRING, period_id STRING, "
+                 + "source_type STRING, output_bq_project STRING, output_bq_dataset STRING, "
+                 + "output_bq_table STRING, plus source-type-specific columns. "
+                 + "Queried by DATA_SOURCE_DOWNLOAD to find where each source writes its output.")
     @Default.String("source_config")
-    String getParamDbSourceConfigTable();
-    void setParamDbSourceConfigTable(String value);
-
-    @Description("Name of the required-parameters validation table. "
-                 + "Queried to check all mandatory parameters exist before the pipeline starts.")
-    @Default.String("required_parameters")
-    String getParamDbRequiredParamsTable();
-    void setParamDbRequiredParamsTable(String value);
+    String getParamSourceConfigTable();
+    void setParamSourceConfigTable(String value);
 
     // =========================================================================
     // CHECKPOINT STORAGE

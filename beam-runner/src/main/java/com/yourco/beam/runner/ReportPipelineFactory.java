@@ -12,12 +12,10 @@ import com.yourco.beam.model.ReportOutputConfig;
 import com.yourco.beam.model.ReportPreprocessingStep;
 import com.yourco.beam.model.ReportTransformStep;
 import com.yourco.beam.options.FrameworkOptions;
+import com.yourco.beam.io.config.BigQueryReportRepository;
 import com.yourco.beam.utils.DateUtils;
 import com.yourco.beam.utils.GcsUtils;
 import com.yourco.beam.utils.QueryParameterResolver;
-import com.yourco.beam.utils.db.DatabaseAdapter;
-import com.yourco.beam.utils.db.DatabaseAdapterFactory;
-import com.yourco.beam.utils.db.ReportRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -84,12 +82,9 @@ public final class ReportPipelineFactory {
         LOG.info("REPORT_PROCESSING | report={} subprocess={} period={}",
                  reportName, reportSubprocess, periodId);
 
-        // ── 1. Load config ────────────────────────────────────────────────────
-        ReportConfig config;
-        try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
-            ReportRepository repo = new ReportRepository(db, options);
-            config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
-        }
+        // ── 1. Load config from BigQuery ──────────────────────────────────────
+        BigQueryReportRepository repo = new BigQueryReportRepository(options);
+        ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
 
         // ── 2. Status: PENDING ────────────────────────────────────────────────
         ProcessStatusAdapter statusAdapter = new BigQueryProcessStatusAdapter(options);
@@ -189,14 +184,12 @@ public final class ReportPipelineFactory {
     private Map<String, String> buildAliasRegistry(ReportConfig config,
                                                     FrameworkOptions options) {
         Map<String, String> registry = new LinkedHashMap<>();
-        try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
-            ReportRepository repo = new ReportRepository(db, options);
-            for (ReportDatasourceRef ref : config.datasources) {
-                String tableRef = repo.fetchDatasourceOutputTable(
-                    ref.datasourceName, ref.datasourceSubprocess, config.periodId, options);
-                registry.put(ref.transformAlias, tableRef);
-                LOG.info("Alias '{}' → {}", ref.transformAlias, tableRef);
-            }
+        BigQueryReportRepository bqRepo = new BigQueryReportRepository(options);
+        for (ReportDatasourceRef ref : config.datasources) {
+            String tableRef = bqRepo.fetchDatasourceOutputTable(
+                ref.datasourceName, ref.datasourceSubprocess, config.periodId, options);
+            registry.put(ref.transformAlias, tableRef);
+            LOG.info("Alias '{}' → {}", ref.transformAlias, tableRef);
         }
         return registry;
     }
