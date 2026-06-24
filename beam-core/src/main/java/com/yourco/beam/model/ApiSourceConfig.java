@@ -5,13 +5,13 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * Configuration for a REST API data source, fetched from the parameter DB.
+ * Configuration for a REST API data source, fetched from the {@code source_config} BigQuery table.
  *
  * <p>All fields are serializable so this object can be stored as a DoFn field
  * and shipped to Dataflow workers. Non-serializable resources (HttpClient, auth tokens)
  * are created in {@code @Setup} inside the DoFn using the IDs stored here.
  *
- * <p>Corresponding columns in the {@code source_config} table (see ParameterRepository):
+ * <p>Corresponding columns in the {@code source_config} BQ table:
  * <pre>
  *   api_endpoint, api_auth_type, api_auth_secret_id, api_headers_json,
  *   api_query_params_json, api_pagination_enabled, api_pagination_strategy,

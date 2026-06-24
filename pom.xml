@@ -62,7 +62,6 @@
         <junit.version>5.10.1</junit.version>
         <mockito.version>5.8.0</mockito.version>
         <google.cloud.bom.version>26.29.0</google.cloud.bom.version>
-        <hikaricp.version>5.1.0</hikaricp.version>
         <commons-csv.version>1.10.0</commons-csv.version>
         <poi.version>5.2.5</poi.version>
         <jackson.version>2.16.1</jackson.version>
@@ -123,13 +122,6 @@
                 <version>${google.cloud.bom.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
-            </dependency>
-
-            <!-- ── JDBC connection pooling ──────────────────────────────── -->
-            <dependency>
-                <groupId>com.zaxxer</groupId>
-                <artifactId>HikariCP</artifactId>
-                <version>${hikaricp.version}</version>
             </dependency>
 
             <!-- ── CSV parsing ──────────────────────────────────────────── -->

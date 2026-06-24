@@ -27,7 +27,7 @@
             <groupId>com.yourco.beam</groupId>
             <artifactId>beam-transforms</artifactId>
         </dependency>
-        <!-- DataSourcePipelineFactory uses DateUtils, DatabaseAdapterFactory, ParameterRepository -->
+        <!-- shared utilities: DateUtils, SecretManagerUtils -->
         <dependency>
             <groupId>com.yourco.beam</groupId>
             <artifactId>beam-utils</artifactId>

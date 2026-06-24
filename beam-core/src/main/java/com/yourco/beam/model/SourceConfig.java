@@ -9,7 +9,7 @@ import java.util.List;
 /**
  * Complete configuration for one data source in a {@code DATA_SOURCE_DOWNLOAD} run.
  *
- * <p>Fetched from the parameter DB by {@link com.yourco.beam.utils.db.ParameterRepository}.
+ * <p>Fetched from the {@code source_config} BigQuery table by {@code BigQuerySourceConfigRepository}.
  * One {@link SourceConfig} corresponds to one independent Beam pipeline branch —
  * sources are <em>never</em> merged; each source reads, transforms, validates, and
  * writes to its own output independently.

@@ -15,10 +15,8 @@ import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.ProcessType;
+import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
 import com.yourco.beam.utils.DateUtils;
-import com.yourco.beam.utils.db.DatabaseAdapter;
-import com.yourco.beam.utils.db.DatabaseAdapterFactory;
-import com.yourco.beam.utils.db.ParameterRepository;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
@@ -51,8 +49,8 @@ import java.util.stream.Collectors;
  *
  * <h2>Orchestration steps</h2>
  * <ol>
- *   <li><b>Connect to parameter DB</b> — JDBC adapter + Secret Manager password.
- *       Connection is opened, configs fetched, then immediately closed.</li>
+ *   <li><b>Fetch source config from BigQuery</b> — {@link BigQuerySourceConfigRepository}
+ *       queries the {@code source_config} BQ table and returns typed {@link SourceConfig} objects.</li>
  *   <li><b>Validate required parameters</b> — fail fast before launching Dataflow.</li>
  *   <li><b>Fetch source configs</b> — one or more {@link SourceConfig} objects, each carrying
  *       their {@code outputConfig}, {@code queryConfig}, {@code sourceTransforms}, and
@@ -69,10 +67,9 @@ import java.util.stream.Collectors;
  * </ol>
  *
  * <h2>On-demand parameter access</h2>
- * DB connections are created and closed per access, not held open throughout. The driver JVM
- * accesses the DB in step 1-3 (config fetch) and step 8 (BnC queries against parameter DB).
- * Workers never hold a long-lived DB connection — they use {@code @Setup}/{@code @Teardown}
- * to create and close connections per-bundle.
+ * BigQuery is the only external system accessed by the driver JVM — no JDBC connections.
+ * Source configs are fetched once via {@link BigQuerySourceConfigRepository} before the
+ * Dataflow job is submitted.
  */
 public final class DataSourcePipelineFactory {
 
@@ -103,15 +100,11 @@ public final class DataSourcePipelineFactory {
                  jobRunId, options.getDatasourceName(), options.getPeriodId(),
                  options.getSubprocessName(), options.getPeriodStart(), options.getPeriodEnd());
 
-        // ── Step 1-3: DB validation and source config fetch ────────────────
-        // Pattern: open → fetch → close. DB is not held open during graph assembly.
-        List<SourceConfig> sourceConfigs;
-        try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
-            ParameterRepository repo = new ParameterRepository(db, options);
-            validateRequiredParameters(repo, options);
-            sourceConfigs = repo.fetchSourceConfigs(
-                options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
-        }
+        // ── Step 1-3: BQ validation and source config fetch ───────────────
+        BigQuerySourceConfigRepository bqRepo = new BigQuerySourceConfigRepository(options);
+        validateRequiredParameters(bqRepo, options);
+        List<SourceConfig> sourceConfigs = bqRepo.fetchSourceConfigs(
+            options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
 
         // ── Step 4: Filter by checkpoint ──────────────────────────────────
@@ -340,10 +333,10 @@ public final class DataSourcePipelineFactory {
 
     // ── Validation helpers ────────────────────────────────────────────────────
 
-    private void validateRequiredParameters(ParameterRepository repo, FrameworkOptions options) {
-        String datasource  = options.getDatasourceName();
-        String period      = options.getPeriodId();
-        String subprocess  = options.getSubprocessName();
+    private void validateRequiredParameters(BigQuerySourceConfigRepository repo, FrameworkOptions options) {
+        String datasource = options.getDatasourceName();
+        String period     = options.getPeriodId();
+        String subprocess = options.getSubprocessName();
 
         if (datasource == null || datasource.isBlank()) {
             throw new PipelineConfigurationException("--datasourceName is required for DATA_SOURCE_DOWNLOAD");
@@ -352,12 +345,12 @@ public final class DataSourcePipelineFactory {
             throw new PipelineConfigurationException("--periodId is required for DATA_SOURCE_DOWNLOAD");
         }
 
-        LOG.info("Validating required parameters in DB for datasource={}, period={}, subprocess={}",
+        LOG.info("Validating required parameters in BQ for datasource={}, period={}, subprocess={}",
                  datasource, period, subprocess);
         List<String> missing = repo.getMissingParameters(datasource, period, subprocess);
         if (!missing.isEmpty()) {
             throw new PipelineConfigurationException(
-                "Required parameters missing from DB — cannot start pipeline. Missing: " + missing
+                "Required parameters missing from BQ — cannot start pipeline. Missing: " + missing
                 + ". Datasource=" + datasource + ", period=" + period + ", subprocess=" + subprocess);
         }
         LOG.info("All required parameters present.");

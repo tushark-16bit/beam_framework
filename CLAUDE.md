@@ -56,7 +56,8 @@ triggered by Apache Airflow. It supports two process types:
 
 - **DATA_SOURCE_DOWNLOAD** — fetches raw data from external sources (API, file, BigQuery),
   applies per-source transforms (lookup, group-by, sort), validates output, and writes to
-  per-source BQ tables. Configured from a JDBC parameter DB — no code changes for new sources.
+  per-source BQ tables. Source config fetched from the **BigQuery** `source_config` table via
+  `BigQuerySourceConfigRepository` — no JDBC, no code changes for new sources.
 - **REPORT_PROCESSING** — reads downloaded data, applies a chained BigQuery transformation
   sequence, exports results to GCS files, and sends email with attachments. When `--reportName`
   is set, runs entirely in the driver JVM (no Dataflow job). All report configuration
@@ -103,7 +104,7 @@ Read in this order for a complete mental model:
 8.  beam-io/.../io/config/BigQueryReportRepository    — report config tables fetched from BQ
 9.  beam-core/.../transform/BeamTransform.java        — SPI interface; the extension contract
 10. beam-runner/.../runner/PipelineFactory.java       — legacy REPORT_PROCESSING (transform chain)
-11. beam-utils/.../db/ParameterRepository.java        — source config loaded from JDBC (DATA_SOURCE_DOWNLOAD only)
+11. beam-io/.../io/config/BigQuerySourceConfigRepository — source config rows fetched from BQ (DATA_SOURCE_DOWNLOAD)
 12. beam-io/.../io/source/SourceRouter.java            — source type → connector mapping
 13. beam-runner/.../runner/SourceTransformChainAssembler — LOOKUP/GROUP_BY/SORT_BY assembly
 14. beam-io/.../io/report/BigQueryJobService.java      — how BQ jobs run for reports
@@ -195,8 +196,10 @@ params/BigQueryParameterAdapter.java     Interface: fetchRequiredKeys(), fetchPa
 params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@key). Reads --paramBqProject/Dataset/StoreTable/RequiredTable.
                                          fetchRequiredParameters() = look up index → fetch values → validate all present.
 
-config/BigQueryReportRepository.java  BQ replacement for JDBC ReportRepository. Queries all 6 report config tables
-                                      from BQ using named params. fetchReportConfig() and fetchDatasourceOutputTable().
+config/BigQueryReportRepository.java       Queries all 6 report config BQ tables using named params.
+                                           fetchReportConfig() and fetchDatasourceOutputTable().
+config/BigQuerySourceConfigRepository.java Queries source_config BQ table for DATA_SOURCE_DOWNLOAD.
+                                           fetchSourceConfigs(), getMissingParameters(). Row → SourceConfig mapping.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
 ```
@@ -213,13 +216,6 @@ CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyO
 DateUtils.java              resolveRunDate(), partitionedPath(), shardedTable(), toDisplayString().
 QueryParameterResolver.java resolve(template, paramMappings, options). Two-pass: standard then custom tokens.
 
-db/DatabaseAdapter.java         Interface: query(), queryOne(), update(), close().
-db/JdbcDatabaseAdapter.java     JDBC + HikariCP. One pool per instance. Always try-with-resources.
-db/DatabaseAdapterFactory.java  Static factory: reads --paramDb* options, fetches password from Secret Manager.
-db/ParameterRepository.java     Source config queries (DATA_SOURCE_DOWNLOAD only): validate params, fetchSourceConfigs().
-db/ReportRepository.java        DEPRECATED — JDBC version of report config queries. Superseded by
-                                BigQueryReportRepository in beam-io. Kept for reference only.
-db/DatabaseException.java       Unchecked wrapper for SQLException.
 ```
 
 ### beam-transforms — pluggable transform implementations
@@ -234,7 +230,6 @@ source/SortByTransform.java         Per-bundle sort (@StartBundle/@FinishBundle)
 source/LookupEnrichTransform.java   Left-join via PCollectionView<Map<String,String>> (key → JSON blob).
 
 side/SideEffectEmailTransform.java  Sends SMTP email per Row. No attachments. Best-effort (logs on fail).
-side/SideEffectDbWriteTransform.java Inserts each Row into a JDBC table.
 
 META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 ```
@@ -315,7 +310,7 @@ Sources are **never merged**. Each `SourceConfig` is an independent Beam DAG bra
 3. Create `MySourceAdapter` (pure Java, no Beam) in `beam-io/source/`
 4. Create `MySourceTransform` (thin Beam wrapper) in `beam-io/source/`
 5. Add a case to `SourceRouter.routeFromConfig()` switch
-6. Add required config fields to `SourceConfig` model and `ParameterRepository`
+6. Add required config fields to `SourceConfig` model and `BigQuerySourceConfigRepository.rowToSourceConfig()`
 7. Update `beam-io/README.md` and root `README.md`
 
 ### Add a new per-source transform type
@@ -323,7 +318,7 @@ Sources are **never merged**. Each `SourceConfig` is an independent Beam DAG bra
 1. Create the transform class in `beam-transforms/source/` extending `PTransform<PCollection<Row>, PCollection<Row>>`
 2. Add the type constant to `SourceTransformConfig` (e.g., `public static final String MY_TYPE = "MY_TYPE"`)
 3. Add a case to `SourceTransformChainAssembler.assemble()` switch
-4. Add config fields to `SourceTransformConfig` and its JSON parsing in `ParameterRepository.parseSourceTransforms()`
+4. Add config fields to `SourceTransformConfig` and its JSON parsing in `BigQuerySourceConfigRepository.toSourceTransforms()`
 5. Update `beam-transforms/README.md`
 
 ### Add a new report transformation step type
@@ -360,10 +355,8 @@ in the registry. Custom tokens go in `query_params_json`.
 Main.runDataSourceDownload(options)
 │
 ├─ DataSourcePipelineFactory.assemble(options)
-│   ├─ DatabaseAdapterFactory.create(options)          JDBC connection pool (open)
-│   ├─ ParameterRepository.allRequiredParametersExist  fail fast if config missing
-│   ├─ ParameterRepository.fetchSourceConfigs()        load all SourceConfig rows
-│   ├─ db.close()
+│   ├─ BigQuerySourceConfigRepository.getMissingParameters()  fail fast if config missing
+│   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load all SourceConfig rows from BQ
 │   │
 │   └─ for each SourceConfig:
 │       ├─ BigQueryCheckpointAdapter.getCheckpoint()   skip if FINISHED_ACCESSING
@@ -485,8 +478,8 @@ Map<String, String> params = adapter.fetchRequiredParameters(reportName, subproc
 | `--paramRequiredTable` | `required_parameters_index` | Required-params index table |
 | `--paramSourceConfigTable` | `source_config` | Source config table (for alias registry) |
 
-**Note**: `--paramDbUrl` / `--paramDbUser` / `--paramDbCredentialSecretId` are only used by
-`DATA_SOURCE_DOWNLOAD` (JDBC `ParameterRepository`). They are not read by `ReportPipelineFactory`.
+**Note**: All configuration — for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING — is fetched
+from **BigQuery** via `BigQuerySourceConfigRepository` or `BigQueryReportRepository`. No JDBC.
 
 ---
 
@@ -528,7 +521,7 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 | Merge per-source outputs with `Flatten.pCollections()` | Keep each source as an independent branch |
 | Hold secrets in FrameworkOptions values | Pass Secret Manager ID, fetch value at runtime |
 | Call `BigQuerySchemaUtils`, `GcsUtils`, `BigQueryReportRepository` inside a DoFn | Call in driver JVM only |
-| Use JDBC (DatabaseAdapterFactory) for report config in REPORT_PROCESSING | Use BigQueryReportRepository instead |
+| Make any JDBC / SQL database connection | All config is in BigQuery — use BigQuerySourceConfigRepository or BigQueryReportRepository |
 | Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from required_parameters_index |
 | Create `TupleTag` inside `@ProcessElement` | `static final` field on the DoFn |
 | Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
@@ -671,7 +664,8 @@ mvn -pl beam-runner exec:java \
 4. Each `SourceConfig` produces exactly one independent Beam branch — never merged.
 5. `BeamTransform` implementations always output to both `SUCCESS_TAG` and `DEAD_LETTER_TAG`.
 6. Secrets are never stored in `FrameworkOptions` values — only Secret Manager IDs.
-7. `BigQueryJobService`, `GcsUtils`, `BigQueryReportRepository`, and `BigQueryParameterAdapter` are driver-JVM only — never inside DoFns.
+7. `BigQueryJobService`, `GcsUtils`, `BigQueryReportRepository`, `BigQuerySourceConfigRepository`, and `BigQueryParameterAdapter` are driver-JVM only — never inside DoFns.
+11. No JDBC. No SQL database connections. All config and data flow through BigQuery.
 8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
 9. Every code change is accompanied by a README update in the same commit.
 10. `process_status` rows are written before and after every source download and every report run.

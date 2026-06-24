@@ -53,12 +53,7 @@
             <artifactId>google-cloud-secretmanager</artifactId>
         </dependency>
 
-        <!-- JDBC connection pool for parameter DB access -->
-        <dependency>
-            <groupId>com.zaxxer</groupId>
-            <artifactId>HikariCP</artifactId>
-        </dependency>
-        <!-- JSON parsing for API query params / headers stored as JSON in param DB -->
+        <!-- JSON parsing for config stored as JSON in BQ -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>

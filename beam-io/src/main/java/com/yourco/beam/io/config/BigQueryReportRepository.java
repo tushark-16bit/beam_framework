@@ -28,7 +28,7 @@ import java.util.stream.Collectors;
 /**
  * Fetches structured report configuration from BigQuery tables.
  *
- * <p>This class is the BigQuery equivalent of the JDBC {@code ReportRepository}.
+ * <p>All six report config tables live in the BQ dataset specified by
  * All six report config tables live in the same BQ dataset specified by
  * {@code --paramBqProject} and {@code --paramBqDataset}.
  *

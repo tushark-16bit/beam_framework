@@ -9,12 +9,7 @@ import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.transforms.source.GroupByTransform;
 import com.yourco.beam.transforms.source.LookupEnrichTransform;
 import com.yourco.beam.transforms.source.SortByTransform;
-import com.yourco.beam.utils.db.DatabaseAdapter;
-import com.yourco.beam.utils.db.DatabaseAdapterFactory;
-import org.apache.beam.sdk.coders.KvCoder;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
-import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.values.KV;
@@ -26,9 +21,7 @@ import org.apache.beam.sdk.values.TypeDescriptors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -40,29 +33,16 @@ import java.util.Map;
  * The output of each step is the input to the next.
  *
  * <h2>Why this is in beam-runner, not beam-transforms</h2>
- * The LOOKUP step requires loading lookup data from BigQuery (via {@code BigQueryIO.read()})
- * or from the parameter JDBC database. Both of these are available only in {@code beam-runner}
- * (BigQueryIO via beam-io, JDBC via beam-utils). Keeping this class in beam-runner avoids
- * introducing those dependencies into beam-transforms.
+ * The LOOKUP step requires {@code BigQueryIO.readTableRows()}, which is only available
+ * in {@code beam-runner} (via beam-io). Keeping this class in beam-runner avoids
+ * pulling that dependency into beam-transforms.
  *
  * <h2>Lookup data loading strategy</h2>
- * <ul>
- *   <li>{@code JDBC} lookup — the driver JVM fetches all lookup rows from the parameter DB
- *       before the pipeline runs, wraps them in a {@code PCollectionView<Map<String,String>>}
- *       via {@code Create.of()}, and passes them as a Beam side input.</li>
- *   <li>{@code BQ} lookup — lookup rows are read via {@code BigQueryIO.readTableRows()}
- *       as part of the Beam graph, keyed, and converted to the same
- *       {@code PCollectionView<Map<String,String>>} format.</li>
- * </ul>
- *
- * <p>The map value is always a JSON string of the full lookup row, so the
+ * Lookup rows are read via {@code BigQueryIO.readTableRows()} as part of the Beam graph,
+ * keyed by {@link LookupConfig#lookupKeyField}, and converted to a
+ * {@code PCollectionView<Map<String,String>>} side input.
+ * The map value is a JSON string of the full lookup row so
  * {@link LookupEnrichTransform} doesn't need to know the lookup schema up front.
- *
- * <h2>On-demand parameter access pattern</h2>
- * For JDBC lookup, a fresh {@link DatabaseAdapter} is created, queried, and closed
- * within this method — exactly the "create connection → fetch → close" pattern the
- * framework enforces for all parameter access. The JDBC credentials come from
- * {@code FrameworkOptions} (param DB options).
  */
 public final class SourceTransformChainAssembler {
 
@@ -77,8 +57,8 @@ public final class SourceTransformChainAssembler {
      *
      * @param data     the raw source data, freshly fetched from the source
      * @param config   the source configuration carrying the transform chain
-     * @param options  pipeline options (used for param DB access for JDBC lookups)
-     * @param pipeline the root pipeline (needed to add lookup source branches for BQ lookups)
+     * @param options  pipeline options (passed through for transforms that need them)
+     * @param pipeline the root pipeline (needed to add the BQ lookup read branch)
      * @return the data after all transforms have been applied in order
      */
     public static PCollection<Row> assemble(PCollection<Row> data, SourceConfig config,
@@ -123,57 +103,9 @@ public final class SourceTransformChainAssembler {
     private static PCollection<Row> applyLookup(PCollection<Row> data, LookupConfig lookupConfig,
                                                  String label, FrameworkOptions options,
                                                  Pipeline pipeline) {
-        PCollectionView<Map<String, String>> lookupView;
-
-        if (lookupConfig.isJdbcSource()) {
-            lookupView = buildJdbcLookupView(lookupConfig, label, options, pipeline);
-        } else {
-            lookupView = buildBqLookupView(lookupConfig, label, pipeline);
-        }
-
+        PCollectionView<Map<String, String>> lookupView = buildBqLookupView(lookupConfig, label, pipeline);
         return data.apply("LookupEnrich-" + label,
             new LookupEnrichTransform(lookupConfig, lookupView, label));
-    }
-
-    /**
-     * Loads lookup data from the parameter JDBC DB in the driver JVM (before pipeline.run()).
-     *
-     * <p>Pattern: create connection → query → close. The data is small enough to fit in
-     * memory (lookup tables are reference data, typically < 100k rows).
-     */
-    private static PCollectionView<Map<String, String>> buildJdbcLookupView(
-            LookupConfig lookupConfig, String label,
-            FrameworkOptions options, Pipeline pipeline) {
-
-        LOG.info("Loading JDBC lookup table for source '{}' — query: {}", label, lookupConfig.jdbcQuery);
-
-        List<KV<String, String>> kvList = new ArrayList<>();
-        try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
-            List<Map<String, Object>> rows = db.query(lookupConfig.jdbcQuery);
-            LOG.info("Loaded {} lookup rows for source '{}'", rows.size(), label);
-
-            for (Map<String, Object> row : rows) {
-                Object keyVal = row.get(lookupConfig.lookupKeyField);
-                if (keyVal == null) continue;
-                String key = keyVal.toString();
-                // Convert all field values to String for serialization as JSON
-                Map<String, String> strRow = new HashMap<>();
-                for (Map.Entry<String, Object> entry : row.entrySet()) {
-                    strRow.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : null);
-                }
-                try {
-                    kvList.add(KV.of(key, JSON.writeValueAsString(strRow)));
-                } catch (Exception e) {
-                    LOG.warn("Could not serialize lookup row for key {}: {}", key, e.getMessage());
-                }
-            }
-        }
-
-        return pipeline
-            .apply("LookupData-" + label,
-                   Create.of(kvList).withCoder(KvCoder.of(
-                       StringUtf8Coder.of(), StringUtf8Coder.of())))
-            .apply("LookupView-" + label, View.asMap());
     }
 
     /**

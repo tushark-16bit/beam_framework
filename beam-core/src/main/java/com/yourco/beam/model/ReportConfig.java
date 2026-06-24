@@ -5,8 +5,8 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Complete configuration for one report run, assembled from multiple DB tables
- * by {@code ReportRepository}.
+ * Complete configuration for one report run, assembled from the six BigQuery
+ * config tables by {@code BigQueryReportRepository}.
  *
  * <h2>Execution order inside ReportPipelineFactory</h2>
  * <ol>
