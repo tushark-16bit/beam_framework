@@ -217,11 +217,9 @@ sequenceDiagram
     participant SMTP as SMTP Server
 
     Main->>RPF: execute(options)
-    RPF->>DB: DatabaseAdapterFactory.create()
-    RPF->>DB: ReportRepository.fetchReportConfig(reportName, subprocess, periodId)
-    Note over DB: Queries 6 tables:<br/>report_config<br/>report_datasource_ref<br/>report_preprocessing_config<br/>report_transformation_config<br/>report_output_config<br/>report_email_config
-    DB-->>RPF: ReportConfig
-    RPF->>DB: close()
+    RPF->>BQ: BigQueryReportRepository.fetchReportConfig(reportName, subprocess, periodId)
+    Note over BQ: Queries 6 BQ tables (--paramBqProject.--paramBqDataset):<br/>report_config<br/>report_datasource_ref<br/>report_preprocessing_config<br/>report_transformation_config<br/>report_output_config<br/>report_email_config<br/>All queries use named BQ params (@key) — no JDBC
+    BQ-->>RPF: ReportConfig
 
     RPF->>Status: write(PENDING — processType=REPORT_PROCESSING)
 
@@ -243,8 +241,8 @@ sequenceDiagram
         end
     end
 
-    RPF->>DB: ReportRepository.fetchDatasourceOutputTable() × N
-    Note over RPF: Build alias registry:<br/>alias → project.dataset.table
+    RPF->>BQ: BigQueryReportRepository.fetchDatasourceOutputTable() × N
+    Note over RPF: Build alias registry:<br/>alias → project.dataset.table<br/>(queries source_config BQ table)
 
     loop each ReportTransformStep (by step_order)
         RPF->>RPF: resolveAliasTokens({alias} → backtick table ref)
@@ -645,7 +643,7 @@ DataflowStartJobOperator(
         "--periodStart":        "2024-01-01",
         "--periodEnd":          "2024-01-31",
         "--runDate":            "{{ ds }}",
-        "--paramDbUrl":         "jdbc:postgresql://db-host:5432/pipeline_params",
+        "--paramDbUrl":         "jdbc:postgresql://db-host:5432/pipeline_params",  # still used by DATA_SOURCE_DOWNLOAD
         "--paramDbUser":        "pipeline_user",
         "--paramDbCredentialSecretId": "projects/p/secrets/db-password/versions/latest",
         "--checkpointBqDataset": "pipeline_metadata",
@@ -671,21 +669,21 @@ DataflowStartJobOperator(
         "--periodStart":        "2024-01-01",
         "--periodEnd":          "2024-01-31",
         "--runDate":            "{{ ds }}",
-        "--paramDbUrl":         "jdbc:postgresql://db-host:5432/pipeline_params",
-        "--paramDbUser":        "pipeline_user",
-        "--paramDbCredentialSecretId": "projects/p/secrets/db-password/versions/latest",
+        "--paramBqProject":     "my-gcp-project",        # replaces --paramDbUrl for REPORT_PROCESSING
+        "--paramBqDataset":     "pipeline_config",        # BQ dataset holding all report config tables
         "--processStatusBqDataset": "pipeline_metadata",
         "--emailSmtpHost":      "smtp.gmail.com",
         "--emailSmtpPort":      "587",
         "--smtpPasswordSecretId": "projects/p/secrets/smtp-password/versions/latest",
         "--devErrorEmail":      "reports@company.com",
-        # --sinkType is NOT required for DB-configured REPORT_PROCESSING
+        # --sinkType is NOT required for BQ-configured REPORT_PROCESSING
     }
 )
 ```
 
 > **Note**: When `--reportName` is set, `--sinkType`, `--sourceType`, and `--transformChain` are not used.
-> The entire pipeline is driven by the `report_*` DB tables.
+> Config is loaded from BigQuery tables via `BigQueryReportRepository` — no JDBC required.
+> Use `--paramBqProject` + `--paramBqDataset` to point at the config dataset.
 
 ---
 
@@ -704,9 +702,11 @@ Where to find things in the source tree:
 | Lookup transform (side input) | [`beam-transforms/.../transforms/source/LookupEnrichTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/LookupEnrichTransform.java) |
 | Group-by transform | [`beam-transforms/.../transforms/source/GroupByTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/GroupByTransform.java) |
 | Query token resolution | [`beam-utils/.../utils/QueryParameterResolver.java`](beam-utils/src/main/java/com/yourco/beam/utils/QueryParameterResolver.java) |
-| DB parameter loading (source) | [`beam-utils/.../utils/db/ParameterRepository.java`](beam-utils/src/main/java/com/yourco/beam/utils/db/ParameterRepository.java) |
-| DB parameter loading (report) | [`beam-utils/.../utils/db/ReportRepository.java`](beam-utils/src/main/java/com/yourco/beam/utils/db/ReportRepository.java) |
+| Source config loading (DATA_SOURCE_DOWNLOAD, JDBC) | [`beam-utils/.../utils/db/ParameterRepository.java`](beam-utils/src/main/java/com/yourco/beam/utils/db/ParameterRepository.java) |
+| Report config loading (REPORT_PROCESSING, BQ) | [`beam-io/.../io/config/BigQueryReportRepository.java`](beam-io/src/main/java/com/yourco/beam/io/config/BigQueryReportRepository.java) |
+| Key-value BQ parameter store | [`beam-io/.../io/params/BigQueryParameterAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/params/BigQueryParameterAdapter.java) |
 | BQ job execution | [`beam-io/.../io/report/BigQueryJobService.java`](beam-io/src/main/java/com/yourco/beam/io/report/BigQueryJobService.java) |
+| End-to-end BQ param example | [`beam-runner/.../runner/example/ExampleWorkflow.java`](beam-runner/src/main/java/com/yourco/beam/runner/example/ExampleWorkflow.java) |
 | Process status tracking | [`beam-io/.../io/status/BigQueryProcessStatusAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/status/BigQueryProcessStatusAdapter.java) |
 | Email interface | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
 | Email SMTP implementation | [`beam-runner/.../runner/SmtpReportEmailAdapter.java`](beam-runner/src/main/java/com/yourco/beam/runner/SmtpReportEmailAdapter.java) |
