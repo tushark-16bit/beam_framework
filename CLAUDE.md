@@ -15,12 +15,12 @@ triggered by Apache Airflow. It supports two process types:
 
 - **DATA_SOURCE_DOWNLOAD** — fetches raw data from external sources (API, file, BigQuery),
   applies per-source transforms (lookup, group-by, sort), validates output, and writes to
-  per-source BQ tables. Entirely configured from a JDBC parameter DB — no code changes for
-  new sources.
+  per-source BQ tables. Configured from a JDBC parameter DB — no code changes for new sources.
 - **REPORT_PROCESSING** — reads downloaded data, applies a chained BigQuery transformation
   sequence, exports results to GCS files, and sends email with attachments. When `--reportName`
-  is set, runs entirely in the driver JVM (no Dataflow job). Falls back to a generic
-  source → transform chain → sink Beam pipeline when `--reportName` is blank.
+  is set, runs entirely in the driver JVM (no Dataflow job). All report configuration
+  (6 report config tables + key-value parameter store) is fetched from **BigQuery** — no JDBC.
+  Falls back to a generic source → transform chain → sink Beam pipeline when `--reportName` is blank.
 
 ---
 
@@ -37,7 +37,7 @@ triggered by Apache Airflow. It supports two process types:
 | Change to pipeline assembly logic | `beam-runner/README.md` |
 | New module | Root `README.md` (module structure + dependency diagram) |
 | Any architectural change | Root `README.md` + `WALKTHROUGH.md` (update the relevant diagram) |
-| New DB table or column | `beam-utils/README.md` (DDL section) + root `README.md` |
+| New BQ param/config table | `beam-io/README.md` (BQ config section) + root `README.md` |
 | New model class | `beam-core/README.md` (model table) + this file (section 4 file map) |
 
 If you add a class → describe it.
@@ -53,18 +53,20 @@ Read in this order for a complete mental model:
 
 ```
 1.  WALKTHROUGH.md                                    — UML diagrams + execution flows (read this first)
-2.  beam-core/.../options/FrameworkOptions.java       — all CLI flags; the config contract
-3.  beam-runner/.../runner/Main.java                  — entry point; how process type routes
-4.  beam-runner/.../runner/DataSourcePipelineFactory  — DATA_SOURCE_DOWNLOAD orchestration
-5.  beam-runner/.../runner/ReportPipelineFactory      — REPORT_PROCESSING orchestration
-6.  beam-core/.../transform/BeamTransform.java        — SPI interface; the extension contract
-7.  beam-runner/.../runner/PipelineFactory.java       — legacy REPORT_PROCESSING (transform chain)
-8.  beam-utils/.../db/ParameterRepository.java        — how source config is loaded from DB
-9.  beam-utils/.../db/ReportRepository.java           — how report config is loaded from DB
-10. beam-io/.../io/source/SourceRouter.java            — source type → connector mapping
-11. beam-runner/.../runner/SourceTransformChainAssembler — LOOKUP/GROUP_BY/SORT_BY assembly
-12. beam-io/.../io/report/BigQueryJobService.java      — how BQ jobs run for reports
-13. beam-io/.../io/status/ProcessStatusAdapter.java    — status tracking interface
+2.  EXAMPLE.md                                        — end-to-end BQ param store example with DDL + run command
+3.  beam-core/.../options/FrameworkOptions.java       — all CLI flags; the config contract
+4.  beam-runner/.../runner/Main.java                  — entry point; how process type routes
+5.  beam-runner/.../runner/DataSourcePipelineFactory  — DATA_SOURCE_DOWNLOAD orchestration
+6.  beam-runner/.../runner/ReportPipelineFactory      — REPORT_PROCESSING orchestration (BQ-based)
+7.  beam-io/.../io/params/BigQueryParameterAdapter    — key-value BQ param store interface + impl
+8.  beam-io/.../io/config/BigQueryReportRepository    — report config tables fetched from BQ
+9.  beam-core/.../transform/BeamTransform.java        — SPI interface; the extension contract
+10. beam-runner/.../runner/PipelineFactory.java       — legacy REPORT_PROCESSING (transform chain)
+11. beam-utils/.../db/ParameterRepository.java        — source config loaded from JDBC (DATA_SOURCE_DOWNLOAD only)
+12. beam-io/.../io/source/SourceRouter.java            — source type → connector mapping
+13. beam-runner/.../runner/SourceTransformChainAssembler — LOOKUP/GROUP_BY/SORT_BY assembly
+14. beam-io/.../io/report/BigQueryJobService.java      — how BQ jobs run for reports
+15. beam-io/.../io/status/ProcessStatusAdapter.java    — status tracking interface
 ```
 
 ---
@@ -148,6 +150,13 @@ email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, Lis
 
 report/BigQueryJobService.java        Driver-JVM BQ jobs: runQueryToTable(), exportToCsv(), exportToJson().
 
+params/BigQueryParameterAdapter.java     Interface: fetchRequiredKeys(), fetchParameters(), fetchRequiredParameters().
+params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@key). Reads --paramBqProject/Dataset/StoreTable/RequiredTable.
+                                         fetchRequiredParameters() = look up index → fetch values → validate all present.
+
+config/BigQueryReportRepository.java  BQ replacement for JDBC ReportRepository. Queries all 6 report config tables
+                                      from BQ using named params. fetchReportConfig() and fetchDatasourceOutputTable().
+
 util/JsonUtils.java                   Row → JSON with correct type handling.
 ```
 
@@ -166,8 +175,9 @@ QueryParameterResolver.java resolve(template, paramMappings, options). Two-pass:
 db/DatabaseAdapter.java         Interface: query(), queryOne(), update(), close().
 db/JdbcDatabaseAdapter.java     JDBC + HikariCP. One pool per instance. Always try-with-resources.
 db/DatabaseAdapterFactory.java  Static factory: reads --paramDb* options, fetches password from Secret Manager.
-db/ParameterRepository.java     Source config queries: validate params, fetchSourceConfigs() with all columns.
-db/ReportRepository.java        Report config queries: fetchReportConfig(), fetchDatasourceOutputTable().
+db/ParameterRepository.java     Source config queries (DATA_SOURCE_DOWNLOAD only): validate params, fetchSourceConfigs().
+db/ReportRepository.java        DEPRECATED — JDBC version of report config queries. Superseded by
+                                BigQueryReportRepository in beam-io. Kept for reference only.
 db/DatabaseException.java       Unchecked wrapper for SQLException.
 ```
 
@@ -194,9 +204,14 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 Main.java                       Parses CLI → routes by processType + reportName.
 PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink.
 DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches, post-pipeline validation.
-ReportPipelineFactory.java      REPORT_PROCESSING (DB-configured): driver-JVM BQ jobs + email.
+ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
+                                Uses BigQueryReportRepository (not JDBC) for all config loading.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
 SmtpReportEmailAdapter.java     SMTP impl of ReportEmailAdapter. MimeMultipart for attachments.
+
+example/ExampleWorkflow.java    Self-contained end-to-end example. Shows: BigQueryParameterAdapter
+                                → fetchRequiredParameters → resolve tokens → BigQueryJobService
+                                → exportToCsv → GCS. See EXAMPLE.md for BQ setup + run command.
 ```
 
 ---
@@ -340,9 +355,11 @@ Triggered when `--reportName` is set. Runs entirely in driver JVM — **no Beam 
 Main.runReportProcessing(options)
 │
 └─ ReportPipelineFactory.execute(options)
-    ├─ DatabaseAdapterFactory.create()
-    ├─ ReportRepository.fetchReportConfig()            load all 6 report tables
-    ├─ db.close()
+    ├─ BigQueryReportRepository.fetchReportConfig()    BQ query all 6 report config tables
+    │                                                  (report_config, report_datasource_ref,
+    │                                                   report_preprocessing_config,
+    │                                                   report_transformation_config,
+    │                                                   report_output_config, report_email_config)
     ├─ BigQueryProcessStatusAdapter.write(PENDING)
     │
     ├─ Phase 1: Preprocessing (optional)
@@ -354,8 +371,8 @@ Main.runReportProcessing(options)
     │       └─ ProcessStatusAdapter.getLatest() → must be COMPLETED or FAIL
     │
     ├─ Phase 3: Build alias registry
-    │   └─ ReportRepository.fetchDatasourceOutputTable() × N
-    │       → alias → "project.dataset.table"
+    │   └─ BigQueryReportRepository.fetchDatasourceOutputTable() × N
+    │       → alias → "project.dataset.table"  (queries source_config BQ table)
     │
     ├─ Phase 4: Transformation chain
     │   └─ for each ReportTransformStep (by step_order):
@@ -380,7 +397,59 @@ Main.runReportProcessing(options)
 
 ---
 
-## 10. Query token resolution — three layers in order
+## 10. BigQuery parameter store — how config is fetched for REPORT_PROCESSING
+
+All REPORT_PROCESSING configuration lives in BigQuery, in the dataset specified by
+`--paramBqProject` + `--paramBqDataset`. There are two conceptual layers:
+
+### Layer A — Structured report config (6 tables, queried by BigQueryReportRepository)
+
+These mirror the old JDBC tables, now stored in BQ:
+
+| BQ Table | Contents | Key columns |
+|---|---|---|
+| `report_config` | One row per report variant | report_name, report_subprocess, period_id, override_key |
+| `report_datasource_ref` | Which datasources a report needs | datasource_name, transform_alias, is_required |
+| `report_preprocessing_config` | Pre-run BQ queries / API enrichment | step_order, bq_query, query_params_json |
+| `report_transformation_config` | Chain of BQ transform queries | step_order, query_template, input_alias, output_alias |
+| `report_output_config` | File output specs | output_format (CSV/JSON), gcs_path, file_prefix, file_suffix |
+| `report_email_config` | Email recipients + templates | to_list, cc_list, subject_template, body_template |
+
+### Layer B — Generic key-value parameter store (2 tables, queried by BigQueryParameterAdapter)
+
+Used by `ExampleWorkflow` and any custom report code that prefers flat key-value config
+over the structured 6-table schema:
+
+| BQ Table | Contents | Key columns |
+|---|---|---|
+| `parameter_store` | One row per param per period | process_name, subprocess_name, period_id, param_key, param_value |
+| `required_parameters_index` | Which keys each process needs | process_name, subprocess_name, param_key, is_required |
+
+**Typical call sequence:**
+```java
+BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
+// 1. Look up required keys from required_parameters_index
+// 2. Fetch values from parameter_store
+// 3. Validate all required keys present → throws IllegalStateException if missing
+Map<String, String> params = adapter.fetchRequiredParameters(reportName, subprocess, periodId);
+```
+
+### New CLI flags (replace --paramDb* JDBC flags for REPORT_PROCESSING)
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--paramBqProject` | `--project` | GCP project for all config BQ tables |
+| `--paramBqDataset` | `pipeline_config` | BQ dataset |
+| `--paramStoreTable` | `parameter_store` | Key-value store table |
+| `--paramRequiredTable` | `required_parameters_index` | Required-params index table |
+| `--paramSourceConfigTable` | `source_config` | Source config table (for alias registry) |
+
+**Note**: `--paramDbUrl` / `--paramDbUser` / `--paramDbCredentialSecretId` are only used by
+`DATA_SOURCE_DOWNLOAD` (JDBC `ParameterRepository`). They are not read by `ReportPipelineFactory`.
+
+---
+
+## 11. Query token resolution — three layers in order
 
 For both DATA_SOURCE_DOWNLOAD (BQ queries) and REPORT_PROCESSING (transform chain):
 
@@ -407,7 +476,7 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 
 ---
 
-## 11. Things you must never do
+## 12. Things you must never do
 
 | Never | Do instead |
 |---|---|
@@ -417,7 +486,9 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 | Import from `beam-io` inside `beam-utils` | `beam-utils → beam-core` only |
 | Merge per-source outputs with `Flatten.pCollections()` | Keep each source as an independent branch |
 | Hold secrets in FrameworkOptions values | Pass Secret Manager ID, fetch value at runtime |
-| Call `BigQuerySchemaUtils`, `GcsUtils`, `ReportRepository` inside a DoFn | Call in driver JVM only |
+| Call `BigQuerySchemaUtils`, `GcsUtils`, `BigQueryReportRepository` inside a DoFn | Call in driver JVM only |
+| Use JDBC (DatabaseAdapterFactory) for report config in REPORT_PROCESSING | Use BigQueryReportRepository instead |
+| Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from required_parameters_index |
 | Create `TupleTag` inside `@ProcessElement` | `static final` field on the DoFn |
 | Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
 | Call `result.waitUntilFinish()` for streaming | Check source type first |
@@ -427,7 +498,7 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 
 ---
 
-## 12. ProcessStatusAdapter — status tracking contract
+## 13. ProcessStatusAdapter — status tracking contract
 
 One `process_status` BQ row per source (DATA_SOURCE_DOWNLOAD) or per report (REPORT_PROCESSING).
 
@@ -451,7 +522,7 @@ getLatest(jobRunId, datasourceName, subprocessName) — used by REPORT_PROCESSIN
 
 ---
 
-## 13. BigQueryJobService — BQ job contract
+## 14. BigQueryJobService — BQ job contract
 
 Used exclusively in driver JVM (ReportPipelineFactory). Not used in Beam workers.
 
@@ -474,7 +545,7 @@ All methods block until the BQ job completes. Failures throw `RuntimeException`.
 
 ---
 
-## 14. Email adapter contract
+## 15. Email adapter contract
 
 ```java
 // Interface (beam-io)
@@ -493,7 +564,7 @@ inject it into `ReportPipelineFactory` via constructor.
 
 ---
 
-## 15. Checkpoint vs process_status — what each tracks
+## 16. Checkpoint vs process_status — what each tracks
 
 | Concept | Table | Written by | Read by |
 |---|---|---|---|
@@ -505,13 +576,13 @@ Process status uses `PENDING → COMPLETED / VALIDATION_FAILED / FAILED`.
 
 ---
 
-## 16. Build and run reference
+## 17. Build and run reference
 
 ```bash
 # Build fat JAR from project root
 mvn package -pl beam-runner -am -DskipTests
 
-# Run locally (DirectRunner)
+# Run DATA_SOURCE_DOWNLOAD locally (DirectRunner) — still uses JDBC for source config
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --runner=DirectRunner \
   --processType=DATA_SOURCE_DOWNLOAD \
@@ -524,7 +595,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --checkpointBqDataset=pipeline_metadata \
   --processStatusBqDataset=pipeline_metadata
 
-# Run REPORT_PROCESSING (DB-configured)
+# Run REPORT_PROCESSING (BQ-configured) — no JDBC required
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --runner=DirectRunner \
   --processType=REPORT_PROCESSING \
@@ -533,14 +604,25 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodId=2024-01 \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
-  --paramDbUrl=jdbc:postgresql://localhost:5432/params \
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=pipeline_config \
   --emailSmtpHost=smtp.gmail.com \
   --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
+
+# Run ExampleWorkflow (BQ params → BQ transform → GCS CSV)
+# See EXAMPLE.md for required BQ table setup
+mvn -pl beam-runner exec:java \
+  -Dexec.mainClass=com.yourco.beam.runner.example.ExampleWorkflow \
+  "-Dexec.args=--project=my-gcp-project --paramBqProject=my-gcp-project \
+    --paramBqDataset=pipeline_config --reportName=daily_trades_summary \
+    --reportSubprocess=eod --periodId=2024-01 \
+    --periodStart=2024-01-01 --periodEnd=2024-01-31 \
+    --processType=REPORT_PROCESSING --sinkType=GCS"
 ```
 
 ---
 
-## 17. Key invariants to preserve
+## 18. Key invariants to preserve
 
 1. `beam-core` has zero dependencies on sibling modules — it is the root.
 2. `beam-io` depends only on `beam-core` — never on `beam-utils` or `beam-transforms`.
@@ -548,7 +630,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 4. Each `SourceConfig` produces exactly one independent Beam branch — never merged.
 5. `BeamTransform` implementations always output to both `SUCCESS_TAG` and `DEAD_LETTER_TAG`.
 6. Secrets are never stored in `FrameworkOptions` values — only Secret Manager IDs.
-7. `BigQueryJobService`, `GcsUtils`, and `ReportRepository` are driver-JVM only — never inside DoFns.
+7. `BigQueryJobService`, `GcsUtils`, `BigQueryReportRepository`, and `BigQueryParameterAdapter` are driver-JVM only — never inside DoFns.
 8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
 9. Every code change is accompanied by a README update in the same commit.
 10. `process_status` rows are written before and after every source download and every report run.

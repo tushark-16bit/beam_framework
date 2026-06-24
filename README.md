@@ -515,7 +515,8 @@ options={
     "--periodStart":       "2024-01-01",
     "--periodEnd":         "2024-01-31",
     "--runDate":           "{{ ds }}",
-    "--paramDbUrl":        "jdbc:postgresql://...",
+    "--paramBqProject":    "my-gcp-project",
+    "--paramBqDataset":    "pipeline_config",
     # ... other standard options
 }
 ```
