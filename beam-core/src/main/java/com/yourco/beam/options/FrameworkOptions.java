@@ -152,21 +152,15 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getParamBqDataset();
     void setParamBqDataset(String value);
 
-    @Description("BQ table name for the generic key-value parameter store. "
-                 + "Schema: process_name STRING, subprocess_name STRING, period_id STRING, "
-                 + "param_key STRING, param_value STRING. "
-                 + "Queried by (process_name, subprocess_name, period_id) to get run parameters.")
+    @Description("BQ table name for the parameter store. "
+                 + "Schema: ParameterName STRING, ParameterGroupName STRING, "
+                 + "ParameterDataSource STRING, SchemaOfJson STRING, ParametersValJson STRING, "
+                 + "EditGrpNm STRING, LastUpdtTs TIMESTAMP, LstUpdateUserId STRING. "
+                 + "Each row holds all parameters for a (ParameterGroupName, ParameterDataSource, ParameterName) group "
+                 + "as a JSON blob in ParametersValJson. Required fields are declared in SchemaOfJson.")
     @Default.String("parameter_store")
     String getParamStoreTable();
     void setParamStoreTable(String value);
-
-    @Description("BQ table name for the required-parameters index. "
-                 + "Schema: process_name STRING, subprocess_name STRING, param_key STRING, "
-                 + "is_required BOOL, description STRING. "
-                 + "Defines which param_keys each (process, subprocess) must have in parameter_store.")
-    @Default.String("required_parameters_index")
-    String getParamRequiredTable();
-    void setParamRequiredTable(String value);
 
     @Description("BQ table name for the source configuration table. "
                  + "Schema: datasource_name STRING, subprocess_name STRING, period_id STRING, "

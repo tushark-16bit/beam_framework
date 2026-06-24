@@ -1,16 +1,18 @@
 package com.yourco.beam.io.params;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
-import com.google.cloud.bigquery.TableResult;
 import com.yourco.beam.options.FrameworkOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,170 +20,181 @@ import java.util.Map;
 /**
  * BQ-client implementation of {@link BigQueryParameterAdapter}.
  *
- * <p>All queries use named parameters ({@code @paramName}) to prevent SQL injection.
- * Parameter fetches run as interactive BQ queries (not Dataflow jobs) since they
- * are small and latency-sensitive.
+ * <p>Looks up a single row from {@code parameter_store} by
+ * ({@code ParameterGroupName}, {@code ParameterDataSource}, {@code ParameterName}),
+ * parses {@code ParametersValJson} into a {@code Map<String, String>}, and uses
+ * {@code SchemaOfJson} to identify which fields are required.
  *
- * <p>Table references are fully-qualified: {@code `project.dataset.table`}.
- * Both the project and dataset are read from {@link FrameworkOptions} at construction time.
- *
- * <h2>Authentication</h2>
- * Uses Application Default Credentials. Locally: run
- * {@code gcloud auth application-default login}. On GCP: uses the Compute/Dataflow
- * service account automatically.
+ * <p>All queries use named parameters ({@code @name}) to prevent SQL injection.
  */
 public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdapter {
 
     private static final Logger LOG = LoggerFactory.getLogger(BigQueryParameterAdapterImpl.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final BigQuery bigquery;
-    private final String project;
-    private final String dataset;
-    private final String storeTable;     // e.g. "parameter_store"
-    private final String requiredTable;  // e.g. "required_parameters_index"
+    private final String storeTable;   // fully-qualified: project.dataset.table
 
     public BigQueryParameterAdapterImpl(FrameworkOptions options) {
         this(BigQueryOptions.getDefaultInstance().getService(), options);
     }
 
     BigQueryParameterAdapterImpl(BigQuery bigquery, FrameworkOptions options) {
-        this.bigquery      = bigquery;
-        this.project       = options.getParamBqProject() != null
-                             ? options.getParamBqProject()
-                             : options.getProject();
-        this.dataset       = options.getParamBqDataset();
-        this.storeTable    = options.getParamStoreTable();
-        this.requiredTable = options.getParamRequiredTable();
+        this.bigquery = bigquery;
+        String project = options.getParamBqProject() != null && !options.getParamBqProject().isBlank()
+                         ? options.getParamBqProject() : options.getProject();
+        this.storeTable = "`" + project + "." + options.getParamBqDataset()
+                        + "." + options.getParamStoreTable() + "`";
 
-        LOG.info("BigQueryParameterAdapter initialised: {}.{} (store={}, required={})",
-                 project, dataset, storeTable, requiredTable);
+        LOG.info("BigQueryParameterAdapter initialised: {}", storeTable);
     }
 
-    // ── Interface implementation ──────────────────────────────────────────────
+    // ── Interface ─────────────────────────────────────────────────────────────
 
     @Override
-    public List<String> fetchRequiredKeys(String processName, String subprocess) {
-        LOG.info("Fetching required param keys for process={} subprocess={}", processName, subprocess);
-        String sql = "SELECT param_key FROM `" + ref(requiredTable) + "` "
-                   + "WHERE process_name = @processName "
-                   + "  AND subprocess_name = @subprocess "
-                   + "  AND is_required = TRUE";
+    public List<String> fetchRequiredKeys(String parameterGroupName, String parameterDataSource,
+                                          String parameterName) {
+        JsonNode schema = fetchSchemaNode(parameterGroupName, parameterDataSource, parameterName);
+        if (schema == null || !schema.isObject()) return Collections.emptyList();
 
-        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("processName", QueryParameterValue.string(processName))
-            .addNamedParameter("subprocess",  QueryParameterValue.string(subprocess))
-            .setUseLegacySql(false)
-            .build();
+        List<String> required = new ArrayList<>();
+        schema.fields().forEachRemaining(entry -> {
+            JsonNode spec = entry.getValue();
+            if (spec.path("required").asBoolean(false)) {
+                required.add(entry.getKey());
+            }
+        });
+        LOG.info("SchemaOfJson declares {} required field(s) for {}/{}/{}",
+                 required.size(), parameterGroupName, parameterDataSource, parameterName);
+        return required;
+    }
 
-        List<String> keys = new ArrayList<>();
-        for (FieldValueList row : runQuery(config).iterateAll()) {
-            keys.add(row.get("param_key").getStringValue());
+    @Override
+    public Map<String, String> fetchParameters(String parameterGroupName, String parameterDataSource,
+                                               String parameterName) {
+        FieldValueList row = fetchRow(parameterGroupName, parameterDataSource, parameterName);
+        if (row == null) {
+            LOG.warn("No parameter row found for {}/{}/{}", parameterGroupName, parameterDataSource, parameterName);
+            return Collections.emptyMap();
         }
-        LOG.info("Found {} required key(s) for {}/{}", keys.size(), processName, subprocess);
-        return keys;
+        return parseValJson(row, parameterGroupName, parameterDataSource, parameterName);
     }
 
     @Override
-    public Map<String, String> fetchParameters(String processName, String subprocess,
-                                               String periodId) {
-        LOG.info("Fetching all params for process={} subprocess={} period={}",
-                 processName, subprocess, periodId);
-        String sql = "SELECT param_key, param_value FROM `" + ref(storeTable) + "` "
-                   + "WHERE process_name = @processName "
-                   + "  AND subprocess_name = @subprocess "
-                   + "  AND period_id = @periodId";
-
-        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("processName", QueryParameterValue.string(processName))
-            .addNamedParameter("subprocess",  QueryParameterValue.string(subprocess))
-            .addNamedParameter("periodId",    QueryParameterValue.string(periodId))
-            .setUseLegacySql(false)
-            .build();
-
-        return collectKeyValues(config, processName, subprocess, periodId);
-    }
-
-    @Override
-    public Map<String, String> fetchParameters(String processName, String subprocess,
-                                               String periodId, List<String> keys) {
-        if (keys == null || keys.isEmpty()) {
-            return new HashMap<>();
-        }
-        LOG.info("Fetching {} specific param(s) for process={} subprocess={} period={}",
-                 keys.size(), processName, subprocess, periodId);
-
-        // IN UNNEST(@keys) lets BQ handle a list param safely without string concatenation
-        String sql = "SELECT param_key, param_value FROM `" + ref(storeTable) + "` "
-                   + "WHERE process_name = @processName "
-                   + "  AND subprocess_name = @subprocess "
-                   + "  AND period_id = @periodId "
-                   + "  AND param_key IN UNNEST(@keys)";
-
-        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("processName", QueryParameterValue.string(processName))
-            .addNamedParameter("subprocess",  QueryParameterValue.string(subprocess))
-            .addNamedParameter("periodId",    QueryParameterValue.string(periodId))
-            .addNamedParameter("keys",        QueryParameterValue.array(
-                                                 keys.toArray(new String[0]), String.class))
-            .setUseLegacySql(false)
-            .build();
-
-        return collectKeyValues(config, processName, subprocess, periodId);
-    }
-
-    @Override
-    public Map<String, String> fetchRequiredParameters(String processName, String subprocess,
-                                                       String periodId) {
-        List<String> required = fetchRequiredKeys(processName, subprocess);
-        if (required.isEmpty()) {
-            LOG.warn("No required params registered for {}/{} — fetching all params", processName, subprocess);
-            return fetchParameters(processName, subprocess, periodId);
+    public Map<String, String> fetchRequiredParameters(String parameterGroupName,
+                                                       String parameterDataSource,
+                                                       String parameterName) {
+        FieldValueList row = fetchRow(parameterGroupName, parameterDataSource, parameterName);
+        if (row == null) {
+            throw new IllegalStateException(
+                "No parameter_store row found for ParameterGroupName=" + parameterGroupName
+                + ", ParameterDataSource=" + parameterDataSource
+                + ", ParameterName=" + parameterName);
         }
 
-        Map<String, String> params = fetchParameters(processName, subprocess, periodId, required);
+        Map<String, String> params = parseValJson(row, parameterGroupName, parameterDataSource, parameterName);
+        List<String> requiredKeys  = parseRequiredKeysFromSchema(row);
 
-        // Validate all required keys are present
         List<String> missing = new ArrayList<>();
-        for (String key : required) {
-            if (!params.containsKey(key)) {
+        for (String key : requiredKeys) {
+            if (!params.containsKey(key) || params.get(key) == null) {
                 missing.add(key);
             }
         }
         if (!missing.isEmpty()) {
             throw new IllegalStateException(
-                "Required parameters missing from parameter_store for "
-                + processName + "/" + subprocess + "/" + periodId + ": " + missing);
+                "Required parameters missing from ParametersValJson for "
+                + parameterGroupName + "/" + parameterDataSource + "/" + parameterName
+                + ": " + missing);
         }
+
+        LOG.info("Fetched and validated {} parameter(s) for {}/{}/{}",
+                 params.size(), parameterGroupName, parameterDataSource, parameterName);
         return params;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── BQ fetch ──────────────────────────────────────────────────────────────
 
-    /** Returns the fully-qualified BQ table reference: {@code project.dataset.table} */
-    private String ref(String table) {
-        return project + "." + dataset + "." + table;
-    }
+    private FieldValueList fetchRow(String groupName, String dataSource, String paramName) {
+        String sql = "SELECT ParametersValJson, SchemaOfJson FROM " + storeTable
+            + " WHERE ParameterGroupName = @groupName"
+            + "   AND ParameterDataSource = @dataSource"
+            + "   AND ParameterName = @paramName"
+            + " LIMIT 1";
 
-    private TableResult runQuery(QueryJobConfiguration config) {
+        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .addNamedParameter("groupName",  QueryParameterValue.string(groupName))
+            .addNamedParameter("dataSource", QueryParameterValue.string(dataSource))
+            .addNamedParameter("paramName",  QueryParameterValue.string(paramName))
+            .setUseLegacySql(false)
+            .build();
+
         try {
-            return bigquery.query(config);
+            for (FieldValueList row : bigquery.query(config).iterateAll()) {
+                return row;
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("BQ parameter query interrupted", e);
+            throw new IllegalStateException("BQ parameter query interrupted", e);
+        }
+        return null;
+    }
+
+    // ── JSON parsing ──────────────────────────────────────────────────────────
+
+    private Map<String, String> parseValJson(FieldValueList row, String groupName,
+                                             String dataSource, String paramName) {
+        String valJson = row.get("ParametersValJson").isNull()
+                         ? null : row.get("ParametersValJson").getStringValue();
+        if (valJson == null || valJson.isBlank()) {
+            LOG.warn("ParametersValJson is empty for {}/{}/{}", groupName, dataSource, paramName);
+            return Collections.emptyMap();
+        }
+        try {
+            JsonNode node = JSON.readTree(valJson);
+            if (!node.isObject()) return Collections.emptyMap();
+            Map<String, String> result = new HashMap<>();
+            node.fields().forEachRemaining(e ->
+                result.put(e.getKey(), e.getValue().isNull() ? null : e.getValue().asText()));
+            return result;
+        } catch (Exception e) {
+            LOG.error("Failed to parse ParametersValJson for {}/{}/{}: {}",
+                      groupName, dataSource, paramName, e.getMessage());
+            return Collections.emptyMap();
         }
     }
 
-    private Map<String, String> collectKeyValues(QueryJobConfiguration config,
-                                                  String processName, String subprocess,
-                                                  String periodId) {
-        Map<String, String> result = new HashMap<>();
-        for (FieldValueList row : runQuery(config).iterateAll()) {
-            String key   = row.get("param_key").getStringValue();
-            String value = row.get("param_value").isNull() ? null
-                           : row.get("param_value").getStringValue();
-            result.put(key, value);
+    private List<String> parseRequiredKeysFromSchema(FieldValueList row) {
+        String schemaJson = row.get("SchemaOfJson").isNull()
+                            ? null : row.get("SchemaOfJson").getStringValue();
+        if (schemaJson == null || schemaJson.isBlank()) return Collections.emptyList();
+        try {
+            JsonNode schema = JSON.readTree(schemaJson);
+            if (!schema.isObject()) return Collections.emptyList();
+            List<String> required = new ArrayList<>();
+            schema.fields().forEachRemaining(entry -> {
+                if (entry.getValue().path("required").asBoolean(false)) {
+                    required.add(entry.getKey());
+                }
+            });
+            return required;
+        } catch (Exception e) {
+            LOG.error("Failed to parse SchemaOfJson: {}", e.getMessage());
+            return Collections.emptyList();
         }
-        LOG.info("Loaded {} param(s) for {}/{}/{}", result.size(), processName, subprocess, periodId);
-        return result;
+    }
+
+    private JsonNode fetchSchemaNode(String groupName, String dataSource, String paramName) {
+        FieldValueList row = fetchRow(groupName, dataSource, paramName);
+        if (row == null) return null;
+        String schemaJson = row.get("SchemaOfJson").isNull()
+                            ? null : row.get("SchemaOfJson").getStringValue();
+        if (schemaJson == null || schemaJson.isBlank()) return null;
+        try {
+            return JSON.readTree(schemaJson);
+        } catch (Exception e) {
+            LOG.error("Failed to parse SchemaOfJson: {}", e.getMessage());
+            return null;
+        }
     }
 }

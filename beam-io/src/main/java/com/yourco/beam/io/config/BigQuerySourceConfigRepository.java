@@ -51,7 +51,6 @@ public final class BigQuerySourceConfigRepository {
 
     private final BigQuery bigquery;
     private final String sourceConfigTable;
-    private final String requiredParamsTable;
 
     public BigQuerySourceConfigRepository(FrameworkOptions options) {
         this(BigQueryOptions.getDefaultInstance().getService(), options);
@@ -62,80 +61,38 @@ public final class BigQuerySourceConfigRepository {
         String project = options.getParamBqProject() != null && !options.getParamBqProject().isBlank()
                          ? options.getParamBqProject() : options.getProject();
         String dataset = options.getParamBqDataset();
-        this.sourceConfigTable  = project + "." + dataset + "." + options.getParamSourceConfigTable();
-        this.requiredParamsTable = project + "." + dataset + "." + options.getParamRequiredTable();
+        this.sourceConfigTable = project + "." + dataset + "." + options.getParamSourceConfigTable();
     }
 
     // ── Validation ────────────────────────────────────────────────────────────
 
     /**
-     * Returns a list of required parameter keys that are NULL or missing for this
-     * (datasource, period, subprocess) combination. Empty list means all present.
+     * Returns a non-empty list if no {@code source_config} row exists for this
+     * (datasource, period, subprocess) combination. Empty list means the config is present.
+     *
+     * <p>Required-field validation for runtime parameters is handled separately by
+     * {@code BigQueryParameterAdapter.fetchRequiredParameters()}, which reads
+     * {@code SchemaOfJson} from the {@code parameter_store} table.
      */
     public List<String> getMissingParameters(String datasource, String periodId, String subprocess) {
-        String countSql = "SELECT COUNT(*) AS cnt FROM `" + sourceConfigTable + "`"
+        String sql = "SELECT COUNT(*) AS cnt FROM `" + sourceConfigTable + "`"
             + " WHERE datasource_name = @datasource AND period_id = @periodId"
             + " AND subprocess_name = @subprocess";
 
-        QueryJobConfiguration countCfg = qConfig(countSql, datasource, periodId, subprocess);
-        long rowCount = 0;
         try {
-            for (FieldValueList row : bigquery.query(countCfg).iterateAll()) {
-                rowCount = row.get("cnt").getLongValue();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ query interrupted", e);
-        }
-
-        if (rowCount == 0) {
-            LOG.warn("No source_config row for datasource={}, period={}, subprocess={}",
-                     datasource, periodId, subprocess);
-            return List.of("source_config row missing for ("
-                + datasource + ", " + periodId + ", " + subprocess + ")");
-        }
-
-        String requiredSql = "SELECT param_key FROM `" + requiredParamsTable + "`"
-            + " WHERE process_name = @datasource AND subprocess_name = @subprocess"
-            + " AND is_required = TRUE";
-
-        QueryJobConfiguration requiredCfg = QueryJobConfiguration.newBuilder(requiredSql)
-            .addNamedParameter("datasource", QueryParameterValue.string(datasource))
-            .addNamedParameter("subprocess", QueryParameterValue.string(subprocess))
-            .setUseLegacySql(false)
-            .build();
-
-        List<String> requiredKeys = new ArrayList<>();
-        try {
-            for (FieldValueList row : bigquery.query(requiredCfg).iterateAll()) {
-                requiredKeys.add(row.get("param_key").getStringValue());
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ query interrupted", e);
-        }
-
-        if (requiredKeys.isEmpty()) return Collections.emptyList();
-
-        // Check which required keys are null in source_config
-        String checkSql = "SELECT "
-            + String.join(", ", requiredKeys)
-            + " FROM `" + sourceConfigTable + "`"
-            + " WHERE datasource_name = @datasource AND period_id = @periodId"
-            + " AND subprocess_name = @subprocess LIMIT 1";
-
-        List<String> missing = new ArrayList<>();
-        try {
-            for (FieldValueList row : bigquery.query(qConfig(checkSql, datasource, periodId, subprocess)).iterateAll()) {
-                for (String key : requiredKeys) {
-                    if (row.get(key).isNull()) missing.add(key);
+            for (FieldValueList row : bigquery.query(qConfig(sql, datasource, periodId, subprocess)).iterateAll()) {
+                if (row.get("cnt").getLongValue() == 0) {
+                    LOG.warn("No source_config row for datasource={}, period={}, subprocess={}",
+                             datasource, periodId, subprocess);
+                    return List.of("source_config row missing for ("
+                        + datasource + ", " + periodId + ", " + subprocess + ")");
                 }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("BQ query interrupted", e);
         }
-        return missing;
+        return Collections.emptyList();
     }
 
     // ── Config fetch ──────────────────────────────────────────────────────────

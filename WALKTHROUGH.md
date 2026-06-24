@@ -326,19 +326,19 @@ sequenceDiagram
     participant DataBQ as BigQuery<br/>(data / report tables)
     participant GCS as Cloud Storage
 
-    EW->>Adapter: fetchRequiredParameters(reportName, subprocess, periodId)
+    EW->>Adapter: fetchRequiredParameters(parameterGroupName, parameterDataSource, parameterName)
 
     rect rgb(230, 240, 255)
-        Note over Adapter,CfgBQ: Step 1 — Discover required keys
-        Adapter->>CfgBQ: SELECT param_key FROM required_parameters_index<br/>WHERE process_name=@name AND subprocess_name=@sub AND is_required=TRUE
-        CfgBQ-->>Adapter: [source_bq_table, transform_query,<br/>transform_output_table, output_gcs_path, output_file_name]
+        Note over Adapter,CfgBQ: Step 1 — Fetch the parameter_store row (single BQ query)
+        Adapter->>CfgBQ: SELECT ParametersValJson, SchemaOfJson<br/>FROM parameter_store<br/>WHERE ParameterGroupName=@groupName<br/>AND ParameterDataSource=@dataSource<br/>AND ParameterName=@paramName LIMIT 1
+        CfgBQ-->>Adapter: one row
     end
 
     rect rgb(230, 255, 235)
-        Note over Adapter,CfgBQ: Step 2 — Fetch values (IN UNNEST to avoid injection)
-        Adapter->>CfgBQ: SELECT param_key, param_value FROM parameter_store<br/>WHERE process_name=@name AND subprocess_name=@sub<br/>AND period_id=@periodId AND param_key IN UNNEST(@keys)
-        CfgBQ-->>Adapter: {source_bq_table: "proj.raw.trades",<br/>transform_query: "SELECT ...",<br/>transform_output_table: "proj.reports.summary",<br/>output_gcs_path: "gs://bucket/reports/",<br/>output_file_name: "report_2024_01.csv"}
-        Adapter->>Adapter: validate all required keys present (throws if any missing)
+        Note over Adapter,Adapter: Step 2 — Parse and validate in driver JVM
+        Adapter->>Adapter: parse SchemaOfJson → find fields where "required"=true<br/>[source_bq_table, transform_query, transform_output_table,<br/>output_gcs_path, output_file_name]
+        Adapter->>Adapter: parse ParametersValJson →<br/>{source_bq_table: "proj.raw.trades",<br/>transform_query: "SELECT ...",<br/>transform_output_table: "proj.reports.summary",<br/>output_gcs_path: "gs://bucket/reports/",<br/>output_file_name: "report_{periodId}.csv"}
+        Adapter->>Adapter: validate all required fields non-null (throws if any missing)
         Adapter-->>EW: Map<String, String> params
     end
 
@@ -547,23 +547,15 @@ Two layouts coexist in the same dataset:
 ```mermaid
 erDiagram
     parameter_store {
-        STRING process_name PK
-        STRING subprocess_name PK
-        STRING period_id PK
-        STRING param_key PK
-        STRING param_value
-        TIMESTAMP created_at
+        STRING ParameterName PK
+        STRING ParameterGroupName PK
+        STRING ParameterDataSource PK
+        STRING SchemaOfJson
+        STRING ParametersValJson
+        STRING EditGrpNm
+        TIMESTAMP LastUpdtTs
+        STRING LstUpdateUserId
     }
-
-    required_parameters_index {
-        STRING process_name PK
-        STRING subprocess_name PK
-        STRING param_key PK
-        BOOL is_required
-        STRING description
-    }
-
-    parameter_store }o--|| required_parameters_index : "values for keys declared in"
 
     source_config {
         STRING datasource_name PK

@@ -1,20 +1,21 @@
 # End-to-End Example: BQ Parameter Store → GCS Report
 
-This walkthrough shows how the framework fetches all configuration from BigQuery,
+This walkthrough shows how the framework fetches all configuration from a single
+`parameter_store` BigQuery row, validates required fields via `SchemaOfJson`,
 runs a transform query, and exports the result to GCS.
 
 ## Architecture overview
 
 ```
-required_parameters_index (BQ)   ← "which keys does this report need?"
-        ↓
-parameter_store (BQ)             ← "what are the values for this period?"
-        ↓
-ExampleWorkflow                  ← resolves tokens, orchestrates execution
-        ↓
-BigQueryJobService               ← runs transform query → BQ output table
-        ↓
-BigQueryJobService.exportToCsv   ← BQ extract job → GCS CSV file
+parameter_store (BQ row)
+  ├── SchemaOfJson       → declares which fields are required
+  └── ParametersValJson  → holds all param values as a JSON blob
+           ↓
+ExampleWorkflow          ← resolves tokens, orchestrates execution
+           ↓
+BigQueryJobService       ← runs transform query → BQ output table
+           ↓
+BigQueryJobService.exportToCsv  ← BQ extract job → GCS CSV file
 ```
 
 ## 1. BQ table DDL (run once in your GCP project)
@@ -23,23 +24,16 @@ BigQueryJobService.exportToCsv   ← BQ extract job → GCS CSV file
 -- Dataset: pipeline_config (create this first)
 CREATE SCHEMA IF NOT EXISTS `my-gcp-project.pipeline_config`;
 
--- Key-value parameter store
+-- Parameter store: one row per named parameter group
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.parameter_store` (
-  process_name    STRING NOT NULL,
-  subprocess_name STRING NOT NULL,
-  period_id       STRING NOT NULL,
-  param_key       STRING NOT NULL,
-  param_value     STRING,
-  created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
-);
-
--- Required-parameters index: declares which keys each process needs
-CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.required_parameters_index` (
-  process_name    STRING NOT NULL,
-  subprocess_name STRING NOT NULL,
-  param_key       STRING NOT NULL,
-  is_required     BOOL   NOT NULL DEFAULT TRUE,
-  description     STRING
+  ParameterName       STRING    NOT NULL,   -- grouping name,   e.g. "daily_trades_summary"
+  ParameterGroupName  STRING    NOT NULL,   -- parent process,  e.g. "REPORT_PROCESSING"
+  ParameterDataSource STRING    NOT NULL,   -- subprocess,      e.g. "eod"
+  SchemaOfJson        STRING,               -- JSON object: {"field": {"required": true/false, "type": "string"}}
+  ParametersValJson   STRING,               -- JSON object: {"field": "value", ...}
+  EditGrpNm           STRING,               -- temp/edit group flag
+  LastUpdtTs          TIMESTAMP,
+  LstUpdateUserId     STRING
 );
 
 -- Source data table for the example (raw trades)
@@ -73,67 +67,62 @@ INSERT INTO `my-gcp-project.raw_data.trades` VALUES
   ('T007', 'JPY', 500000.00, DATE '2024-01-22', 'FX'),
   ('T008', 'GBP',  35000.00, DATE '2024-01-28', 'RATES');
 
--- ── required_parameters_index ──────────────────────────────────────────────
--- Tells the framework which param keys it must read for this report/subprocess
-INSERT INTO `my-gcp-project.pipeline_config.required_parameters_index` VALUES
-  ('daily_trades_summary', 'eod', 'source_bq_table',      TRUE,  'Fully-qualified BQ table with raw trades'),
-  ('daily_trades_summary', 'eod', 'transform_query',      TRUE,  'Aggregation SQL; supports {periodStart}/{periodEnd} tokens'),
-  ('daily_trades_summary', 'eod', 'transform_output_table', TRUE, 'BQ table to materialise the transform result into'),
-  ('daily_trades_summary', 'eod', 'output_gcs_path',      TRUE,  'GCS directory for the exported CSV'),
-  ('daily_trades_summary', 'eod', 'output_file_name',     TRUE,  'CSV file name');
+-- ── parameter_store ─────────────────────────────────────────────────────────
+-- One row for the "daily_trades_summary" report group.
+-- SchemaOfJson declares which fields are required.
+-- ParametersValJson holds the actual values.
+INSERT INTO `my-gcp-project.pipeline_config.parameter_store`
+  (ParameterName, ParameterGroupName, ParameterDataSource, SchemaOfJson, ParametersValJson,
+   EditGrpNm, LastUpdtTs, LstUpdateUserId)
+VALUES (
+  'daily_trades_summary',
+  'REPORT_PROCESSING',
+  'eod',
 
--- ── parameter_store ────────────────────────────────────────────────────────
--- Actual values for the January 2024 run
-INSERT INTO `my-gcp-project.pipeline_config.parameter_store` VALUES
-  -- Source BQ table where raw trades live
-  ('daily_trades_summary', 'eod', '2024-01',
-   'source_bq_table',
-   'my-gcp-project.raw_data.trades',
-   CURRENT_TIMESTAMP()),
+  -- SchemaOfJson: all five fields are required for this report
+  JSON '{
+    "source_bq_table":        {"required": true,  "type": "string"},
+    "transform_query":        {"required": true,  "type": "string"},
+    "transform_output_table": {"required": true,  "type": "string"},
+    "output_gcs_path":        {"required": true,  "type": "string"},
+    "output_file_name":       {"required": true,  "type": "string"}
+  }',
 
-  -- Aggregation query; {periodStart} / {periodEnd} are resolved at runtime
-  ('daily_trades_summary', 'eod', '2024-01',
-   'transform_query',
-   'SELECT currency, SUM(amount) AS total_amount, COUNT(*) AS trade_count
-    FROM `my-gcp-project.raw_data.trades`
-    WHERE trade_date BETWEEN DATE ''{periodStart}'' AND DATE ''{periodEnd}''
-    GROUP BY currency
-    ORDER BY total_amount DESC',
-   CURRENT_TIMESTAMP()),
+  -- ParametersValJson: actual values; {tokens} are resolved at runtime by ExampleWorkflow
+  JSON '{
+    "source_bq_table":        "my-gcp-project.raw_data.trades",
+    "transform_query":        "SELECT currency, SUM(amount) AS total_amount, COUNT(*) AS trade_count FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\" GROUP BY currency ORDER BY total_amount DESC",
+    "transform_output_table": "my-gcp-project.reports.daily_trades_summary",
+    "output_gcs_path":        "gs://my-bucket/reports/daily_trades/",
+    "output_file_name":       "daily_trades_summary_{periodId}.csv"
+  }',
 
-  -- Where to materialise the transform result in BQ
-  ('daily_trades_summary', 'eod', '2024-01',
-   'transform_output_table',
-   'my-gcp-project.reports.daily_trades_summary',
-   CURRENT_TIMESTAMP()),
-
-  -- GCS output directory
-  ('daily_trades_summary', 'eod', '2024-01',
-   'output_gcs_path',
-   'gs://my-bucket/reports/daily_trades/',
-   CURRENT_TIMESTAMP()),
-
-  -- File name for the exported CSV
-  ('daily_trades_summary', 'eod', '2024-01',
-   'output_file_name',
-   'daily_trades_summary_2024_01.csv',
-   CURRENT_TIMESTAMP());
+  'TRADING',
+  CURRENT_TIMESTAMP(),
+  'setup_script'
+);
 ```
 
 ## 3. Verify the parameter setup
 
 ```sql
--- Check required keys are registered
-SELECT * FROM `my-gcp-project.pipeline_config.required_parameters_index`
-WHERE process_name = 'daily_trades_summary' AND subprocess_name = 'eod';
-
--- Check values are present for the period
-SELECT param_key, param_value
+-- Check the row is present and both JSON columns are populated
+SELECT
+  ParameterName,
+  ParameterGroupName,
+  ParameterDataSource,
+  JSON_QUERY(SchemaOfJson,      '$')  AS schema,
+  JSON_QUERY(ParametersValJson, '$')  AS params
 FROM `my-gcp-project.pipeline_config.parameter_store`
-WHERE process_name = 'daily_trades_summary'
-  AND subprocess_name = 'eod'
-  AND period_id = '2024-01'
-ORDER BY param_key;
+WHERE ParameterGroupName  = 'REPORT_PROCESSING'
+  AND ParameterDataSource = 'eod'
+  AND ParameterName       = 'daily_trades_summary';
+
+-- List required fields declared in SchemaOfJson
+SELECT key, JSON_VALUE(value, '$.required') AS is_required
+FROM `my-gcp-project.pipeline_config.parameter_store`,
+UNNEST(JSON_KEYS(SchemaOfJson)) AS key
+WHERE ParameterName = 'daily_trades_summary';
 ```
 
 ## 4. Run the example
@@ -146,27 +135,27 @@ mvn -pl beam-runner exec:java \
     --paramBqProject=my-gcp-project
     --paramBqDataset=pipeline_config
     --paramStoreTable=parameter_store
-    --paramRequiredTable=required_parameters_index
     --reportName=daily_trades_summary
     --reportSubprocess=eod
     --periodId=2024-01
     --periodStart=2024-01-01
     --periodEnd=2024-01-31
-    --processType=REPORT_PROCESSING
-    --sinkType=GCS"
+    --processType=REPORT_PROCESSING"
 ```
 
 ## 5. What happens step-by-step
 
 | Step | What runs | Where |
 |------|-----------|-------|
-| 1 | `SELECT param_key FROM required_parameters_index WHERE ...` | BigQuery |
-| 2 | `SELECT param_key, param_value FROM parameter_store WHERE ... AND param_key IN UNNEST(@keys)` | BigQuery |
-| 3 | Token substitution: `{periodStart}` → `2024-01-01` | Driver JVM |
-| 4 | BQ query job: aggregation SQL → `reports.daily_trades_summary` (WRITE_TRUNCATE) | BigQuery |
-| 5 | BQ extract job: `reports.daily_trades_summary` → `gs://my-bucket/reports/daily_trades/daily_trades_summary_2024_01.csv` | BigQuery |
+| 1 | `SELECT ParametersValJson, SchemaOfJson FROM parameter_store WHERE ParameterGroupName=... AND ParameterDataSource=... AND ParameterName=...` | BigQuery |
+| 2 | Parse `SchemaOfJson` → find fields with `"required": true` | Driver JVM |
+| 3 | Parse `ParametersValJson` → `Map<String,String>` | Driver JVM |
+| 4 | Validate all required fields present — throws `IllegalStateException` if any missing | Driver JVM |
+| 5 | Token substitution: `{periodStart}` → `2024-01-01`, `{periodId}` → `2024-01` | Driver JVM |
+| 6 | BQ query job: aggregation SQL → `reports.daily_trades_summary` (WRITE_TRUNCATE) | BigQuery |
+| 7 | BQ extract job: `reports.daily_trades_summary` → `gs://my-bucket/reports/daily_trades/daily_trades_summary_2024-01.csv` | BigQuery |
 
-## 6. Expected GCS output (daily_trades_summary_2024_01.csv)
+## 6. Expected GCS output (daily_trades_summary_2024-01.csv)
 
 ```
 currency,total_amount,trade_count
@@ -176,29 +165,34 @@ EUR,120000.0,2
 GBP,95000.0,2
 ```
 
-## 7. Adding a new period
+## 7. Adding a new parameter group (e.g. a second report)
 
 ```sql
--- 2024-02 run — only the values change, index stays the same
-INSERT INTO `my-gcp-project.pipeline_config.parameter_store` VALUES
-  ('daily_trades_summary', 'eod', '2024-02', 'source_bq_table',       'my-gcp-project.raw_data.trades', CURRENT_TIMESTAMP()),
-  ('daily_trades_summary', 'eod', '2024-02', 'transform_query',       '<same query>', CURRENT_TIMESTAMP()),
-  ('daily_trades_summary', 'eod', '2024-02', 'transform_output_table','my-gcp-project.reports.daily_trades_summary', CURRENT_TIMESTAMP()),
-  ('daily_trades_summary', 'eod', '2024-02', 'output_gcs_path',       'gs://my-bucket/reports/daily_trades/', CURRENT_TIMESTAMP()),
-  ('daily_trades_summary', 'eod', '2024-02', 'output_file_name',      'daily_trades_summary_2024_02.csv', CURRENT_TIMESTAMP());
+INSERT INTO `my-gcp-project.pipeline_config.parameter_store`
+  (ParameterName, ParameterGroupName, ParameterDataSource, SchemaOfJson, ParametersValJson,
+   EditGrpNm, LastUpdtTs, LstUpdateUserId)
+VALUES (
+  'monthly_pnl_report',
+  'REPORT_PROCESSING',
+  'monthly',
+  JSON '{"pnl_source_table": {"required": true, "type": "string"}, "output_gcs_path": {"required": true, "type": "string"}}',
+  JSON '{"pnl_source_table": "my-gcp-project.raw_data.pnl", "output_gcs_path": "gs://my-bucket/reports/pnl/"}',
+  'TRADING',
+  CURRENT_TIMESTAMP(),
+  'setup_script'
+);
 ```
 
 ## 8. Key option flags reference
 
 | Option | Default | Purpose |
 |--------|---------|---------|
-| `--paramBqProject` | `--project` | GCP project for parameter BQ tables |
-| `--paramBqDataset` | `pipeline_config` | BQ dataset containing parameter tables |
-| `--paramStoreTable` | `parameter_store` | Generic key-value store table name |
-| `--paramRequiredTable` | `required_parameters_index` | Required-params index table name |
-| `--paramSourceConfigTable` | `source_config` | Source config table (for alias registry) |
-| `--reportName` | — | Report name key in parameter tables |
-| `--reportSubprocess` | `default` | Subprocess variant |
-| `--periodId` | — | Period identifier (used as BQ lookup key) |
-| `--periodStart` | — | Substituted into `{periodStart}` token in queries |
-| `--periodEnd` | — | Substituted into `{periodEnd}` token in queries |
+| `--paramBqProject` | `--project` | GCP project for the `parameter_store` table |
+| `--paramBqDataset` | `pipeline_config` | BQ dataset containing `parameter_store` |
+| `--paramStoreTable` | `parameter_store` | Table name (matches `ParameterName`, `ParameterGroupName`, `ParameterDataSource` columns) |
+| `--paramSourceConfigTable` | `source_config` | Source config table used by DATA_SOURCE_DOWNLOAD |
+| `--reportName` | — | Maps to `ParameterName` column in `parameter_store` |
+| `--reportSubprocess` | `default` | Maps to `ParameterDataSource` column |
+| `--periodStart` | — | Substituted into `{periodStart}` token in query values |
+| `--periodEnd` | — | Substituted into `{periodEnd}` token in query values |
+| `--periodId` | — | Substituted into `{periodId}` token in file names / queries |

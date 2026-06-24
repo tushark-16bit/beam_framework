@@ -4,81 +4,85 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Reads pipeline configuration parameters from a BigQuery parameter store.
+ * Reads pipeline configuration parameters from the BigQuery parameter store.
  *
- * <p>There are two BQ tables involved:
- * <dl>
- *   <dt><b>parameter_store</b></dt>
- *   <dd>Key-value rows keyed by {@code (process_name, subprocess_name, period_id, param_key)}.
- *       Holds the actual values for every configurable parameter of a pipeline run.</dd>
- *   <dt><b>required_parameters_index</b></dt>
- *   <dd>Keyed by {@code (process_name, subprocess_name, param_key)}.
- *       Declares which param keys are mandatory for each process variant.</dd>
- * </dl>
+ * <h2>Table schema</h2>
+ * <pre>{@code
+ * CREATE TABLE pipeline_config.parameter_store (
+ *   ParameterName       STRING NOT NULL,   -- grouping name, e.g. "daily_trades_report"
+ *   ParameterGroupName  STRING NOT NULL,   -- parent process, e.g. "REPORT_PROCESSING"
+ *   ParameterDataSource STRING NOT NULL,   -- subprocess,    e.g. "eod"
+ *   SchemaOfJson        STRING,            -- JSON object: {"field": {"required": true, "type": "string"}, ...}
+ *   ParametersValJson   STRING,            -- JSON object: {"field": "value", ...}
+ *   EditGrpNm           STRING,
+ *   LastUpdtTs          TIMESTAMP,
+ *   LstUpdateUserId     STRING
+ * );
+ * }</pre>
+ *
+ * <h2>How SchemaOfJson drives validation</h2>
+ * {@code SchemaOfJson} declares which fields are required:
+ * <pre>{@code
+ * {
+ *   "source_bq_table":   {"required": true,  "type": "string"},
+ *   "transform_query":   {"required": true,  "type": "string"},
+ *   "output_gcs_path":   {"required": true,  "type": "string"},
+ *   "row_limit":         {"required": false, "type": "integer"}
+ * }
+ * }</pre>
+ * {@link #fetchRequiredParameters} uses this to validate that every {@code required=true}
+ * field is present in {@code ParametersValJson} before returning.
  *
  * <h2>Typical call sequence</h2>
  * <pre>{@code
  * BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
  *
- * // 1. Look up which keys this process needs
- * List<String> required = adapter.fetchRequiredKeys("daily_trades_report", "eod");
+ * // Fetch, validate (via SchemaOfJson), and return all parameters in one call
+ * Map<String, String> params = adapter.fetchRequiredParameters(
+ *     "REPORT_PROCESSING", "eod", "daily_trades_report");
  *
- * // 2. Fetch their values for this period
- * Map<String, String> params = adapter.fetchParameters("daily_trades_report", "eod", "2024-01", required);
- *
- * // — or use the one-call convenience method —
- * Map<String, String> params = adapter.fetchRequiredParameters("daily_trades_report", "eod", "2024-01");
- * }</pre>
- *
- * <h2>BQ table schema (DDL)</h2>
- * <pre>{@code
- * CREATE TABLE pipeline_config.parameter_store (
- *   process_name    STRING NOT NULL,
- *   subprocess_name STRING NOT NULL,
- *   period_id       STRING NOT NULL,
- *   param_key       STRING NOT NULL,
- *   param_value     STRING,
- *   created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
- * );
- *
- * CREATE TABLE pipeline_config.required_parameters_index (
- *   process_name    STRING NOT NULL,
- *   subprocess_name STRING NOT NULL,
- *   param_key       STRING NOT NULL,
- *   is_required     BOOL NOT NULL DEFAULT TRUE,
- *   description     STRING
- * );
+ * String sourceTable  = params.get("source_bq_table");
+ * String outputPath   = params.get("output_gcs_path");
  * }</pre>
  */
 public interface BigQueryParameterAdapter {
 
     /**
-     * Returns all param keys that are registered as required for {@code processName/subprocess}.
-     * Used to drive the subsequent {@link #fetchParameters} call without hard-coding key names.
+     * Returns the names of all fields marked {@code "required": true} in
+     * {@code SchemaOfJson} for the given parameter group.
      *
-     * @return list of {@code param_key} values; empty if no required params are registered
+     * @param parameterGroupName  value of the {@code ParameterGroupName} column
+     * @param parameterDataSource value of the {@code ParameterDataSource} column
+     * @param parameterName       value of the {@code ParameterName} column
+     * @return list of field names; empty if no schema is defined or no required fields
      */
-    List<String> fetchRequiredKeys(String processName, String subprocess);
+    List<String> fetchRequiredKeys(String parameterGroupName, String parameterDataSource,
+                                   String parameterName);
 
     /**
-     * Fetches all parameter rows for {@code (processName, subprocess, periodId)}.
-     * Returns every param_key stored for that period — no key filtering.
-     */
-    Map<String, String> fetchParameters(String processName, String subprocess, String periodId);
-
-    /**
-     * Fetches only the specified {@code keys} from the parameter store.
-     * Keys that are not present return no entry in the result map (not an error).
+     * Fetches all parameters from {@code ParametersValJson} for the given group.
+     * Returns the full key-value map without any validation.
      *
-     * @param keys param_key values to retrieve; if empty, returns an empty map
+     * @param parameterGroupName  value of the {@code ParameterGroupName} column
+     * @param parameterDataSource value of the {@code ParameterDataSource} column
+     * @param parameterName       value of the {@code ParameterName} column
+     * @return all key-value pairs from {@code ParametersValJson}; empty map if row not found
      */
-    Map<String, String> fetchParameters(String processName, String subprocess,
-                                        String periodId, List<String> keys);
+    Map<String, String> fetchParameters(String parameterGroupName, String parameterDataSource,
+                                        String parameterName);
 
     /**
-     * Convenience: looks up required keys then fetches all of them in one call.
-     * Throws {@link IllegalStateException} if any required key is absent for the period.
+     * Convenience: fetches parameters and validates that every field declared as
+     * {@code "required": true} in {@code SchemaOfJson} is present and non-null.
+     *
+     * @param parameterGroupName  value of the {@code ParameterGroupName} column
+     * @param parameterDataSource value of the {@code ParameterDataSource} column
+     * @param parameterName       value of the {@code ParameterName} column
+     * @return validated key-value map from {@code ParametersValJson}
+     * @throws IllegalStateException if any required field is absent
+     * @throws IllegalStateException if no parameter row is found for the given identifiers
      */
-    Map<String, String> fetchRequiredParameters(String processName, String subprocess,
-                                                String periodId);
+    Map<String, String> fetchRequiredParameters(String parameterGroupName,
+                                                String parameterDataSource,
+                                                String parameterName);
 }
