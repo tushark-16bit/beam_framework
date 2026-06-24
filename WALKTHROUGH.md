@@ -65,27 +65,24 @@ flowchart TD
 
 ## 3. DATA_SOURCE_DOWNLOAD — Full Sequence
 
-This process type reads source configuration from the parameter DB, runs one independent Beam branch per source, validates output, and writes status.
+This process type reads source configuration from BigQuery, runs one independent Beam branch per source, validates output, and writes status.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Main
     participant DSF as DataSourcePipelineFactory
-    participant DB as Parameter DB (JDBC)
+    participant BQCfg as BigQuery (source_config table)
     participant Checkpoint as BigQueryCheckpointAdapter
     participant Status as BigQueryProcessStatusAdapter
     participant BQ as BigQuery (output tables)
     participant Beam as Apache Beam / Dataflow
 
     Main->>DSF: assemble(options)
-    DSF->>DB: DatabaseAdapterFactory.create(options)
-    DB-->>DSF: DatabaseAdapter (HikariCP pool)
-    DSF->>DB: ParameterRepository.allRequiredParametersExist()
-    DB-->>DSF: true / false (fail fast if false)
-    DSF->>DB: ParameterRepository.fetchSourceConfigs(datasource, period, subprocess)
-    DB-->>DSF: List<SourceConfig> (one per DB row)
-    DSF->>DB: close()
+    DSF->>BQCfg: BigQuerySourceConfigRepository.getMissingParameters()
+    BQCfg-->>DSF: [] or list of missing keys (fail fast if non-empty)
+    DSF->>BQCfg: BigQuerySourceConfigRepository.fetchSourceConfigs(datasource, period, subprocess)
+    BQCfg-->>DSF: List<SourceConfig> (one per BQ row)
 
     loop for each SourceConfig
         DSF->>Checkpoint: getCheckpoint(jobRunId, source, period)
@@ -186,14 +183,9 @@ flowchart LR
 
     C -->|SORT_BY| E["SortByTransform\nBundleSortDoFn\n@StartBundle: init buffer\n@ProcessElement: buffer.add\n@FinishBundle: sort and emit\nWARNING: not global order"]
 
-    C -->|LOOKUP| F{lookupSourceType?}
+    C -->|LOOKUP| F["In-pipeline BQ lookup\nBigQueryIO.readTableRows(from bqTableRef)\nMapElements: TableRow → KV&lt;key, jsonBlob&gt;\n→ View.asMap()"]
 
-    F -->|JDBC| G["Driver JVM\nDatabaseAdapterFactory.create()\nopen → SELECT * FROM lookup_table → close\nserialize each row to JSON string\nCreate.of(KV pairs) in pipeline\n→ View.asMap()"]
-
-    F -->|BQ| H["In-pipeline\nBigQueryIO.readTableRows()\nMapElements: TableRow → KV<key, jsonBlob>\n→ View.asMap()"]
-
-    G --> I["PCollectionView\nMap<String, String>\nkey → JSON blob of lookup row"]
-    H --> I
+    F --> I["PCollectionView\nMap&lt;String, String&gt;\nkey → JSON blob of lookup row"]
 
     I --> J["LookupEnrichTransform\nEnrichDoFn\n@ProcessElement:\nctx.sideInput(lookupView)\nparse JSON blob\nmerge fields into Row\nprefix 'lookup_' on collisions"]
 ```
@@ -760,9 +752,8 @@ DataflowStartJobOperator(
         "--periodStart":        "2024-01-01",
         "--periodEnd":          "2024-01-31",
         "--runDate":            "{{ ds }}",
-        "--paramDbUrl":         "jdbc:postgresql://db-host:5432/pipeline_params",  # still used by DATA_SOURCE_DOWNLOAD
-        "--paramDbUser":        "pipeline_user",
-        "--paramDbCredentialSecretId": "projects/p/secrets/db-password/versions/latest",
+        "--paramBqProject":     "my-gcp-project",
+        "--paramBqDataset":     "pipeline_config",
         "--checkpointBqDataset": "pipeline_metadata",
         "--processStatusBqDataset": "pipeline_metadata",
     }
@@ -786,7 +777,7 @@ DataflowStartJobOperator(
         "--periodStart":        "2024-01-01",
         "--periodEnd":          "2024-01-31",
         "--runDate":            "{{ ds }}",
-        "--paramBqProject":     "my-gcp-project",        # replaces --paramDbUrl for REPORT_PROCESSING
+        "--paramBqProject":     "my-gcp-project",
         "--paramBqDataset":     "pipeline_config",        # BQ dataset holding all report config tables
         "--processStatusBqDataset": "pipeline_metadata",
         "--emailSmtpHost":      "smtp.gmail.com",
@@ -799,8 +790,7 @@ DataflowStartJobOperator(
 ```
 
 > **Note**: When `--reportName` is set, `--sinkType`, `--sourceType`, and `--transformChain` are not used.
-> Config is loaded from BigQuery tables via `BigQueryReportRepository` — no JDBC required.
-> Use `--paramBqProject` + `--paramBqDataset` to point at the config dataset.
+> All config is loaded from BigQuery — use `--paramBqProject` + `--paramBqDataset` to point at the config dataset.
 
 ---
 
@@ -819,7 +809,7 @@ Where to find things in the source tree:
 | Lookup transform (side input) | [`beam-transforms/.../transforms/source/LookupEnrichTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/LookupEnrichTransform.java) |
 | Group-by transform | [`beam-transforms/.../transforms/source/GroupByTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/GroupByTransform.java) |
 | Query token resolution | [`beam-utils/.../utils/QueryParameterResolver.java`](beam-utils/src/main/java/com/yourco/beam/utils/QueryParameterResolver.java) |
-| Source config loading (DATA_SOURCE_DOWNLOAD, JDBC) | [`beam-utils/.../utils/db/ParameterRepository.java`](beam-utils/src/main/java/com/yourco/beam/utils/db/ParameterRepository.java) |
+| Source config loading (DATA_SOURCE_DOWNLOAD, BQ) | [`beam-io/.../io/config/BigQuerySourceConfigRepository.java`](beam-io/src/main/java/com/yourco/beam/io/config/BigQuerySourceConfigRepository.java) |
 | Report config loading (REPORT_PROCESSING, BQ) | [`beam-io/.../io/config/BigQueryReportRepository.java`](beam-io/src/main/java/com/yourco/beam/io/config/BigQueryReportRepository.java) |
 | Key-value BQ parameter store | [`beam-io/.../io/params/BigQueryParameterAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/params/BigQueryParameterAdapter.java) |
 | BQ job execution | [`beam-io/.../io/report/BigQueryJobService.java`](beam-io/src/main/java/com/yourco/beam/io/report/BigQueryJobService.java) |
