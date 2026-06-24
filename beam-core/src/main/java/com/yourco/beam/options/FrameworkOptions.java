@@ -189,34 +189,21 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setCheckpointBqDataset(String value);
 
     @Description("BigQuery table name for pipeline checkpoints. "
-                 + "Required schema: job_run_id STRING, datasource_name STRING, period_id STRING, "
-                 + "subprocess_name STRING, state STRING, source_type STRING, "
-                 + "created_at TIMESTAMP, error_message STRING, records_processed INT64. "
+                 + "Schema: dataSourceId INT64, srcName STRING, vsnNo INT64, PerId STRING, "
+                 + "DSNm STRING, BalAndCntlSmryTx STRING, StaCd STRING, "
+                 + "CreatedTs TIMESTAMP, LstUpdtTs TIMESTAMP. "
                  + "The table is never created automatically — provision it before the first run.")
-    @Default.String("pipeline_checkpoints")
+    @Default.String("data_source_checkpoints")
     String getCheckpointBqTable();
     void setCheckpointBqTable(String value);
 
-    // =========================================================================
-    // PROCESS STATUS TABLE
-    // Tracks per-source fetch status and validation results, separate from the
-    // checkpoint table. One row is written per source per pipeline run.
-    // =========================================================================
-
-    @Description("BigQuery dataset for the process status table. "
-                 + "Defaults to the same dataset as the checkpoint table if not set.")
-    @Default.String("pipeline_metadata")
-    String getProcessStatusBqDataset();
-    void setProcessStatusBqDataset(String value);
-
-    @Description("BigQuery table name for per-source process status rows. "
-                 + "Required schema: job_run_id STRING, process_type STRING, datasource_name STRING, "
-                 + "subprocess_name STRING, period_id STRING, period_start STRING, period_end STRING, "
-                 + "status STRING, row_count INT64, error_message STRING, "
-                 + "validation_details STRING, started_at TIMESTAMP, completed_at TIMESTAMP.")
-    @Default.String("process_status")
-    String getProcessStatusBqTable();
-    void setProcessStatusBqTable(String value);
+    @Description("BigQuery table name for source and report output records. "
+                 + "Schema: RecId STRING, dataSourceId INT64, RowDSJsonTx STRING, "
+                 + "LoadDt DATE, LstUpdtTs TIMESTAMP. "
+                 + "Replaces per-source output tables — all sources write here as JSON blobs.")
+    @Default.String("data_source_records")
+    String getRecordBqTable();
+    void setRecordBqTable(String value);
 
     // =========================================================================
     // SOURCE CONFIGURATION

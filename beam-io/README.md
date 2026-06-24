@@ -26,12 +26,15 @@ io/sink/
     DeadLetterSinkTransform   — writes FailedRecords as JSON lines to GCS
 
 io/checkpoint/
-    CheckpointAdapter         — interface for reading/writing pipeline run checkpoints
-    BigQueryCheckpointAdapter — BQ streaming insert (write) + interactive query (read)
+    DataSourceCheckpointAdapter         — interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest()
+    BigQueryDataSourceCheckpointAdapter — BQ DML impl; MAX(dataSourceId)+1 sequence, MAX(vsnNo)+1 per (srcName,PerId)
 
-io/status/
-    ProcessStatusAdapter         — interface: write per-source status rows, query row count, query sums
-    BigQueryProcessStatusAdapter — BQ-backed impl; also provides queryRowCount() and querySum() for BnC validation
+io/records/
+    DataSourceRecordAdapter         — interface: countRecords(dataSourceId), sumField(dataSourceId, field)
+    BigQueryDataSourceRecordAdapter — BQ query using JSON_VALUE(RowDSJsonTx, '$.field') for BnC validation
+
+io/sink/
+    DataSourceRecordSinkTransform   — Beam PTransform writing all rows as JSON blobs to data_source_records
 
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer

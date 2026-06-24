@@ -14,7 +14,6 @@ import com.yourco.beam.model.BncRule;
 import com.yourco.beam.model.BqFetchConfig;
 import com.yourco.beam.model.FileSourceConfig;
 import com.yourco.beam.model.LookupConfig;
-import com.yourco.beam.model.OutputConfig;
 import com.yourco.beam.model.QueryConfig;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.SourceTransformConfig;
@@ -143,7 +142,6 @@ public final class BigQuerySourceConfigRepository {
             .subprocessName(subprocessName)
             .sourceType(sourceType)
             .queryConfig(toQueryConfig(row))
-            .outputConfig(toOutputConfig(row))
             .sourceTransforms(toSourceTransforms(str(row, "source_transforms_json")))
             .validationConfig(toValidationConfig(row));
 
@@ -199,19 +197,6 @@ public final class BigQuerySourceConfigRepository {
         return new QueryConfig(
             str(row, "bq_query"),
             parseJsonMap(str(row, "query_params_json"))
-        );
-    }
-
-    private OutputConfig toOutputConfig(FieldValueList row) {
-        String outputType = str(row, "output_type");
-        if (outputType == null || outputType.isBlank()) return null;
-        return new OutputConfig(
-            outputType,
-            str(row, "output_bq_project"),
-            str(row, "output_bq_dataset"),
-            str(row, "output_bq_table"),
-            str(row, "output_gcs_path"),
-            str(row, "output_write_mode")
         );
     }
 

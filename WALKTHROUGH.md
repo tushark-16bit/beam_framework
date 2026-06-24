@@ -52,9 +52,9 @@ flowchart TD
     E -->|yes| F["ReportPipelineFactory\n.execute(options)\ndriver-JVM only\nno Beam pipeline"]
     E -->|no legacy mode| G["PipelineFactory\n.assemble(options)\npipeline.run()\nwaitUntilFinish if batch"]
 
-    D --> H[("process_status\nBQ table")]
+    D --> H[("data_source_checkpoints\nBQ table")]
     F --> H
-    D --> I[("pipeline_checkpoints\nBQ table")]
+    D --> I[("data_source_records\nBQ table")]
 
     style F fill:#e8f5e9,stroke:#4CAF50
     style D fill:#e3f2fd,stroke:#2196F3
@@ -73,35 +73,34 @@ sequenceDiagram
     participant Main
     participant DSF as DataSourcePipelineFactory
     participant BQCfg as BigQuery (source_config table)
-    participant Checkpoint as BigQueryCheckpointAdapter
-    participant Status as BigQueryProcessStatusAdapter
-    participant BQ as BigQuery (output tables)
+    participant Checkpoint as BigQueryDataSourceCheckpointAdapter
+    participant Records as BigQuery (data_source_records table)
     participant Beam as Apache Beam / Dataflow
 
     Main->>DSF: assemble(options)
     DSF->>BQCfg: BigQuerySourceConfigRepository.getMissingParameters()
     BQCfg-->>DSF: [] or list of missing keys (fail fast if non-empty)
     DSF->>BQCfg: BigQuerySourceConfigRepository.fetchSourceConfigs(datasource, period, subprocess)
-    BQCfg-->>DSF: List<SourceConfig> (one per BQ row)
+    BQCfg-->>DSF: List<SourceConfig>
 
     loop for each SourceConfig
-        DSF->>Checkpoint: getCheckpoint(jobRunId, source, period)
-        Checkpoint-->>DSF: CheckpointRecord or null
-        alt already FINISHED_ACCESSING and not overrideDownload
+        DSF->>Checkpoint: isCompleted(srcName, perId)
+        Checkpoint-->>DSF: true / false
+        alt already COMPLETED and not overrideDownload
             DSF->>DSF: skip this source
         else
-            DSF->>Checkpoint: write(STARTED_ACCESSING)
-            DSF->>Status: write(PENDING status row)
+            DSF->>Checkpoint: createCheckpoint(srcName, perId, dsNm)
+            Checkpoint-->>DSF: dataSourceId (BQ MAX+1 sequence)
             DSF->>Beam: SourceRouter.routeFromConfig() → PCollection<Row>
             DSF->>Beam: SourceTransformChainAssembler.assemble() → PCollection<Row>
-            DSF->>Beam: wirePerSourceSink() → BigQueryIO.writeTableRows()
+            DSF->>Beam: DataSourceRecordSinkTransform(dataSourceId)
         end
     end
 
     DSF-->>Main: Pipeline (graph assembled, no data moved yet)
 
     Main->>Beam: pipeline.run()
-    Beam->>BQ: reads source data, applies transforms, writes to output tables
+    Beam->>Records: streams rows as JSON blobs (RecId, dataSourceId, RowDSJsonTx)
     Beam-->>Main: PipelineResult
 
     Main->>Main: result.waitUntilFinish()
@@ -109,19 +108,18 @@ sequenceDiagram
 
     loop for each SourceConfig that ran
         alt pipeline DONE or UPDATED
-            DSF->>BQ: ProcessStatusAdapter.queryRowCount(outputTable)
-            BQ-->>DSF: actual row count
+            DSF->>Records: countRecords(dataSourceId)
+            Records-->>DSF: rowCount
+            DSF->>Records: sumField(dataSourceId, field) for each BnC rule
+            Records-->>DSF: actual sum
             DSF->>DSF: ValidationConfig checks (min/max rows, BnC)
             alt all checks pass
-                DSF->>Status: write(COMPLETED, rowCount)
-                DSF->>Checkpoint: write(FINISHED_ACCESSING)
+                DSF->>Checkpoint: updateStatus(dataSourceId, COMPLETED, bncJson)
             else validation failed
-                DSF->>Status: write(VALIDATION_FAILED, details)
-                DSF->>Checkpoint: write(FAILED_DOWNLOADING)
+                DSF->>Checkpoint: updateStatus(dataSourceId, FAILED_BNC, bncJson)
             end
         else pipeline FAILED
-            DSF->>Status: write(FAILED, errorMessage)
-            DSF->>Checkpoint: write(FAILED_DOWNLOADING)
+            DSF->>Checkpoint: updateStatus(dataSourceId, FAILED, null)
         end
     end
 ```
@@ -150,9 +148,8 @@ flowchart TD
         D1 --> D2["GROUP_BY transform\n(if configured)\nGroupByTransform\nMapElements → GroupByKey → AggregateDoFn"]
         D2 --> D3["SORT_BY transform\n(if configured)\nSortByTransform\nper-bundle sort only"]
 
-        D3 --> E{output_type?}
-        E -->|BQ| F["BigQueryIO.writeTableRows()\nto output_bq_project.output_bq_dataset.output_bq_table\nWRITE_TRUNCATE or APPEND"]
-        E -->|GCS| G["GcsSinkTransform\nnewline-delimited JSON\nto output_gcs_path"]
+        D3 --> F["DataSourceRecordSinkTransform\nserialize Row → JSON (JsonUtils.rowToJson)\nset RecId=UUID, dataSourceId, LoadDt\nBigQueryIO.writeTableRows() APPEND"]
+        F --> RecTab[("data_source_records\nRecId, dataSourceId\nRowDSJsonTx, LoadDt")]
     end
 
     subgraph "Driver JVM (before pipeline.run)"
@@ -161,9 +158,9 @@ flowchart TD
     end
 
     subgraph "Driver JVM (after waitUntilFinish)"
-        F --> I["BigQueryProcessStatusAdapter\n.queryRowCount(outputTable)"]
-        I --> J["ValidationConfig\nmin/max row count\nBnC SUM checks"]
-        J --> K[("process_status\nCOMPLETED /\nVALIDATION_FAILED")]
+        RecTab --> I["DataSourceRecordAdapter\n.countRecords(dataSourceId)\n.sumField(dataSourceId, field)"]
+        I --> J["ValidationConfig\nmin/max row count\nBnC JSON_VALUE SUM checks"]
+        J --> K[("data_source_checkpoints\nCOMPLETED / FAILED_BNC / FAILED\n+ BalAndCntlSmryTx JSON")]
     end
 ```
 
@@ -208,9 +205,10 @@ sequenceDiagram
     participant RPF as ReportPipelineFactory
     participant BQRepo as BigQueryReportRepository
     participant CfgBQ as BigQuery<br/>(pipeline_config dataset)
-    participant Status as BigQueryProcessStatusAdapter
+    participant Checkpoint as BigQueryDataSourceCheckpointAdapter
     participant BQJob as BigQueryJobService
     participant DataBQ as BigQuery<br/>(data / report tables)
+    participant Records as BigQuery<br/>(data_source_records)
     participant GCS as Cloud Storage
     participant SMTP as SMTP Server
 
@@ -229,7 +227,8 @@ sequenceDiagram
         BQRepo-->>RPF: ReportConfig (assembled from 6 tables)
     end
 
-    RPF->>Status: write(PENDING — processType=REPORT_PROCESSING)
+    RPF->>Checkpoint: createCheckpoint(reportName, periodId, reportName)
+    Checkpoint-->>RPF: dataSourceId (LOADING row written)
 
     rect rgb(255, 245, 220)
         Note over RPF,DataBQ: Phase 2 — Preprocessing (optional)
@@ -244,32 +243,32 @@ sequenceDiagram
     end
 
     rect rgb(255, 235, 235)
-        Note over RPF,Status: Phase 3 — Datasource availability check
+        Note over RPF,Checkpoint: Phase 3 — Datasource availability check
         loop each required ReportDatasourceRef
-            RPF->>Status: getLatest(datasourceName, subprocess)
-            Status->>DataBQ: SELECT FROM process_status
-            DataBQ-->>Status: ProcessStatusRecord
-            alt status != COMPLETED
-                RPF->>Status: write(FAILED)
+            RPF->>Checkpoint: isCompleted(datasourceName, periodId)
+            Checkpoint->>Records: SELECT StaCd FROM checkpoints WHERE srcName=? AND PerId=?
+            Records-->>Checkpoint: StaCd
+            alt StaCd != COMPLETED
+                RPF->>Checkpoint: updateStatus(dataSourceId, FAILED, null)
                 RPF-->>Main: throws RuntimeException
             end
         end
     end
 
     rect rgb(230, 255, 235)
-        Note over RPF,CfgBQ: Phase 4 — Build alias registry
+        Note over RPF,Records: Phase 4 — Build alias registry
         loop each ReportDatasourceRef
-            RPF->>BQRepo: fetchDatasourceOutputTable(datasource, subprocess, periodId)
-            BQRepo->>CfgBQ: SELECT output_bq_* FROM source_config WHERE ...
-            CfgBQ-->>BQRepo: project.dataset.table
-            RPF->>RPF: aliasRegistry.put(transformAlias, tableRef)
+            RPF->>BQRepo: fetchDatasourceDataSourceId(datasource, periodId)
+            BQRepo->>Records: SELECT dataSourceId FROM checkpoints WHERE srcName=? AND StaCd='COMPLETED'
+            Records-->>BQRepo: dataSourceId
+            RPF->>RPF: aliasRegistry.put(alias, subquery on records WHERE dataSourceId=X)
         end
     end
 
     rect rgb(240, 230, 255)
         Note over RPF,DataBQ: Phase 5 — Transformation chain
         loop each ReportTransformStep (by step_order)
-            RPF->>RPF: resolveAliasTokens({alias} → backtick project.dataset.table backtick)
+            RPF->>RPF: resolveAliasTokens({alias} → record-table subquery)
             RPF->>RPF: QueryParameterResolver.resolve(sql, step.queryParams, options)
             RPF->>BQJob: runQueryToTable(resolvedSQL, step.outputBqTable)
             BQJob->>DataBQ: CREATE QueryJob → materialise to outputBqTable
@@ -307,7 +306,7 @@ sequenceDiagram
         end
     end
 
-    RPF->>Status: write(COMPLETED, outputCount) or write(FAILED)
+    RPF->>Checkpoint: updateStatus(dataSourceId, COMPLETED, null) or (FAILED, null)
 ```
 
 ### 6b. ExampleWorkflow — key-value BigQueryParameterAdapter pattern
@@ -390,35 +389,36 @@ flowchart TD
 
 ---
 
-## 8. Process Status State Machine
+## 8. Checkpoint State Machine
 
-Both `DATA_SOURCE_DOWNLOAD` (per source) and `REPORT_PROCESSING` write to the same `process_status` BQ table, keyed by `processType`.
+Both `DATA_SOURCE_DOWNLOAD` (per source) and `REPORT_PROCESSING` write to the same `data_source_checkpoints` BQ table.
+Each run creates one checkpoint row (LOADING), then updates it to a terminal state.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING : written before pipeline.run() / before report execution
+    [*] --> LOADING : createCheckpoint() before pipeline.run() / report.execute()
 
-    PENDING --> COMPLETED : pipeline DONE + all validation checks passed\n(row count, BnC)\nOR report exported all outputs successfully
+    LOADING --> COMPLETED : pipeline DONE + all row-count and BnC checks passed\nOR report exported all outputs successfully
 
-    PENDING --> VALIDATION_FAILED : pipeline DONE but row count outside bounds\nor BnC SUM exceeds tolerance %\n(DATA_SOURCE_DOWNLOAD only)
+    LOADING --> FAILED_BNC : pipeline DONE but row count outside bounds\nor BnC SUM exceeds tolerance %\n(DATA_SOURCE_DOWNLOAD only)
 
-    PENDING --> FAILED : pipeline threw exception\nor required datasource not COMPLETED\nor any ReportPipelineFactory phase threw
+    LOADING --> FAILED : pipeline threw exception\nor required datasource not COMPLETED\nor any ReportPipelineFactory phase threw
 
     COMPLETED --> [*]
-    VALIDATION_FAILED --> [*]
+    FAILED_BNC --> [*]
     FAILED --> [*]
 
-    note right of PENDING
-        Written by driver JVM
-        before data moves.
-        datasource_name = source name or report name
-        subprocess_name = subprocess or report_subprocess
+    note right of LOADING
+        createCheckpoint() writes this row.
+        dataSourceId = MAX(dataSourceId)+1 (BQ sequence).
+        vsnNo = MAX(vsnNo)+1 per (srcName, PerId).
+        All record rows share this dataSourceId.
     end note
 
     note right of COMPLETED
-        completed_at timestamp set.
-        row_count filled for DATA_SOURCE_DOWNLOAD.
-        row_count = output file count for REPORT_PROCESSING.
+        updateStatus() sets StaCd and BalAndCntlSmryTx.
+        BalAndCntlSmryTx JSON: status, srcCount, dstCount,
+        srcAmount, dstAmount per BnC field.
     end note
 ```
 
@@ -436,21 +436,10 @@ classDiagram
         +ApiSourceConfig apiConfig
         +FileSourceConfig fileConfig
         +BqFetchConfig bqFetchConfig
-        +OutputConfig outputConfig
         +QueryConfig queryConfig
         +List~SourceTransformConfig~ sourceTransforms
         +ValidationConfig validationConfig
         +Builder builder()
-    }
-
-    class OutputConfig {
-        +String outputType
-        +String bqTableRef()
-        +String gcsPath
-        +String writeMode
-        +boolean isBq()
-        +boolean isGcs()
-        +boolean isTruncate()
     }
 
     class QueryConfig {
@@ -479,20 +468,20 @@ classDiagram
         +boolean hasAnyCheck()
     }
 
-    class ProcessStatusRecord {
-        +String jobRunId
-        +String processType
-        +String datasourceName
-        +String subprocessName
-        +String periodId
-        +String status
-        +long rowCount
-        +static pending()
-        +static pendingReport()
-        +static completed()
-        +static failed()
-        +static validationFailed()
-        +Builder builder()
+    class DataSourceCheckpoint {
+        +long dataSourceId
+        +String srcName
+        +long vsnNo
+        +String perId
+        +String dsNm
+        +String balAndCntlSmryTx
+        +String staCd
+        +Instant createdTs
+        +Instant lstUpdtTs
+        +static STA_LOADING
+        +static STA_COMPLETED
+        +static STA_FAILED_BNC
+        +static STA_FAILED
     }
 
     class ReportConfig {
@@ -523,7 +512,6 @@ classDiagram
         +boolean required
     }
 
-    SourceConfig *-- OutputConfig
     SourceConfig *-- QueryConfig
     SourceConfig *-- ValidationConfig
     SourceConfig *-- SourceTransformConfig
@@ -564,10 +552,6 @@ erDiagram
         STRING source_type
         STRING bq_query
         STRING query_params_json
-        STRING output_type
-        STRING output_bq_project
-        STRING output_bq_dataset
-        STRING output_bq_table
         STRING source_transforms_json
         INT64 min_row_count
         INT64 max_row_count
@@ -645,7 +629,7 @@ erDiagram
     report_config ||--o{ report_transformation_config : "has"
     report_config ||--o{ report_output_config : "has"
     report_config ||--o| report_email_config : "has"
-    report_datasource_ref }o--|| source_config : "references output of"
+    report_datasource_ref }o--|| source_config : "references source of"
 ```
 
 ---
@@ -653,41 +637,44 @@ erDiagram
 ## 11. BigQuery Tables — Runtime State
 
 These are BQ tables written to at runtime (not the config dataset).
+Both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` write to the same two tables.
 
 ```mermaid
 erDiagram
-    process_status {
-        string job_run_id
-        string process_type
-        string datasource_name
-        string subprocess_name
-        string period_id
-        string period_start
-        string period_end
-        string status
-        int64 row_count
-        string error_message
-        string validation_details
-        timestamp started_at
-        timestamp completed_at
+    data_source_checkpoints {
+        INT64 dataSourceId PK
+        STRING srcName
+        INT64 vsnNo
+        STRING PerId
+        STRING DSNm
+        STRING BalAndCntlSmryTx
+        STRING StaCd
+        TIMESTAMP CreatedTs
+        TIMESTAMP LstUpdtTs
     }
 
-    pipeline_checkpoints {
-        string job_run_id
-        string datasource_name
-        string period_id
-        string subprocess_name
-        string state
-        string source_type
-        timestamp created_at
-        string error_message
-        int64 records_processed
+    data_source_records {
+        STRING RecId PK
+        INT64 dataSourceId FK
+        STRING RowDSJsonTx
+        DATE LoadDt
+        TIMESTAMP LstUpdtTs
     }
+
+    data_source_checkpoints ||--o{ data_source_records : "dataSourceId"
 ```
 
-`process_status.process_type` is either `DATA_SOURCE_DOWNLOAD` or `REPORT_PROCESSING`.
-For `DATA_SOURCE_DOWNLOAD`, `datasource_name` = the source name.
-For `REPORT_PROCESSING`, `datasource_name` = the report name.
+`StaCd` is one of: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`.
+
+For `DATA_SOURCE_DOWNLOAD`: `srcName` = datasource name, `DSNm` = BQ table ref / file path / API endpoint.
+For `REPORT_PROCESSING`: `srcName` = report name, `DSNm` = report name.
+
+`BalAndCntlSmryTx` (BnC summary JSON):
+```json
+{ "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
+```
+
+`vsnNo` increments each time the same `(srcName, PerId)` is re-run (e.g. after `--overrideDownload=true`).
 
 ---
 
@@ -806,7 +793,8 @@ Where to find things in the source tree:
 | Key-value BQ parameter store | [`beam-io/.../io/params/BigQueryParameterAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/params/BigQueryParameterAdapter.java) |
 | BQ job execution | [`beam-io/.../io/report/BigQueryJobService.java`](beam-io/src/main/java/com/yourco/beam/io/report/BigQueryJobService.java) |
 | End-to-end BQ param example | [`beam-runner/.../runner/example/ExampleWorkflow.java`](beam-runner/src/main/java/com/yourco/beam/runner/example/ExampleWorkflow.java) |
-| Process status tracking | [`beam-io/.../io/status/BigQueryProcessStatusAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/status/BigQueryProcessStatusAdapter.java) |
+| Checkpoint lifecycle (LOADING→COMPLETED/FAILED) | [`beam-io/.../io/checkpoint/BigQueryDataSourceCheckpointAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/checkpoint/BigQueryDataSourceCheckpointAdapter.java) |
+| Record table sink (all sources → JSON blobs) | [`beam-io/.../io/sink/DataSourceRecordSinkTransform.java`](beam-io/src/main/java/com/yourco/beam/io/sink/DataSourceRecordSinkTransform.java) |
+| Record validation (BnC via JSON_VALUE) | [`beam-io/.../io/records/BigQueryDataSourceRecordAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/records/BigQueryDataSourceRecordAdapter.java) |
 | Email interface | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
 | Email SMTP implementation | [`beam-runner/.../runner/SmtpReportEmailAdapter.java`](beam-runner/src/main/java/com/yourco/beam/runner/SmtpReportEmailAdapter.java) |
-| Checkpoint adapter | [`beam-io/.../io/checkpoint/BigQueryCheckpointAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/checkpoint/BigQueryCheckpointAdapter.java) |

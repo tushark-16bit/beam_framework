@@ -102,36 +102,39 @@ public final class BigQueryReportRepository {
      *
      * @throws IllegalArgumentException if no source_config row exists or BQ output fields are null
      */
-    public String fetchDatasourceOutputTable(String datasourceName, String datasourceSubprocess,
-                                             String periodId, FrameworkOptions options) {
-        String tableName = options.getParamSourceConfigTable();
-        String sql = "SELECT output_bq_project, output_bq_dataset, output_bq_table "
-                   + "FROM `" + ref(tableName) + "` "
-                   + "WHERE datasource_name   = @datasourceName "
-                   + "  AND subprocess_name   = @subprocess "
-                   + "  AND period_id         = @periodId "
-                   + "LIMIT 1";
+    /**
+     * Returns the latest COMPLETED {@code dataSourceId} for a datasource run.
+     *
+     * <p>Queries the checkpoint table ({@code data_source_checkpoints}) for the most recent
+     * COMPLETED row matching (srcName, PerId). This id is used by callers to build a record-table
+     * subquery: {@code SELECT RowDSJsonTx FROM records WHERE dataSourceId = X}.
+     *
+     * @throws IllegalArgumentException if no COMPLETED checkpoint exists
+     */
+    public long fetchDatasourceDataSourceId(String datasourceName, String periodId,
+                                            FrameworkOptions options) {
+        String project = options.getCheckpointBqProject() != null
+                         && !options.getCheckpointBqProject().isBlank()
+                         ? options.getCheckpointBqProject() : options.getProject();
+        String checkpointTable = "`" + project + "." + options.getCheckpointBqDataset()
+                               + "." + options.getCheckpointBqTable() + "`";
+
+        String sql = "SELECT dataSourceId FROM " + checkpointTable
+                   + " WHERE srcName = @srcName AND PerId = @perId AND StaCd = 'COMPLETED'"
+                   + " ORDER BY LstUpdtTs DESC LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("datasourceName", QueryParameterValue.string(datasourceName))
-            .addNamedParameter("subprocess",     QueryParameterValue.string(datasourceSubprocess))
-            .addNamedParameter("periodId",       QueryParameterValue.string(periodId))
+            .addNamedParameter("srcName", QueryParameterValue.string(datasourceName))
+            .addNamedParameter("perId",   QueryParameterValue.string(periodId))
             .setUseLegacySql(false)
             .build();
 
         for (FieldValueList row : runQuery(config).iterateAll()) {
-            String proj    = str(row, "output_bq_project");
-            String dataset = str(row, "output_bq_dataset");
-            String table   = str(row, "output_bq_table");
-            if (proj == null || dataset == null || table == null) {
-                throw new IllegalArgumentException(
-                    "Datasource " + datasourceName + " has null BQ output fields in source_config");
-            }
-            return proj + "." + dataset + "." + table;
+            return row.get("dataSourceId").getLongValue();
         }
         throw new IllegalArgumentException(
-            "No source_config row found for datasource=" + datasourceName
-            + " subprocess=" + datasourceSubprocess + " period=" + periodId);
+            "No COMPLETED checkpoint found for datasource=" + datasourceName
+            + " period=" + periodId + " — ensure DATA_SOURCE_DOWNLOAD ran successfully first");
     }
 
     // ── Private loaders ───────────────────────────────────────────────────────

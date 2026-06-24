@@ -1,11 +1,11 @@
 package com.yourco.beam.runner;
 
+import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
+import com.yourco.beam.io.checkpoint.DataSourceCheckpointAdapter;
 import com.yourco.beam.io.email.EmailAttachment;
 import com.yourco.beam.io.email.ReportEmailAdapter;
 import com.yourco.beam.io.report.BigQueryJobService;
-import com.yourco.beam.io.status.BigQueryProcessStatusAdapter;
-import com.yourco.beam.io.status.ProcessStatusAdapter;
-import com.yourco.beam.model.ProcessStatusRecord;
+import com.yourco.beam.model.DataSourceCheckpoint;
 import com.yourco.beam.model.ReportConfig;
 import com.yourco.beam.model.ReportDatasourceRef;
 import com.yourco.beam.model.ReportOutputConfig;
@@ -86,13 +86,10 @@ public final class ReportPipelineFactory {
         BigQueryReportRepository repo = new BigQueryReportRepository(options);
         ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
 
-        // ── 2. Status: PENDING ────────────────────────────────────────────────
-        ProcessStatusAdapter statusAdapter = new BigQueryProcessStatusAdapter(options);
-        ProcessStatusRecord pending = ProcessStatusRecord.pendingReport(
-            options.getJobRunId(), PROCESS_TYPE,
-            reportName, reportSubprocess, periodId,
-            options.getPeriodStart(), options.getPeriodEnd());
-        statusAdapter.write(pending);
+        // ── 2. Checkpoint: LOADING ────────────────────────────────────────────
+        DataSourceCheckpointAdapter checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(options);
+        long dsId = checkpointAdapter.createCheckpoint(reportName, periodId, reportName);
+        LOG.info("REPORT_PROCESSING checkpoint created: dataSourceId={}", dsId);
 
         int outputCount = 0;
         try {
@@ -102,7 +99,7 @@ public final class ReportPipelineFactory {
             }
 
             // ── 4. Datasource availability check ──────────────────────────────
-            checkDatasourceAvailability(config, options, statusAdapter);
+            checkDatasourceAvailability(config, options, checkpointAdapter);
 
             // ── 5. Build alias registry ───────────────────────────────────────
             Map<String, String> aliasRegistry = buildAliasRegistry(config, options);
@@ -120,13 +117,13 @@ public final class ReportPipelineFactory {
                 sendEmail(config, options, exportedFiles);
             }
 
-            // ── 9. Status: COMPLETED ──────────────────────────────────────────
-            statusAdapter.write(ProcessStatusRecord.completed(pending, outputCount, null));
+            // ── 9. Checkpoint: COMPLETED ──────────────────────────────────────
+            checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_COMPLETED, null);
             LOG.info("REPORT_PROCESSING completed: {} files exported", outputCount);
 
         } catch (Exception e) {
             LOG.error("REPORT_PROCESSING failed: {}", e.getMessage(), e);
-            statusAdapter.write(ProcessStatusRecord.failed(pending, e.getMessage()));
+            checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
             throw new RuntimeException("REPORT_PROCESSING failed for report=" + reportName, e);
         }
     }
@@ -159,18 +156,15 @@ public final class ReportPipelineFactory {
     }
 
     private void checkDatasourceAvailability(ReportConfig config, FrameworkOptions options,
-                                              ProcessStatusAdapter statusAdapter) {
+                                              DataSourceCheckpointAdapter checkpointAdapter) {
         LOG.info("Checking availability of {} datasource(s)", config.datasources.size());
         List<String> missing = new ArrayList<>();
         for (ReportDatasourceRef ref : config.datasources) {
             if (!ref.required) continue;
-            ProcessStatusRecord latest = statusAdapter.getLatest(
-                null, ref.datasourceName, ref.datasourceSubprocess);
-            if (latest == null
-                    || !ProcessStatusRecord.STATUS_COMPLETED.equals(latest.status)) {
-                String status = latest == null ? "NOT_FOUND" : latest.status;
+            boolean completed = checkpointAdapter.isCompleted(ref.datasourceName, config.periodId);
+            if (!completed) {
                 missing.add(ref.datasourceName + "/" + ref.datasourceSubprocess
-                            + " (status=" + status + ")");
+                            + " (not COMPLETED for period=" + config.periodId + ")");
             }
         }
         if (!missing.isEmpty()) {
@@ -186,10 +180,21 @@ public final class ReportPipelineFactory {
         Map<String, String> registry = new LinkedHashMap<>();
         BigQueryReportRepository bqRepo = new BigQueryReportRepository(options);
         for (ReportDatasourceRef ref : config.datasources) {
-            String tableRef = bqRepo.fetchDatasourceOutputTable(
-                ref.datasourceName, ref.datasourceSubprocess, config.periodId, options);
-            registry.put(ref.transformAlias, tableRef);
-            LOG.info("Alias '{}' → {}", ref.transformAlias, tableRef);
+            // Resolve the dataSourceId of the most recent COMPLETED run for this datasource.
+            // The alias expands to a record-table subquery; transform SQL uses JSON_VALUE to
+            // extract individual columns: JSON_VALUE({alias}.RowDSJsonTx, '$.fieldName').
+            long dsDatId = bqRepo.fetchDatasourceDataSourceId(
+                ref.datasourceName, config.periodId, options);
+            String project = options.getCheckpointBqProject() != null
+                             && !options.getCheckpointBqProject().isBlank()
+                             ? options.getCheckpointBqProject() : options.getProject();
+            String recordTable = project + "." + options.getCheckpointBqDataset()
+                               + "." + options.getRecordBqTable();
+            String subquery = "(SELECT RowDSJsonTx FROM `" + recordTable
+                            + "` WHERE dataSourceId = " + dsDatId + ")";
+            registry.put(ref.transformAlias, subquery);
+            LOG.info("Alias '{}' → record table subquery (dataSourceId={})",
+                     ref.transformAlias, dsDatId);
         }
         return registry;
     }
@@ -272,15 +277,23 @@ public final class ReportPipelineFactory {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /**
-     * Replaces {@code {alias}} tokens in a query template with backtick-quoted BQ table refs.
-     * e.g. {@code {trades}} → {@code `project.dataset.table`}
+     * Replaces {@code {alias}} tokens in a query template.
+     *
+     * <p>Values that start with {@code (} are subqueries — inserted as-is (no backtick-wrapping).
+     * All other values are treated as BQ table refs and wrapped with backticks.
+     *
+     * <p>For datasource aliases backed by the record table, the subquery form is:
+     * {@code (SELECT RowDSJsonTx FROM `records` WHERE dataSourceId = X)}.
+     * Transform SQL should use {@code JSON_VALUE({alias}.RowDSJsonTx, '$.fieldName')}
+     * to extract individual columns.
      */
     private static String resolveAliasTokens(String template,
                                               Map<String, String> aliasRegistry) {
         String result = template;
         for (Map.Entry<String, String> entry : aliasRegistry.entrySet()) {
-            result = result.replace("{" + entry.getKey() + "}",
-                                    "`" + entry.getValue() + "`");
+            String ref = entry.getValue();
+            String expanded = ref.startsWith("(") ? ref : "`" + ref + "`";
+            result = result.replace("{" + entry.getKey() + "}", expanded);
         }
         return result;
     }

@@ -25,43 +25,40 @@ that reads, transforms, validates, and writes to its own output table.
 ```
 DataSourcePipelineFactory.assemble(options)
     │
-    ├─ 1. DatabaseAdapterFactory.create()  JDBC + Secret Manager (open → fetch → close)
-    ├─ 2. ParameterRepository.validate()  fail fast if source config missing
-    ├─ 3. ParameterRepository.fetchSourceConfigs()
-    │       Each SourceConfig now also carries: outputConfig, queryConfig,
-    │       sourceTransforms (LOOKUP/GROUP_BY/SORT_BY), validationConfig
-    │       DB closed here.
+    ├─ 1. BigQuerySourceConfigRepository.getMissingParameters()  fail fast if config missing
+    ├─ 2. BigQuerySourceConfigRepository.fetchSourceConfigs()
+    │       Each SourceConfig carries: queryConfig, sourceTransforms, validationConfig
     │
-    ├─ 4. BigQueryCheckpointAdapter.isDownloadComplete()  skip finished sources
+    ├─ 3. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources
     │
-    ├─ 5. Write STARTED checkpoints + PENDING process_status rows → BQ
+    ├─ 4. BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId per source
     │
-    ├─ 6. For each SourceConfig independently (no merge!):
+    ├─ 5. For each SourceConfig independently (no merge!):
     │       a. SourceRouter.routeFromConfig()         read raw data
     │       b. QueryParameterResolver                 inject {periodStart}/{periodEnd}
     │       c. SourceTransformChainAssembler.assemble()
-    │              ├─ LOOKUP: load lookup table (JDBC/BQ) → side input → LookupEnrichTransform
+    │              ├─ LOOKUP: BQ side input → LookupEnrichTransform
     │              ├─ GROUP_BY:  GroupByTransform
     │              └─ SORT_BY:   SortByTransform (per-bundle, not global)
-    │       d. Per-source sink (BigQueryIO.writeTableRows() or GcsSinkTransform)
+    │       d. DataSourceRecordSinkTransform(dataSourceId) — rows → JSON blobs → data_source_records
     │
-    └─ 7. Return pipeline (run() called by Main)
+    └─ 6. Return pipeline (run() called by Main)
 
 After pipeline.run() + waitUntilFinish():
     DataSourcePipelineFactory.runPostPipelineSteps()
     ├─ On success: for each source
-    │    ├─ Query row count from output BQ table (COUNT(*))
-    │    ├─ Query sums for each BnC rule (SUM(field))
+    │    ├─ BigQueryDataSourceRecordAdapter.countRecords(dataSourceId)
+    │    ├─ BigQueryDataSourceRecordAdapter.sumField(dataSourceId, field) per BnC rule
     │    ├─ Compare against ValidationConfig bounds
-    │    └─ Write COMPLETED or VALIDATION_FAILED → process_status + checkpoint BQ tables
-    └─ On failure: write FAILED → process_status + checkpoint BQ tables
+    │    └─ updateStatus(dataSourceId, COMPLETED/FAILED_BNC, bncJson)
+    └─ On failure: updateStatus(dataSourceId, FAILED, null)
 ```
 
 ## SourceTransformChainAssembler
 
 | Transform | What it does | Beam mechanism |
 |---|---|---|
-| `LOOKUP` | Left-join rows with a lookup table from BQ or JDBC param DB | Side input (`PCollectionView<Map<String,String>>`) |
+| `LOOKUP` | Left-join rows with a lookup table from BQ | Side input (`PCollectionView<Map<String,String>>`) |
 | `GROUP_BY` | Group by fields + aggregate (SUM, COUNT, AVG, MIN, MAX) | `GroupByKey` + `ParDo(AggregateDoFn)` |
 | `SORT_BY` | Sort within each Beam bundle (per-bundle, not global) | Buffer + sort in `@FinishBundle` |
 

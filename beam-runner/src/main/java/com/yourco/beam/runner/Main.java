@@ -20,15 +20,15 @@ import org.slf4j.LoggerFactory;
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
  * <pre>
  *   1. DataSourcePipelineFactory.assemble()
- *        ├─ Validate params in DB
- *        ├─ Fetch source configs (each carrying outputConfig, transforms, validationConfig)
- *        ├─ Filter by checkpoint (skip already-finished sources)
- *        ├─ Write STARTED checkpoints + PENDING process_status rows
- *        └─ Assemble independent per-source Beam branches (no merge)
+ *        ├─ Validate params in BQ
+ *        ├─ Fetch source configs (transforms, validationConfig)
+ *        ├─ Filter by checkpoint (skip already-COMPLETED sources)
+ *        ├─ Create LOADING checkpoint rows (returns dataSourceId per source)
+ *        └─ Assemble independent per-source Beam branches → DataSourceRecordSinkTransform
  *   2. pipeline.run().waitUntilFinish()
  *   3. DataSourcePipelineFactory.runPostPipelineSteps()
- *        ├─ On success: validate output (row count, BnC) per source
- *        └─ Write FINISHED/FAILED checkpoints + COMPLETED/VALIDATION_FAILED/FAILED status
+ *        ├─ On success: validate record table (row count, BnC) per source
+ *        └─ Update checkpoint to COMPLETED / FAILED_BNC / FAILED
  * </pre>
  *
  * <h2>REPORT_PROCESSING lifecycle</h2>

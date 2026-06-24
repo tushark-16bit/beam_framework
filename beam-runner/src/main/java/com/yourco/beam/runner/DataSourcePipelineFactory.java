@@ -1,35 +1,30 @@
 package com.yourco.beam.runner;
 
-import com.google.api.services.bigquery.model.TableRow;
-import com.yourco.beam.io.checkpoint.BigQueryCheckpointAdapter;
-import com.yourco.beam.io.checkpoint.CheckpointAdapter;
-import com.yourco.beam.io.sink.GcsSinkTransform;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
+import com.yourco.beam.io.checkpoint.DataSourceCheckpointAdapter;
+import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
+import com.yourco.beam.io.records.BigQueryDataSourceRecordAdapter;
+import com.yourco.beam.io.records.DataSourceRecordAdapter;
+import com.yourco.beam.io.sink.DataSourceRecordSinkTransform;
 import com.yourco.beam.io.source.SourceRouter;
-import com.yourco.beam.io.status.BigQueryProcessStatusAdapter;
-import com.yourco.beam.io.status.ProcessStatusAdapter;
 import com.yourco.beam.model.BncRule;
-import com.yourco.beam.model.CheckpointRecord;
-import com.yourco.beam.model.OutputConfig;
-import com.yourco.beam.model.ProcessStatusRecord;
+import com.yourco.beam.model.DataSourceCheckpoint;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
-import com.yourco.beam.options.ProcessType;
-import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
 import com.yourco.beam.utils.DateUtils;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
-import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.sdk.values.TypeDescriptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -38,49 +33,40 @@ import java.util.stream.Collectors;
 /**
  * Assembles and runs a {@code DATA_SOURCE_DOWNLOAD} pipeline.
  *
- * <h2>Revised architecture (per-source independent branches)</h2>
- * Sources are <em>never</em> merged. Each {@link SourceConfig} produces an independent
- * Beam DAG branch that flows:
+ * <h2>Per-source independent branches</h2>
+ * Each {@link SourceConfig} produces an independent Beam DAG branch:
  * <pre>
- *   source read → query param resolution → transform chain → per-source sink
- *                                              ↑
- *                              LOOKUP / GROUP_BY / SORT_BY transforms
+ *   source read → transform chain → DataSourceRecordSinkTransform
+ *                                          ↓
+ *                               data_source_records table (JSON blobs)
  * </pre>
  *
  * <h2>Orchestration steps</h2>
  * <ol>
- *   <li><b>Fetch source config from BigQuery</b> — {@link BigQuerySourceConfigRepository}
- *       queries the {@code source_config} BQ table and returns typed {@link SourceConfig} objects.</li>
+ *   <li><b>Fetch source config from BQ</b> — {@link BigQuerySourceConfigRepository}.</li>
  *   <li><b>Validate required parameters</b> — fail fast before launching Dataflow.</li>
- *   <li><b>Fetch source configs</b> — one or more {@link SourceConfig} objects, each carrying
- *       their {@code outputConfig}, {@code queryConfig}, {@code sourceTransforms}, and
- *       {@code validationConfig}.</li>
- *   <li><b>Filter by checkpoint</b> — skip FINISHED sources unless {@code --overrideDownload=true}.</li>
- *   <li><b>Write STARTED checkpoints + PENDING status</b> — one BQ row per source, written in
- *       the driver JVM before {@code pipeline.run()} so partial runs are visible.</li>
- *   <li><b>Assemble parallel source branches</b> — for each SourceConfig:
- *       source read → {@link SourceTransformChainAssembler} → per-source sink.</li>
+ *   <li><b>Filter by checkpoint</b> — skip COMPLETED sources unless {@code --overrideDownload=true}.</li>
+ *   <li><b>Create LOADING checkpoints</b> — one BQ row per source; returns the {@code dataSourceId}
+ *       used for all record rows and the final status update.</li>
+ *   <li><b>Assemble parallel source branches</b> — source read → transforms →
+ *       {@link DataSourceRecordSinkTransform} (all rows stored as JSON blobs, keyed by dataSourceId).</li>
  *   <li><b>Run pipeline</b> (called by {@link Main})</li>
- *   <li><b>Post-pipeline validation</b> — header check, row count, BnC against output table.
- *       Results determine COMPLETED vs VALIDATION_FAILED status.</li>
- *   <li><b>Write final status + checkpoints</b> — COMPLETED/FAILED/VALIDATION_FAILED per source.</li>
+ *   <li><b>Post-pipeline validation</b> — row count and BnC against the record table.
+ *       Results written to {@code BalAndCntlSmryTx}; checkpoint updated to COMPLETED / FAILED_BNC / FAILED.</li>
  * </ol>
- *
- * <h2>On-demand parameter access</h2>
- * BigQuery is the only external system accessed by the driver JVM — no JDBC connections.
- * Source configs are fetched once via {@link BigQuerySourceConfigRepository} before the
- * Dataflow job is submitted.
  */
 public final class DataSourcePipelineFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(DataSourcePipelineFactory.class);
 
-    // Held after assembly so Main can call runPostPipelineValidation()
-    private List<SourceConfig> processedConfigs;
-    private List<ProcessStatusRecord> pendingStatusRecords;
-    private ProcessStatusAdapter statusAdapter;
-    private CheckpointAdapter checkpointAdapter;
-    private String jobRunId;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    // Held after assembly so Main can call runPostPipelineSteps()
+    private List<SourceConfig>               processedConfigs;
+    private Map<String, Long>                dataSourceIds;   // datasourceName → dataSourceId
+    private DataSourceCheckpointAdapter      checkpointAdapter;
+    private DataSourceRecordAdapter          recordAdapter;
+    private FrameworkOptions                 assembledOptions;
 
     /**
      * Validates parameters, assembles the Beam pipeline graph, and returns the pipeline
@@ -89,58 +75,56 @@ public final class DataSourcePipelineFactory {
      * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility.
      */
     public Pipeline assemble(FrameworkOptions options) {
+        assembledOptions = options;
+
         // ── Resolve job run ID ─────────────────────────────────────────────
-        jobRunId = options.getJobRunId();
+        String jobRunId = options.getJobRunId();
         if (jobRunId == null || jobRunId.isBlank()) {
             jobRunId = UUID.randomUUID().toString();
             options.setJobRunId(jobRunId);
         }
-        LOG.info("DATA_SOURCE_DOWNLOAD | jobRunId={} | datasource={} | period={} | subprocess={} "
-                 + "| periodStart={} | periodEnd={}",
+        LOG.info("DATA_SOURCE_DOWNLOAD | jobRunId={} | datasource={} | period={} | subprocess={}",
                  jobRunId, options.getDatasourceName(), options.getPeriodId(),
-                 options.getSubprocessName(), options.getPeriodStart(), options.getPeriodEnd());
+                 options.getSubprocessName());
 
-        // ── Step 1-3: BQ validation and source config fetch ───────────────
+        // ── Step 1-2: BQ source config fetch and parameter validation ─────
         BigQuerySourceConfigRepository bqRepo = new BigQuerySourceConfigRepository(options);
         validateRequiredParameters(bqRepo, options);
         List<SourceConfig> sourceConfigs = bqRepo.fetchSourceConfigs(
             options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
 
-        // ── Step 4: Filter by checkpoint ──────────────────────────────────
-        checkpointAdapter = new BigQueryCheckpointAdapter(options);
-        statusAdapter     = new BigQueryProcessStatusAdapter(options);
-        List<SourceConfig> toProcess = filterByCheckpoint(sourceConfigs, checkpointAdapter, options);
+        // ── Step 3: Filter by checkpoint ──────────────────────────────────
+        checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(options);
+        recordAdapter     = new BigQueryDataSourceRecordAdapter(options);
+        List<SourceConfig> toProcess = filterByCheckpoint(sourceConfigs, options);
 
         if (toProcess.isEmpty()) {
-            LOG.info("All {} source(s) already downloaded. "
+            LOG.info("All {} source(s) already completed. "
                      + "Set --overrideDownload=true to force re-download.", sourceConfigs.size());
             return Pipeline.create(options);
         }
         LOG.info("Will process {} of {} source(s)", toProcess.size(), sourceConfigs.size());
 
-        // ── Step 5: Write STARTED checkpoints + PENDING status rows ───────
-        pendingStatusRecords = new ArrayList<>();
+        // ── Step 4: Create LOADING checkpoints ────────────────────────────
+        dataSourceIds = new LinkedHashMap<>();
         for (SourceConfig config : toProcess) {
-            LOG.info("Writing STARTED checkpoint + PENDING status for: {}", config.datasourceName);
-            checkpointAdapter.writeCheckpoint(CheckpointRecord.started(jobRunId, config));
-
-            ProcessStatusRecord pending = ProcessStatusRecord.pending(
-                jobRunId, ProcessType.DATA_SOURCE_DOWNLOAD.name(), config,
-                options.getPeriodStart(), options.getPeriodEnd());
-            statusAdapter.write(pending);
-            pendingStatusRecords.add(pending);
+            String dsNm = extractDsNm(config);
+            long dsId = checkpointAdapter.createCheckpoint(
+                config.datasourceName, config.periodId, dsNm);
+            dataSourceIds.put(config.datasourceName, dsId);
+            LOG.info("LOADING checkpoint created for '{}': dataSourceId={}", config.datasourceName, dsId);
         }
 
-        // ── Step 6: Assemble per-source independent pipeline branches ──────
+        // ── Step 5-6: Assemble per-source independent pipeline branches ────
         processedConfigs = toProcess;
         return assemblePipeline(options, toProcess);
     }
 
     /**
      * Called by {@link Main} after {@code waitUntilFinish()} completes.
-     * Runs post-pipeline validation (row count, BnC) against the output tables and
-     * writes final COMPLETED / VALIDATION_FAILED / FAILED status rows.
+     * Runs post-pipeline validation (row count, BnC) against the record table
+     * and updates each checkpoint to COMPLETED / FAILED_BNC / FAILED.
      *
      * @param pipelineState result from Beam's {@code waitUntilFinish()}
      * @param pipelineError exception from the pipeline, or null if it succeeded
@@ -152,23 +136,16 @@ public final class DataSourcePipelineFactory {
                                      || pipelineState == PipelineResult.State.UPDATED)
                                     && pipelineError == null;
 
-        for (int i = 0; i < processedConfigs.size(); i++) {
-            SourceConfig config = processedConfigs.get(i);
-            ProcessStatusRecord pending = pendingStatusRecords.get(i);
+        for (SourceConfig config : processedConfigs) {
+            long dsId = dataSourceIds.get(config.datasourceName);
 
             if (!pipelineSucceeded) {
-                // Pipeline failed — write FAILED status and FAILED checkpoint
                 String errorMsg = pipelineError != null ? pipelineError.getMessage()
                                                         : "Pipeline ended in state: " + pipelineState;
-                LOG.warn("Pipeline failed for source {}: {}", config.datasourceName, errorMsg);
-                statusAdapter.write(ProcessStatusRecord.failed(pending, errorMsg));
-                checkpointAdapter.writeCheckpoint(
-                    CheckpointRecord.failed(jobRunId, config, errorMsg));
+                LOG.warn("Pipeline failed for source '{}': {}", config.datasourceName, errorMsg);
+                checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
             } else {
-                // Pipeline succeeded — run validation against output table
-                runValidationAndWriteStatus(config, pending);
-                checkpointAdapter.writeCheckpoint(
-                    CheckpointRecord.finished(jobRunId, config, -1));
+                runValidationAndUpdateCheckpoint(config, dsId);
             }
         }
     }
@@ -181,157 +158,111 @@ public final class DataSourcePipelineFactory {
         LOG.info("Effective run date: {}", runDate);
 
         for (SourceConfig config : configs) {
-            LOG.info("Assembling source branch: {} ({})", config.datasourceName, config.sourceType);
+            long dsId = dataSourceIds.get(config.datasourceName);
+            LOG.info("Assembling source branch: {} ({}) → record table (dataSourceId={})",
+                     config.datasourceName, config.sourceType, dsId);
 
-            // 1. Read from source
             PCollection<Row> sourceData = SourceRouter.routeFromConfig(
                 pipeline, config, options, runDate);
 
-            // 2. Apply per-source transform chain (LOOKUP, GROUP_BY, SORT_BY)
             PCollection<Row> transformed = SourceTransformChainAssembler.assemble(
                 sourceData, config, options, pipeline);
 
-            // 3. Wire per-source output sink (never merged with other sources)
-            wirePerSourceSink(transformed, config, options);
+            transformed.apply("RecordSink-" + config.datasourceName,
+                              new DataSourceRecordSinkTransform(options, dsId));
         }
 
         return pipeline;
     }
 
-    // ── Per-source sink wiring ────────────────────────────────────────────────
-
-    private static void wirePerSourceSink(PCollection<Row> data, SourceConfig config,
-                                          FrameworkOptions options) {
-        OutputConfig output = config.outputConfig;
-
-        if (output == null) {
-            LOG.warn("No output_config for source '{}' — data will not be written. "
-                     + "Set output_type, output_bq_* or output_gcs_path in source_config.",
-                     config.datasourceName);
-            return;
-        }
-
-        String label = config.datasourceName;
-
-        if (output.isBq()) {
-            BigQueryIO.Write.WriteDisposition disposition = output.isTruncate()
-                ? BigQueryIO.Write.WriteDisposition.WRITE_TRUNCATE
-                : BigQueryIO.Write.WriteDisposition.WRITE_APPEND;
-
-            String tableSpec = output.bqProjectId + ":" + output.bqDataset + "." + output.bqTable;
-            LOG.info("Writing source '{}' → BQ table: {} ({})", label, tableSpec, output.writeMode);
-
-            data.apply("RowToTableRow-" + label,
-                       MapElements.into(TypeDescriptor.of(TableRow.class))
-                                  .via(DataSourcePipelineFactory::rowToTableRow))
-                .apply("BqSink-" + label,
-                       BigQueryIO.writeTableRows()
-                                 .to(tableSpec.replace(":", "."))
-                                 .withWriteDisposition(disposition)
-                                 .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER));
-
-        } else if (output.isGcs()) {
-            LOG.info("Writing source '{}' → GCS path: {}", label, output.gcsPath);
-            data.apply("GcsSink-" + label, new GcsSinkTransform(options));
-        } else {
-            LOG.warn("Unknown output_type '{}' for source '{}' — skipping sink wiring",
-                     output.outputType, label);
-        }
-    }
-
-    // ── Row → TableRow converter ──────────────────────────────────────────────
-
-    private static TableRow rowToTableRow(Row row) {
-        TableRow tableRow = new TableRow();
-        if (row == null || row.getSchema() == null) return tableRow;
-        for (org.apache.beam.sdk.schemas.Schema.Field field : row.getSchema().getFields()) {
-            Object val = row.getValue(field.getName());
-            tableRow.set(field.getName(), val != null ? val.toString() : null);
-        }
-        return tableRow;
-    }
-
     // ── Post-pipeline validation ──────────────────────────────────────────────
 
     /**
-     * Runs header check, row count check, and BnC checks against the output BQ table.
-     * Writes COMPLETED or VALIDATION_FAILED to the process_status table.
+     * Validates row count and BnC rules against the record table, then updates the
+     * checkpoint to COMPLETED, FAILED_BNC, or COMPLETED (with BnC mismatch in summary).
      *
-     * <h2>Validation checks</h2>
-     * <ol>
-     *   <li>Header check: queries BQ table schema and confirms required columns exist.</li>
-     *   <li>Row count: queries COUNT(*) and checks against min/max bounds.</li>
-     *   <li>BnC: queries SUM(field) for each BnC rule and checks against expected total.</li>
-     * </ol>
-     *
-     * All checks run even if an earlier one fails — results are aggregated into a JSON
-     * validation_details blob written to the process_status table.
+     * <p>The BnC summary ({@code BalAndCntlSmryTx}) is a JSON object:
+     * <pre>{@code
+     * {
+     *   "status":    "Matched",
+     *   "srcCount":  1000,
+     *   "srcAmount": 5000000.00,
+     *   "dstCount":  1000,
+     *   "dstAmount": 5000000.00
+     * }
+     * }</pre>
      */
-    private void runValidationAndWriteStatus(SourceConfig config, ProcessStatusRecord pending) {
+    private void runValidationAndUpdateCheckpoint(SourceConfig config, long dsId) {
         ValidationConfig validation = config.validationConfig;
-        OutputConfig output = config.outputConfig;
+        long rowCount = recordAdapter.countRecords(dsId);
+        LOG.info("Record count for '{}' (dataSourceId={}): {}", config.datasourceName, dsId, rowCount);
 
-        if (!validation.hasAnyCheck() || output == null || !output.isBq()) {
-            // No validation configured (or not a BQ output) — mark as COMPLETED
-            statusAdapter.write(ProcessStatusRecord.completed(pending, -1, null));
-            return;
-        }
-
-        String tableRef = output.bqTableRef();
         List<String> failures = new ArrayList<>();
-        Map<String, Object> details = new HashMap<>();
 
         // Row count check
-        long rowCount = -1L;
-        if (validation.hasMinRowCheck() || validation.hasMaxRowCheck()) {
-            rowCount = statusAdapter.queryRowCount(tableRef);
-            details.put("row_count", rowCount);
-
-            if (validation.hasMinRowCheck() && rowCount < validation.minRowCount) {
-                failures.add("row_count " + rowCount + " < min " + validation.minRowCount);
-            }
-            if (validation.hasMaxRowCheck() && rowCount > validation.maxRowCount) {
-                failures.add("row_count " + rowCount + " > max " + validation.maxRowCount);
-            }
+        if (validation.hasMinRowCheck() && rowCount < validation.minRowCount) {
+            failures.add("row_count " + rowCount + " < min " + validation.minRowCount);
+        }
+        if (validation.hasMaxRowCheck() && rowCount > validation.maxRowCount) {
+            failures.add("row_count " + rowCount + " > max " + validation.maxRowCount);
         }
 
-        // BnC checks
-        List<Map<String, Object>> bncResults = new ArrayList<>();
+        // BnC checks — query SUM(JSON_VALUE(...)) per rule
+        Map<String, Object> bncSummary = new LinkedHashMap<>();
+        bncSummary.put("srcCount", rowCount);
+        bncSummary.put("dstCount", rowCount);
+
         for (BncRule rule : validation.bncRules) {
-            double actualSum = statusAdapter.querySum(tableRef, rule.field);
-            boolean passes   = !Double.isNaN(actualSum) && rule.passes(actualSum);
-            Map<String, Object> bncDetail = new HashMap<>();
-            bncDetail.put("field",         rule.field);
-            bncDetail.put("expected_total", rule.expectedTotal);
-            bncDetail.put("actual_total",  actualSum);
-            bncDetail.put("tolerance_pct", rule.tolerancePct);
-            bncDetail.put("passed",        passes);
-            bncResults.add(bncDetail);
+            double actual = recordAdapter.sumField(dsId, rule.field);
+            boolean passes = !Double.isNaN(actual) && rule.passes(actual);
+            bncSummary.put("srcAmount_" + rule.field, rule.expectedTotal);
+            bncSummary.put("dstAmount_" + rule.field, actual);
             if (!passes) {
-                failures.add("BnC SUM(" + rule.field + ") actual=" + actualSum
+                failures.add("BnC SUM(" + rule.field + ") actual=" + actual
                     + " expected=" + rule.expectedTotal + " ±" + rule.tolerancePct * 100 + "%");
             }
         }
-        if (!bncResults.isEmpty()) details.put("bnc_checks", bncResults);
 
-        String validationJson;
-        try {
-            validationJson = new com.fasterxml.jackson.databind.ObjectMapper()
-                .writeValueAsString(details);
-        } catch (Exception e) {
-            validationJson = details.toString();
-        }
-
+        String staCd;
         if (failures.isEmpty()) {
-            LOG.info("Validation PASSED for source '{}': {}", config.datasourceName, validationJson);
-            statusAdapter.write(ProcessStatusRecord.completed(pending, rowCount, validationJson));
+            bncSummary.put("status", "Matched");
+            staCd = DataSourceCheckpoint.STA_COMPLETED;
+            LOG.info("Validation PASSED for '{}'", config.datasourceName);
         } else {
-            LOG.warn("Validation FAILED for source '{}': {}", config.datasourceName, failures);
-            statusAdapter.write(ProcessStatusRecord.validationFailed(pending, rowCount, validationJson));
+            bncSummary.put("status", "Not Matched");
+            bncSummary.put("failures", failures);
+            staCd = DataSourceCheckpoint.STA_FAILED_BNC;
+            LOG.warn("Validation FAILED for '{}': {}", config.datasourceName, failures);
         }
+
+        String bncJson = toJson(bncSummary);
+        checkpointAdapter.updateStatus(dsId, staCd, bncJson);
     }
 
-    // ── Validation helpers ────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static String extractDsNm(SourceConfig config) {
+        if (config.bqFetchConfig != null) {
+            return config.bqFetchConfig.project + "."
+                + config.bqFetchConfig.dataset + "."
+                + config.bqFetchConfig.table;
+        }
+        if (config.fileConfig != null && config.fileConfig.fileLocation != null) {
+            return config.fileConfig.fileLocation;
+        }
+        if (config.apiConfig != null && config.apiConfig.endpoint != null) {
+            return config.apiConfig.endpoint;
+        }
+        return config.datasourceName;
+    }
+
+    private static String toJson(Map<String, Object> map) {
+        try {
+            return MAPPER.writeValueAsString(map);
+        } catch (Exception e) {
+            return map.toString();
+        }
+    }
 
     private void validateRequiredParameters(BigQuerySourceConfigRepository repo, FrameworkOptions options) {
         String datasource = options.getDatasourceName();
@@ -356,21 +287,16 @@ public final class DataSourcePipelineFactory {
         LOG.info("All required parameters present.");
     }
 
-    // ── Checkpoint filtering ──────────────────────────────────────────────────
-
-    private List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs,
-                                                   CheckpointAdapter checkpoint,
-                                                   FrameworkOptions options) {
+    private List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs, FrameworkOptions options) {
         if (options.getOverrideDownload()) {
             LOG.info("--overrideDownload=true: skipping checkpoint check, re-downloading all sources");
             return configs;
         }
         return configs.stream()
             .filter(config -> {
-                boolean done = checkpoint.isDownloadComplete(
-                    config.datasourceName, config.periodId, config.subprocessName);
+                boolean done = checkpointAdapter.isCompleted(config.datasourceName, config.periodId);
                 if (done) {
-                    LOG.info("Skipping '{}' — FINISHED_ACCESSING checkpoint found", config.datasourceName);
+                    LOG.info("Skipping '{}' — COMPLETED checkpoint found", config.datasourceName);
                 }
                 return !done;
             })

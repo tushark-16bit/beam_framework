@@ -12,11 +12,11 @@ import java.util.List;
  * <p>Fetched from the {@code source_config} BigQuery table by {@code BigQuerySourceConfigRepository}.
  * One {@link SourceConfig} corresponds to one independent Beam pipeline branch —
  * sources are <em>never</em> merged; each source reads, transforms, validates, and
- * writes to its own output independently.
+ * writes all rows as JSON blobs to the shared record table (keyed by {@code dataSourceId}).
  *
  * <h2>Per-source pipeline shape</h2>
  * <pre>
- *   source read → {@link #queryConfig} applied → transform chain → validation → {@link #outputConfig}
+ *   source read → {@link #queryConfig} applied → transform chain → record table (JSON blobs)
  *                                                     ↑
  *                              {@link #sourceTransforms} (LOOKUP, GROUP_BY, SORT_BY)
  * </pre>
@@ -39,9 +39,6 @@ public final class SourceConfig implements Serializable {
     public final FileSourceConfig fileConfig;
     /** Non-null when sourceType == BQ (in DATA_SOURCE_DOWNLOAD mode). */
     public final BqFetchConfig bqFetchConfig;
-
-    /** Where to write this source's output. Each source has its own output destination. */
-    public final OutputConfig outputConfig;
 
     /**
      * Query template and injectable parameters (period start/end, custom params).
@@ -70,7 +67,6 @@ public final class SourceConfig implements Serializable {
         this.apiConfig        = b.apiConfig;
         this.fileConfig       = b.fileConfig;
         this.bqFetchConfig    = b.bqFetchConfig;
-        this.outputConfig     = b.outputConfig;
         this.queryConfig      = b.queryConfig != null ? b.queryConfig : QueryConfig.empty();
         this.sourceTransforms = b.sourceTransforms != null
                                 ? Collections.unmodifiableList(b.sourceTransforms)
@@ -111,7 +107,6 @@ public final class SourceConfig implements Serializable {
         private ApiSourceConfig apiConfig;
         private FileSourceConfig fileConfig;
         private BqFetchConfig bqFetchConfig;
-        private OutputConfig outputConfig;
         private QueryConfig queryConfig;
         private List<SourceTransformConfig> sourceTransforms;
         private ValidationConfig validationConfig;
@@ -123,7 +118,6 @@ public final class SourceConfig implements Serializable {
         public Builder apiConfig(ApiSourceConfig v)               { apiConfig = v;          return this; }
         public Builder fileConfig(FileSourceConfig v)             { fileConfig = v;         return this; }
         public Builder bqFetchConfig(BqFetchConfig v)             { bqFetchConfig = v;      return this; }
-        public Builder outputConfig(OutputConfig v)               { outputConfig = v;       return this; }
         public Builder queryConfig(QueryConfig v)                 { queryConfig = v;        return this; }
         public Builder sourceTransforms(List<SourceTransformConfig> v) { sourceTransforms = v; return this; }
         public Builder validationConfig(ValidationConfig v)       { validationConfig = v;  return this; }
@@ -137,7 +131,6 @@ public final class SourceConfig implements Serializable {
             + ", period=" + periodId
             + ", subprocess=" + subprocessName
             + ", type=" + sourceType
-            + ", output=" + outputConfig
             + ", transforms=" + sourceTransforms.size() + "}";
     }
 }
