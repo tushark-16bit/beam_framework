@@ -3,6 +3,47 @@
 This file is the primary reference for any AI agent working in this repository.
 Read it fully before making any changes. Written for any capable language model (Claude, GPT, Gemini, etc.).
 
+---
+
+> ## ⚠️ SELF-ENFORCEMENT — READ BEFORE TOUCHING ANY FILE
+>
+> **Documentation is part of every task. Update it in the same response as the code change.
+> Do not wait to be asked. The user should never need to say "document that".**
+>
+> ### After every code change, before responding to the user:
+>
+> | Changed | Must also update |
+> |---|---|
+> | Any `.java` file in `beam-io/` | `beam-io/README.md` — add/edit the class entry |
+> | Any `.java` file in `beam-utils/` | `beam-utils/README.md` |
+> | Any `.java` file in `beam-transforms/` | `beam-transforms/README.md` |
+> | Any `.java` file in `beam-runner/` | `beam-runner/README.md` |
+> | New class added anywhere | Section 4 file map in this file (`CLAUDE.md`) |
+> | New CLI flag in `FrameworkOptions` | Section 17 build reference + `beam-core/README.md` + root `README.md` |
+> | Execution path changed | Section 8 or 9 in this file + `WALKTHROUGH.md` sequence diagram |
+> | New BQ table or schema | Section 10 in this file + root `README.md` |
+> | Architecture rule changed | Section 5 in this file + root `README.md` |
+> | New example or runnable | `EXAMPLE.md` if it teaches the BQ param pattern |
+>
+> ### Enforcement mechanisms (automatically active in this repo)
+>
+> - **Stop hook** (`.claude/settings.json`) — fires at the end of every Claude response and
+>   prints a warning if code files changed without any doc files being touched.
+> - **git pre-commit hook** (`.git/hooks/pre-commit`) — **blocks the commit** if `.java` files
+>   are staged but no `README.md` / `CLAUDE.md` / `WALKTHROUGH.md` is staged alongside them.
+>   Override only for genuine doc-free changes: `git commit --no-verify`.
+>
+> ### What "documented" means
+>
+> - The class appears in Section 4 of this file with a one-line description.
+> - Its module README has an entry or updated entry.
+> - If it changes an execution path, the execution path diagram (Section 8/9) reflects it.
+> - If it adds a CLI flag, the flag appears in Section 17 and `beam-core/README.md`.
+> - The commit message is descriptive enough that a reader can understand the change without
+>   reading the diff.
+
+---
+
 For human-readable documentation, see [`README.md`](README.md), [`WALKTHROUGH.md`](WALKTHROUGH.md),
 and the per-module `README.md` files.
 

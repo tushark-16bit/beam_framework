@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/tushark/IdeaProjects/beam-pipeline-framework/.claude/hooks/check-docs.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
