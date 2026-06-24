@@ -202,81 +202,173 @@ flowchart LR
 
 ## 6. REPORT_PROCESSING — Full Sequence
 
-Report processing runs entirely in the **driver JVM** — no Dataflow job is submitted. It orchestrates BigQuery jobs and email sending directly.
+Report processing runs entirely in the **driver JVM** — no Dataflow job is submitted.
+All configuration is loaded from **BigQuery** (no JDBC). Two config patterns coexist:
+- **Structured** (6 BQ tables via `BigQueryReportRepository`) — used by `ReportPipelineFactory`
+- **Key-value** (`parameter_store` via `BigQueryParameterAdapter`) — used by `ExampleWorkflow` and custom runners
+
+### 6a. ReportPipelineFactory — structured 6-table BQ config
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Main
     participant RPF as ReportPipelineFactory
-    participant DB as Parameter DB (JDBC)
+    participant BQRepo as BigQueryReportRepository
+    participant CfgBQ as BigQuery<br/>(pipeline_config dataset)
     participant Status as BigQueryProcessStatusAdapter
     participant BQJob as BigQueryJobService
-    participant BQ as BigQuery
+    participant DataBQ as BigQuery<br/>(data / report tables)
     participant GCS as Cloud Storage
     participant SMTP as SMTP Server
 
     Main->>RPF: execute(options)
-    RPF->>BQ: BigQueryReportRepository.fetchReportConfig(reportName, subprocess, periodId)
-    Note over BQ: Queries 6 BQ tables (--paramBqProject.--paramBqDataset):<br/>report_config<br/>report_datasource_ref<br/>report_preprocessing_config<br/>report_transformation_config<br/>report_output_config<br/>report_email_config<br/>All queries use named BQ params (@key) — no JDBC
-    BQ-->>RPF: ReportConfig
+
+    rect rgb(230, 240, 255)
+        Note over RPF,CfgBQ: Phase 1 — Load config from BigQuery (no JDBC)
+        RPF->>BQRepo: fetchReportConfig(reportName, subprocess, periodId)
+        BQRepo->>CfgBQ: SELECT FROM report_config (@reportName, @subprocess, @periodId)
+        BQRepo->>CfgBQ: SELECT FROM report_datasource_ref
+        BQRepo->>CfgBQ: SELECT FROM report_preprocessing_config
+        BQRepo->>CfgBQ: SELECT FROM report_transformation_config
+        BQRepo->>CfgBQ: SELECT FROM report_output_config
+        BQRepo->>CfgBQ: SELECT FROM report_email_config
+        CfgBQ-->>BQRepo: rows
+        BQRepo-->>RPF: ReportConfig (assembled from 6 tables)
+    end
 
     RPF->>Status: write(PENDING — processType=REPORT_PROCESSING)
 
-    opt hasPreprocessing
-        loop each ReportPreprocessingStep (by step_order)
-            RPF->>BQJob: runQueryToTable(resolvedSQL, bqOutputTable)
-            BQJob->>BQ: CREATE QueryJob (WRITE_TRUNCATE)
-            BQ-->>BQJob: job completed
+    rect rgb(255, 245, 220)
+        Note over RPF,DataBQ: Phase 2 — Preprocessing (optional)
+        opt hasPreprocessing
+            loop each ReportPreprocessingStep (by step_order)
+                RPF->>RPF: QueryParameterResolver.resolve(bqQuery, step.queryParams, options)
+                RPF->>BQJob: runQueryToTable(resolvedSQL, bqOutputTable)
+                BQJob->>DataBQ: CREATE QueryJob (WRITE_TRUNCATE)
+                DataBQ-->>BQJob: completed
+            end
         end
     end
 
-    loop each required ReportDatasourceRef
-        RPF->>Status: getLatest(datasourceName, subprocess)
-        Status->>BQ: SELECT ... FROM process_status WHERE ...
-        BQ-->>Status: ProcessStatusRecord
-        alt status != COMPLETED
-            RPF->>Status: write(FAILED — datasource not ready)
-            RPF-->>Main: throws RuntimeException
+    rect rgb(255, 235, 235)
+        Note over RPF,Status: Phase 3 — Datasource availability check
+        loop each required ReportDatasourceRef
+            RPF->>Status: getLatest(datasourceName, subprocess)
+            Status->>DataBQ: SELECT FROM process_status
+            DataBQ-->>Status: ProcessStatusRecord
+            alt status != COMPLETED
+                RPF->>Status: write(FAILED)
+                RPF-->>Main: throws RuntimeException
+            end
         end
     end
 
-    RPF->>BQ: BigQueryReportRepository.fetchDatasourceOutputTable() × N
-    Note over RPF: Build alias registry:<br/>alias → project.dataset.table<br/>(queries source_config BQ table)
-
-    loop each ReportTransformStep (by step_order)
-        RPF->>RPF: resolveAliasTokens({alias} → backtick table ref)
-        RPF->>RPF: QueryParameterResolver.resolve(sql, step.queryParams, options)
-        RPF->>BQJob: runQueryToTable(resolvedSQL, step.outputBqTable)
-        BQJob->>BQ: CREATE QueryJob → materialise result
-        BQ-->>BQJob: done
-        RPF->>RPF: aliasRegistry.put(step.outputAlias, step.outputBqTable)
-    end
-
-    loop each ReportOutputConfig (by output_order)
-        RPF->>RPF: look up inputAlias in aliasRegistry
-        RPF->>RPF: build GCS URI (gcsPath + prefix + reportName_periodId_date + suffix)
-        alt outputFormat=CSV
-            RPF->>BQJob: exportToCsv(sourceTable, gcsUri, includeHeader)
-        else outputFormat=JSON
-            RPF->>BQJob: exportToJson(sourceTable, gcsUri)
+    rect rgb(230, 255, 235)
+        Note over RPF,CfgBQ: Phase 4 — Build alias registry
+        loop each ReportDatasourceRef
+            RPF->>BQRepo: fetchDatasourceOutputTable(datasource, subprocess, periodId)
+            BQRepo->>CfgBQ: SELECT output_bq_* FROM source_config WHERE ...
+            CfgBQ-->>BQRepo: project.dataset.table
+            RPF->>RPF: aliasRegistry.put(transformAlias, tableRef)
         end
-        BQJob->>BQ: CREATE ExtractJob → export to GCS
-        BQ->>GCS: write file
     end
 
-    opt hasEmail
-        loop each exported file
-            RPF->>GCS: GcsUtils.readBytes(gcsUri)
-            GCS-->>RPF: byte[]
-            RPF->>RPF: new EmailAttachment(ByteArrayInputStream(bytes), fileName, contentType)
+    rect rgb(240, 230, 255)
+        Note over RPF,DataBQ: Phase 5 — Transformation chain
+        loop each ReportTransformStep (by step_order)
+            RPF->>RPF: resolveAliasTokens({alias} → backtick project.dataset.table backtick)
+            RPF->>RPF: QueryParameterResolver.resolve(sql, step.queryParams, options)
+            RPF->>BQJob: runQueryToTable(resolvedSQL, step.outputBqTable)
+            BQJob->>DataBQ: CREATE QueryJob → materialise to outputBqTable
+            DataBQ-->>BQJob: done
+            RPF->>RPF: aliasRegistry.put(step.outputAlias, step.outputBqTable)
         end
-        RPF->>RPF: resolveEmailTokens(subject/body templates)
-        RPF->>SMTP: SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
-        SMTP-->>RPF: sent
     end
 
-    RPF->>Status: write(COMPLETED, outputCount)
+    rect rgb(255, 250, 220)
+        Note over RPF,GCS: Phase 6 — Export to GCS
+        loop each ReportOutputConfig (by output_order)
+            RPF->>RPF: aliasRegistry.get(inputAlias) → source table
+            RPF->>RPF: build gcsUri = gcsPath + prefix + name_period_date + suffix + .ext
+            alt outputFormat = CSV
+                RPF->>BQJob: exportToCsv(sourceTable, gcsUri, includeHeader)
+            else outputFormat = JSON
+                RPF->>BQJob: exportToJson(sourceTable, gcsUri)
+            end
+            BQJob->>DataBQ: CREATE ExtractJob
+            DataBQ->>GCS: write file
+        end
+    end
+
+    rect rgb(220, 245, 255)
+        Note over RPF,SMTP: Phase 7 — Email with attachments (optional)
+        opt hasEmail
+            loop each exported file
+                RPF->>GCS: GcsUtils.readBytes(gcsUri)
+                GCS-->>RPF: byte[]
+                RPF->>RPF: new EmailAttachment(ByteArrayInputStream, fileName, contentType)
+            end
+            RPF->>RPF: resolveEmailTokens(subject/body templates)
+            RPF->>SMTP: SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
+            SMTP-->>RPF: sent
+        end
+    end
+
+    RPF->>Status: write(COMPLETED, outputCount) or write(FAILED)
+```
+
+### 6b. ExampleWorkflow — key-value BigQueryParameterAdapter pattern
+
+An alternative to the 6-table structured config. All job config lives as key-value rows
+in `parameter_store`. The framework discovers which keys are needed from `required_parameters_index`
+at runtime — no key names are hard-coded in Java.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant EW as ExampleWorkflow
+    participant Adapter as BigQueryParameterAdapterImpl
+    participant CfgBQ as BigQuery<br/>(pipeline_config dataset)
+    participant BQJob as BigQueryJobService
+    participant DataBQ as BigQuery<br/>(data / report tables)
+    participant GCS as Cloud Storage
+
+    EW->>Adapter: fetchRequiredParameters(reportName, subprocess, periodId)
+
+    rect rgb(230, 240, 255)
+        Note over Adapter,CfgBQ: Step 1 — Discover required keys
+        Adapter->>CfgBQ: SELECT param_key FROM required_parameters_index<br/>WHERE process_name=@name AND subprocess_name=@sub AND is_required=TRUE
+        CfgBQ-->>Adapter: [source_bq_table, transform_query,<br/>transform_output_table, output_gcs_path, output_file_name]
+    end
+
+    rect rgb(230, 255, 235)
+        Note over Adapter,CfgBQ: Step 2 — Fetch values (IN UNNEST to avoid injection)
+        Adapter->>CfgBQ: SELECT param_key, param_value FROM parameter_store<br/>WHERE process_name=@name AND subprocess_name=@sub<br/>AND period_id=@periodId AND param_key IN UNNEST(@keys)
+        CfgBQ-->>Adapter: {source_bq_table: "proj.raw.trades",<br/>transform_query: "SELECT ...",<br/>transform_output_table: "proj.reports.summary",<br/>output_gcs_path: "gs://bucket/reports/",<br/>output_file_name: "report_2024_01.csv"}
+        Adapter->>Adapter: validate all required keys present (throws if any missing)
+        Adapter-->>EW: Map<String, String> params
+    end
+
+    rect rgb(255, 245, 220)
+        Note over EW,EW: Step 3 — Token resolution
+        EW->>EW: replace {periodStart}, {periodEnd}, {periodId}, {runDate} in transform_query
+    end
+
+    rect rgb(240, 230, 255)
+        Note over EW,DataBQ: Step 4 — Run transform query → BQ table
+        EW->>BQJob: runQueryToTable(resolvedQuery, params["transform_output_table"])
+        BQJob->>DataBQ: CREATE QueryJob (WRITE_TRUNCATE)
+        DataBQ-->>BQJob: completed
+    end
+
+    rect rgb(255, 250, 220)
+        Note over EW,GCS: Step 5 — Export to GCS CSV
+        EW->>BQJob: exportToCsv(outputTable, gcsPath + fileName, includeHeader=true)
+        BQJob->>DataBQ: CREATE ExtractJob
+        DataBQ->>GCS: write CSV file
+        EW->>EW: log "output at gs://bucket/reports/report_2024_01.csv"
+    end
 ```
 
 ---
@@ -452,91 +544,116 @@ classDiagram
 
 ---
 
-## 10. Database Entity Relationship — Parameter DB
+## 10. BigQuery Config Tables — Entity Relationship
+
+All configuration lives in BigQuery (`--paramBqProject.--paramBqDataset`). No JDBC.
+Two layouts coexist in the same dataset:
+
+- **Structured layout** (6 tables) — queried by `BigQueryReportRepository` for `ReportPipelineFactory`
+- **Key-value layout** (2 tables) — queried by `BigQueryParameterAdapter` for `ExampleWorkflow` and custom runners
 
 ```mermaid
 erDiagram
+    parameter_store {
+        STRING process_name PK
+        STRING subprocess_name PK
+        STRING period_id PK
+        STRING param_key PK
+        STRING param_value
+        TIMESTAMP created_at
+    }
+
+    required_parameters_index {
+        STRING process_name PK
+        STRING subprocess_name PK
+        STRING param_key PK
+        BOOL is_required
+        STRING description
+    }
+
+    parameter_store }o--|| required_parameters_index : "values for keys declared in"
+
     source_config {
-        varchar datasource_name PK
-        varchar period_id PK
-        varchar subprocess_name PK
-        varchar source_type
-        text bq_query
-        text query_params_json
-        varchar output_type
-        varchar output_bq_project
-        varchar output_bq_dataset
-        varchar output_bq_table
-        text source_transforms_json
-        bigint min_row_count
-        bigint max_row_count
-        text required_headers_json
-        text bnc_rules_json
+        STRING datasource_name PK
+        STRING period_id PK
+        STRING subprocess_name PK
+        STRING source_type
+        STRING bq_query
+        STRING query_params_json
+        STRING output_type
+        STRING output_bq_project
+        STRING output_bq_dataset
+        STRING output_bq_table
+        STRING source_transforms_json
+        INT64 min_row_count
+        INT64 max_row_count
+        STRING required_headers_json
+        STRING bnc_rules_json
     }
 
     report_config {
-        varchar report_name PK
-        varchar report_subprocess PK
-        varchar period_id PK
-        boolean override_key
+        STRING report_name PK
+        STRING report_subprocess PK
+        STRING period_id PK
+        BOOL override_key
     }
 
     report_datasource_ref {
-        varchar report_name PK,FK
-        varchar report_subprocess PK,FK
-        varchar period_id PK,FK
-        varchar datasource_name PK
-        varchar datasource_subprocess PK
-        varchar transform_alias
-        boolean is_required
+        STRING report_name PK,FK
+        STRING report_subprocess PK,FK
+        STRING period_id PK,FK
+        STRING datasource_name PK
+        STRING datasource_subprocess PK
+        STRING transform_alias
+        BOOL is_required
     }
 
     report_preprocessing_config {
-        varchar report_name PK,FK
-        varchar report_subprocess PK,FK
-        varchar period_id PK,FK
-        int step_order PK
-        varchar step_type
-        text bq_query
-        varchar bq_output_table
-        text query_params_json
-        text api_endpoint
-        text api_params_json
+        STRING report_name PK,FK
+        STRING report_subprocess PK,FK
+        STRING period_id PK,FK
+        INT64 step_order PK
+        STRING step_type
+        STRING bq_query
+        STRING bq_output_table
+        STRING query_params_json
+        STRING api_endpoint
+        STRING api_params_json
     }
 
     report_transformation_config {
-        varchar report_name PK,FK
-        varchar report_subprocess PK,FK
-        varchar period_id PK,FK
-        int step_order PK
-        varchar input_alias
-        varchar output_alias
-        text query_template
-        varchar output_bq_table
-        text query_params_json
+        STRING report_name PK,FK
+        STRING report_subprocess PK,FK
+        STRING period_id PK,FK
+        INT64 step_order PK
+        STRING input_alias
+        STRING output_alias
+        STRING query_template
+        STRING output_bq_table
+        STRING query_params_json
     }
 
     report_output_config {
-        varchar report_name PK,FK
-        varchar report_subprocess PK,FK
-        varchar period_id PK,FK
-        int output_order PK
-        varchar input_alias
-        varchar output_format
-        text gcs_path
-        varchar file_prefix
-        varchar file_suffix
-        boolean include_header
+        STRING report_name PK,FK
+        STRING report_subprocess PK,FK
+        STRING period_id PK,FK
+        INT64 output_order PK
+        STRING input_alias
+        STRING output_format
+        STRING gcs_path
+        STRING file_prefix
+        STRING file_suffix
+        BOOL include_header
     }
 
     report_email_config {
-        varchar report_name PK,FK
-        varchar report_subprocess PK,FK
-        varchar period_id PK,FK
-        text to_list
-        text cc_list
-        text subject_template
-        text body_template
+        STRING report_name PK,FK
+        STRING report_subprocess PK,FK
+        STRING period_id PK,FK
+        STRING to_list
+        STRING cc_list
+        STRING subject_template
+        STRING body_template
     }
 
     report_config ||--o{ report_datasource_ref : "has"
@@ -551,7 +668,7 @@ erDiagram
 
 ## 11. BigQuery Tables — Runtime State
 
-These are BQ tables written to at runtime (not the parameter DB).
+These are BQ tables written to at runtime (not the config dataset).
 
 ```mermaid
 erDiagram
