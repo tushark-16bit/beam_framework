@@ -30,20 +30,19 @@ import java.util.stream.Collectors;
  * Fetches structured report configuration from BigQuery tables.
  *
  * <p>All six report config tables live in the BQ dataset specified by
- * All six report config tables live in the same BQ dataset specified by
  * {@code --paramBqProject} and {@code --paramBqDataset}.
  *
- * <h2>Required BQ tables (same schema as the JDBC tables, now in BQ)</h2>
+ * <h2>Required BQ tables</h2>
  * <ul>
  *   <li>{@code report_config}</li>
- *   <li>{@code report_datasource_ref}</li>
+ *   <li>{@code report_datasource_ref} — references to DaRec datasources required by this report</li>
  *   <li>{@code report_preprocessing_config}</li>
  *   <li>{@code report_transformation_config}</li>
- *   <li>{@code report_output_config}</li>
+ *   <li>{@code report_output_config} — sink_type (GCS/BQ/API) and sink-specific columns</li>
  *   <li>{@code report_email_config}</li>
  * </ul>
  *
- * All queries use named BQ parameters (@name) to prevent injection.
+ * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
 public final class BigQueryReportRepository {
 
@@ -94,15 +93,6 @@ public final class BigQueryReportRepository {
                                 datasources, preprocessing, transforms, outputs, email);
     }
 
-    /**
-     * Returns the fully-qualified BQ output table ({@code project.dataset.table})
-     * for a previously-completed data source download.
-     *
-     * <p>Queries the {@code source_config} BQ table keyed by
-     * {@code (datasource_name, subprocess_name, period_id)}.
-     *
-     * @throws IllegalArgumentException if no source_config row exists or BQ output fields are null
-     */
     /**
      * Returns the {@code DaId} of the latest COMPLETED DaRefer row for a datasource run.
      *

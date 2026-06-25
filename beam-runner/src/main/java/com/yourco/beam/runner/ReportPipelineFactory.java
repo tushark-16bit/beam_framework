@@ -42,15 +42,17 @@ import java.util.Map;
  *
  * <h2>Execution phases</h2>
  * <ol>
+ *   <li>Resolve {@code PerId} via {@code MSTR_Per}</li>
  *   <li>Load {@link ReportConfig} from parameter DB</li>
- *   <li>Write {@code PENDING} status to {@code process_status}</li>
+ *   <li>Insert DaRefer row with {@code StaCd=LOADING}</li>
  *   <li>Run preprocessing steps (BQ queries or API enrichment)</li>
- *   <li>Verify each required datasource has {@code COMPLETED} status for this period</li>
- *   <li>Build alias registry: alias → BQ output table ref of its data</li>
+ *   <li>Verify each required datasource has {@code StaCd=COMPLETED} in DaRefer for this period</li>
+ *   <li>Build alias registry: alias → {@code SELECT RowDaJsonTx FROM DaRec WHERE DaId=X}</li>
  *   <li>Run transformation chain (BQ jobs, each materialised to a BQ table)</li>
- *   <li>Export each output to GCS (BQ extract job)</li>
- *   <li>Download GCS files and send email with attachments</li>
- *   <li>Write {@code COMPLETED} or {@code FAILED} status</li>
+ *   <li>Route each output via {@link ReportOutputSinkRouter} (GCS / BQ / API)</li>
+ *   <li>Insert one {@code COM_CmnRptDtl} row per output</li>
+ *   <li>Send email — GCS outputs as file attachments; BQ/API outputs noted in body</li>
+ *   <li>Update DaRefer to {@code StaCd=COMPLETED} or {@code FAILED}</li>
  * </ol>
  */
 public final class ReportPipelineFactory {

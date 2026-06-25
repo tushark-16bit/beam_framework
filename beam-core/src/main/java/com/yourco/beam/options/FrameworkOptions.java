@@ -80,10 +80,11 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getDatasourceName();
     void setDatasourceName(String value);
 
-    @Description("Period identifier passed to the parameter DB for source config lookup. "
-                 + "Represents the time window this run is processing. "
-                 + "Required for DATA_SOURCE_DOWNLOAD. "
-                 + "Example: 2024-Q1, 2024-01, 2024-01-15")
+    @Description("Period identifier for this run. Must exist in the MSTR_Per table. "
+                 + "Encoding — MONTHLY: YYYYMM (e.g. 202401), "
+                 + "DAILY: YYYYMMDD (e.g. 20240115), "
+                 + "QUARTERLY: YYYYMMDDQQ (e.g. 2024011501). "
+                 + "Required for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING.")
     String getPeriodId();
     void setPeriodId(String value);
 
@@ -94,9 +95,9 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getSubprocessName();
     void setSubprocessName(String value);
 
-    @Description("When true, re-downloads data even if a FINISHED_ACCESSING checkpoint exists. "
-                 + "Use for forced reprocessing. Default is false: sources with a "
-                 + "FINISHED_ACCESSING checkpoint in the current period are skipped.")
+    @Description("When true, re-downloads data even if a COMPLETED DaRefer row exists for "
+                 + "this (datasourceName, periodId). Use for forced reprocessing. "
+                 + "Default is false: sources with StaCd=COMPLETED for the current period are skipped.")
     @Default.Boolean(false)
     boolean getOverrideDownload();
     void setOverrideDownload(boolean value);
@@ -135,17 +136,16 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setPeriodEnd(String value);
 
     // =========================================================================
-    // PARAMETER BIGQUERY STORE
-    // All pipeline configuration (source config, report config, key-value params)
-    // is stored in BigQuery tables and fetched at runtime using the BQ client.
+    // PARAMETER BIGQUERY STORE  (config tables — read-only at runtime)
+    // All pipeline configuration is stored in BigQuery and fetched at startup.
     //
-    // Two kinds of tables live in the same BQ dataset:
-    //   parameter_store          — generic key-value params per (process, subprocess, period)
-    //   required_parameters_index — which param_keys are mandatory for each (process, subprocess)
-    //   report_config + related   — structured report configuration (6 tables)
-    //   source_config             — structured data-source configuration
+    // Tables in this dataset:
+    //   parameter_store  — key-value params keyed by (ParameterGroupName, ParameterDataSource, ParameterName)
+    //   source_config    — DATA_SOURCE_DOWNLOAD source configs; three-identifier key: (parent_id, subprocess_name, datasource_name)
+    //   MSTR_Per         — period master (PerId → PerDt, MoNo, YrNo, PerTypeCd); pre-populated externally
+    //   report_config + related — six tables that drive ReportPipelineFactory
     //
-    // Table names are configurable via options so the same code works in dev/staging/prod.
+    // Table names are configurable so the same binary works in dev/staging/prod.
     // =========================================================================
 
     @Description("GCP project that contains the parameter BigQuery dataset. "
@@ -171,19 +171,21 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setParamStoreTable(String value);
 
     @Description("BQ table name for the source configuration table. "
-                 + "Schema: datasource_name STRING, subprocess_name STRING, period_id STRING, "
-                 + "source_type STRING, output_bq_project STRING, output_bq_dataset STRING, "
-                 + "output_bq_table STRING, plus source-type-specific columns. "
-                 + "Queried by DATA_SOURCE_DOWNLOAD to find where each source writes its output.")
+                 + "Three-identifier key: parent_id (--parentId), subprocess_name (--subprocessName), "
+                 + "datasource_name (--datasourceName). Also keyed by period_id (--periodId, from MSTR_Per). "
+                 + "Contains source_type and source-type-specific columns (BQ / API / FILE). "
+                 + "Queried by DATA_SOURCE_DOWNLOAD before each run.")
     @Default.String("source_config")
     String getParamSourceConfigTable();
     void setParamSourceConfigTable(String value);
 
     // =========================================================================
-    // CHECKPOINT STORAGE
-    // State of each data-source download attempt is persisted to BigQuery so
-    // subsequent runs can skip already-completed sources (unless overrideDownload=true).
-    // The table must be created manually — the framework only reads and writes it.
+    // RUNTIME TABLE STORAGE (DaRefer, DaRec, COM_CmnRptDtl)
+    // Run lifecycle state is persisted to BigQuery by both process types:
+    //   DaRefer  — one row per run; LOADING → COMPLETED / FAILED_BNC / FAILED
+    //   DaRec    — all source rows as JSON blobs (DATA_SOURCE_DOWNLOAD writes here)
+    //   COM_CmnRptDtl — one row per output file written (REPORT_PROCESSING writes here)
+    // All three tables must be created manually — the framework only reads and writes them.
     // =========================================================================
 
     @Description("GCP project for the checkpoint BigQuery table. "

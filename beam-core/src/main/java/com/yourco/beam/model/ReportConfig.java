@@ -10,15 +10,19 @@ import java.util.List;
  *
  * <h2>Execution order inside ReportPipelineFactory</h2>
  * <ol>
+ *   <li>Period lookup — resolve {@code PerId} via {@code MSTR_Per}</li>
+ *   <li>Create DaRefer row with {@code StaCd=LOADING}</li>
  *   <li>Preprocessing steps ({@link #preprocessingSteps}) — in {@code step_order} order</li>
  *   <li>Datasource availability check ({@link #datasources}) — fail fast if any required
- *       datasource is not {@code COMPLETED} for this period</li>
- *   <li>Alias registry initialised from {@link ReportDatasourceRef#transformAlias} →
- *       BQ output table of each datasource</li>
+ *       datasource has no {@code StaCd=COMPLETED} DaRefer row for this {@code PerId}</li>
+ *   <li>Alias registry built: {@link ReportDatasourceRef#transformAlias} →
+ *       {@code SELECT RowDaJsonTx FROM DaRec WHERE DaId = X} subquery</li>
  *   <li>Transformation chain ({@link #transformSteps}) — BQ jobs in {@code step_order} order;
- *       each step's result registered under its {@code outputAlias}</li>
- *   <li>File export ({@link #outputConfigs}) — one BQ extract job per output config</li>
- *   <li>Email sent ({@link #emailConfig}) with all exported files as attachments</li>
+ *       each result materialised to a BQ table and registered under its {@code outputAlias}</li>
+ *   <li>Output routing ({@link #outputConfigs}) — each config dispatches to GCS, BQ, or API sink</li>
+ *   <li>COM_CmnRptDtl write — one row per output step (all sink types)</li>
+ *   <li>Email ({@link #emailConfig}) — sent only if configured; GCS outputs attached, others noted in body</li>
+ *   <li>DaRefer updated to {@code StaCd=COMPLETED} (or {@code FAILED} on error)</li>
  * </ol>
  *
  * <h2>DB tables that feed this object</h2>

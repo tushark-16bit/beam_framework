@@ -8,10 +8,12 @@ package com.yourco.beam.options;
  *
  * <ul>
  *   <li>{@link #DATA_SOURCE_DOWNLOAD} — fetch raw data from external systems (API, file, BQ)
- *       and persist it to GCS or BQ. Source configuration is resolved from the parameter DB;
- *       {@code --sourceType} is not used. Runs multiple sources in parallel in one Beam job.</li>
- *   <li>{@link #REPORT_PROCESSING} — read already-downloaded data, apply the transform chain,
- *       and write results. Uses {@code --sourceType} / {@code --sinkType} from CLI as usual.</li>
+ *       and persist every row as a JSON blob to {@code DaRec} (keyed by {@code DaId} from {@code DaRefer}).
+ *       Source configuration is resolved per-source from {@code source_config} in the parameter DB;
+ *       {@code --sourceType} is not used. Multiple sources run as parallel Beam branches in one job.</li>
+ *   <li>{@link #REPORT_PROCESSING} — read data already written to {@code DaRec}, apply the transform
+ *       chain, and route output to one or more sinks (GCS / BQ / API). Full lifecycle tracked in
+ *       {@code DaRefer}; per-output detail written to {@code COM_CmnRptDtl}.</li>
  * </ul>
  */
 public enum ProcessType {

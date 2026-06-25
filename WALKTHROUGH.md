@@ -52,9 +52,9 @@ flowchart TD
     E -->|yes| F["ReportPipelineFactory\n.execute(options)\ndriver-JVM only\nno Beam pipeline"]
     E -->|no legacy mode| G["PipelineFactory\n.assemble(options)\npipeline.run()\nwaitUntilFinish if batch"]
 
-    D --> H[("data_source_checkpoints\nBQ table")]
+    D --> H[("DaRefer\nBQ table")]
     F --> H
-    D --> I[("data_source_records\nBQ table")]
+    D --> I[("DaRec\nBQ table")]
 
     style F fill:#e8f5e9,stroke:#4CAF50
     style D fill:#e3f2fd,stroke:#2196F3
@@ -65,42 +65,45 @@ flowchart TD
 
 ## 3. DATA_SOURCE_DOWNLOAD — Full Sequence
 
-This process type reads source configuration from BigQuery, runs one independent Beam branch per source, validates output, and writes status.
+This process type reads source configuration from BigQuery, runs one independent Beam branch per source, validates output, and writes lifecycle state to `DaRefer`.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Main
     participant DSF as DataSourcePipelineFactory
-    participant BQCfg as BigQuery (source_config table)
-    participant Checkpoint as BigQueryDataSourceCheckpointAdapter
-    participant Records as BigQuery (data_source_records table)
+    participant Per as BigQuery (MSTR_Per)
+    participant BQCfg as BigQuery (source_config)
+    participant Checkpoint as BigQueryDataSourceCheckpointAdapter (DaRefer)
+    participant DaRec as BigQuery (DaRec)
     participant Beam as Apache Beam / Dataflow
 
     Main->>DSF: assemble(options)
-    DSF->>BQCfg: BigQuerySourceConfigRepository.getMissingParameters()
+    DSF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
+    Per-->>DSF: Period (PerDt, MoNo, YrNo, PerTypeCd)
+    DSF->>BQCfg: BigQuerySourceConfigRepository.getMissingParameters(parentId, datasource, subprocess, period)
     BQCfg-->>DSF: [] or list of missing keys (fail fast if non-empty)
-    DSF->>BQCfg: BigQuerySourceConfigRepository.fetchSourceConfigs(datasource, period, subprocess)
+    DSF->>BQCfg: BigQuerySourceConfigRepository.fetchSourceConfigs(parentId, datasource, subprocess, period)
     BQCfg-->>DSF: List<SourceConfig>
 
     loop for each SourceConfig
-        DSF->>Checkpoint: isCompleted(srcName, perId)
+        DSF->>Checkpoint: isCompleted(SrceNm, PerId)
         Checkpoint-->>DSF: true / false
         alt already COMPLETED and not overrideDownload
             DSF->>DSF: skip this source
         else
-            DSF->>Checkpoint: createCheckpoint(srcName, perId, dsNm)
-            Checkpoint-->>DSF: dataSourceId (BQ MAX+1 sequence)
+            DSF->>Checkpoint: createCheckpoint(SrceNm, PerId, FlNm)
+            Checkpoint-->>DSF: DaId (MAX(DaId)+1 across DaRefer)
             DSF->>Beam: SourceRouter.routeFromConfig() → PCollection<Row>
             DSF->>Beam: SourceTransformChainAssembler.assemble() → PCollection<Row>
-            DSF->>Beam: DataSourceRecordSinkTransform(dataSourceId)
+            DSF->>Beam: DataSourceRecordSinkTransform(DaId)
         end
     end
 
     DSF-->>Main: Pipeline (graph assembled, no data moved yet)
 
     Main->>Beam: pipeline.run()
-    Beam->>Records: streams rows as JSON blobs (RecId, dataSourceId, RowDSJsonTx)
+    Beam->>DaRec: streams rows as JSON blobs (RecId, DaId, RowDaJsonTx, LoadDt)
     Beam-->>Main: PipelineResult
 
     Main->>Main: result.waitUntilFinish()
@@ -108,18 +111,18 @@ sequenceDiagram
 
     loop for each SourceConfig that ran
         alt pipeline DONE or UPDATED
-            DSF->>Records: countRecords(dataSourceId)
-            Records-->>DSF: rowCount
-            DSF->>Records: sumField(dataSourceId, field) for each BnC rule
-            Records-->>DSF: actual sum
-            DSF->>DSF: ValidationConfig checks (min/max rows, BnC)
+            DSF->>DaRec: COUNT(*) WHERE DaId = X
+            DaRec-->>DSF: rowCount
+            DSF->>DaRec: SUM(JSON_VALUE(RowDaJsonTx, @field)) WHERE DaId = X (BnC)
+            DaRec-->>DSF: actual sum
+            DSF->>DSF: ValidationConfig checks (min/max rows, BnC tolerance%)
             alt all checks pass
-                DSF->>Checkpoint: updateStatus(dataSourceId, COMPLETED, bncJson)
+                DSF->>Checkpoint: updateStatus(DaId, COMPLETED, bncJson)
             else validation failed
-                DSF->>Checkpoint: updateStatus(dataSourceId, FAILED_BNC, bncJson)
+                DSF->>Checkpoint: updateStatus(DaId, FAILED_BNC, bncJson)
             end
         else pipeline FAILED
-            DSF->>Checkpoint: updateStatus(dataSourceId, FAILED, null)
+            DSF->>Checkpoint: updateStatus(DaId, FAILED, null)
         end
     end
 ```
@@ -148,8 +151,8 @@ flowchart TD
         D1 --> D2["GROUP_BY transform\n(if configured)\nGroupByTransform\nMapElements → GroupByKey → AggregateDoFn"]
         D2 --> D3["SORT_BY transform\n(if configured)\nSortByTransform\nper-bundle sort only"]
 
-        D3 --> F["DataSourceRecordSinkTransform\nserialize Row → JSON (JsonUtils.rowToJson)\nset RecId=UUID, dataSourceId, LoadDt\nBigQueryIO.writeTableRows() APPEND"]
-        F --> RecTab[("data_source_records\nRecId, dataSourceId\nRowDSJsonTx, LoadDt")]
+        D3 --> F["DataSourceRecordSinkTransform\nserialize Row → JSON (JsonUtils.rowToJson)\nset RecId=UUID, DaId, LoadDt\nBigQueryIO.writeTableRows() APPEND"]
+        F --> RecTab[("DaRec\nRecId, DaId\nRowDaJsonTx, LoadDt")]
     end
 
     subgraph "Driver JVM (before pipeline.run)"
@@ -158,9 +161,9 @@ flowchart TD
     end
 
     subgraph "Driver JVM (after waitUntilFinish)"
-        RecTab --> I["DataSourceRecordAdapter\n.countRecords(dataSourceId)\n.sumField(dataSourceId, field)"]
+        RecTab --> I["DataSourceRecordAdapter\n.countRecords(DaId)\n.sumField(DaId, field)"]
         I --> J["ValidationConfig\nmin/max row count\nBnC JSON_VALUE SUM checks"]
-        J --> K[("data_source_checkpoints\nCOMPLETED / FAILED_BNC / FAILED\n+ BalAndCntlSmryTx JSON")]
+        J --> K[("DaRefer\nCOMPLETED / FAILED_BNC / FAILED\n+ BalAndCntlSmryTx JSON")]
     end
 ```
 
@@ -203,41 +206,39 @@ sequenceDiagram
     autonumber
     participant Main
     participant RPF as ReportPipelineFactory
+    participant Per as BigQuery<br/>(MSTR_Per)
     participant BQRepo as BigQueryReportRepository
-    participant CfgBQ as BigQuery<br/>(pipeline_config dataset)
-    participant Checkpoint as BigQueryDataSourceCheckpointAdapter
+    participant CfgBQ as BigQuery<br/>(pipeline_config)
+    participant Checkpoint as BigQueryDataSourceCheckpointAdapter<br/>(DaRefer)
     participant BQJob as BigQueryJobService
     participant DataBQ as BigQuery<br/>(data / report tables)
-    participant Records as BigQuery<br/>(data_source_records)
+    participant DaRec as BigQuery<br/>(DaRec)
+    participant CmnRpt as BigQueryCommonReportDetailAdapter<br/>(COM_CmnRptDtl)
+    participant Router as ReportOutputSinkRouter
     participant GCS as Cloud Storage
     participant SMTP as SMTP Server
 
     Main->>RPF: execute(options)
 
     rect rgb(230, 240, 255)
-        Note over RPF,CfgBQ: Phase 1 — Load config from BigQuery (no JDBC)
+        Note over RPF,Per: Phase 1 — Period + config load
+        RPF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
+        Per-->>RPF: Period (PerDt, MoNo, YrNo, PerTypeCd)
         RPF->>BQRepo: fetchReportConfig(reportName, subprocess, periodId)
-        BQRepo->>CfgBQ: SELECT FROM report_config (@reportName, @subprocess, @periodId)
-        BQRepo->>CfgBQ: SELECT FROM report_datasource_ref
-        BQRepo->>CfgBQ: SELECT FROM report_preprocessing_config
-        BQRepo->>CfgBQ: SELECT FROM report_transformation_config
-        BQRepo->>CfgBQ: SELECT FROM report_output_config
-        BQRepo->>CfgBQ: SELECT FROM report_email_config
+        BQRepo->>CfgBQ: SELECT FROM report_config, report_datasource_ref,<br/>report_preprocessing_config, report_transformation_config,<br/>report_output_config, report_email_config
         CfgBQ-->>BQRepo: rows
-        BQRepo-->>RPF: ReportConfig (assembled from 6 tables)
+        BQRepo-->>RPF: ReportConfig
     end
 
-    RPF->>Checkpoint: createCheckpoint(reportName, periodId, reportName)
-    Checkpoint-->>RPF: dataSourceId (LOADING row written)
+    RPF->>Checkpoint: createCheckpoint(SrceNm=reportName, PerId, FlNm=reportName)
+    Checkpoint-->>RPF: DaId (LOADING row inserted into DaRefer)
 
     rect rgb(255, 245, 220)
         Note over RPF,DataBQ: Phase 2 — Preprocessing (optional)
         opt hasPreprocessing
             loop each ReportPreprocessingStep (by step_order)
-                RPF->>RPF: QueryParameterResolver.resolve(bqQuery, step.queryParams, options)
                 RPF->>BQJob: runQueryToTable(resolvedSQL, bqOutputTable)
                 BQJob->>DataBQ: CREATE QueryJob (WRITE_TRUNCATE)
-                DataBQ-->>BQJob: completed
             end
         end
     end
@@ -245,68 +246,69 @@ sequenceDiagram
     rect rgb(255, 235, 235)
         Note over RPF,Checkpoint: Phase 3 — Datasource availability check
         loop each required ReportDatasourceRef
-            RPF->>Checkpoint: isCompleted(datasourceName, periodId)
-            Checkpoint->>Records: SELECT StaCd FROM checkpoints WHERE srcName=? AND PerId=?
-            Records-->>Checkpoint: StaCd
-            alt StaCd != COMPLETED
-                RPF->>Checkpoint: updateStatus(dataSourceId, FAILED, null)
+            RPF->>Checkpoint: isCompleted(SrceNm=datasourceName, PerId)
+            Checkpoint->>DaRec: SELECT DaId FROM DaRefer WHERE SrceNm=? AND PerId=? AND StaCd='COMPLETED'
+            DaRec-->>Checkpoint: DaId or empty
+            alt no COMPLETED row
+                RPF->>Checkpoint: updateStatus(DaId, FAILED, null)
                 RPF-->>Main: throws RuntimeException
             end
         end
     end
 
     rect rgb(230, 255, 235)
-        Note over RPF,Records: Phase 4 — Build alias registry
+        Note over RPF,DaRec: Phase 4 — Build alias registry
         loop each ReportDatasourceRef
-            RPF->>BQRepo: fetchDatasourceDataSourceId(datasource, periodId)
-            BQRepo->>Records: SELECT dataSourceId FROM checkpoints WHERE srcName=? AND StaCd='COMPLETED'
-            Records-->>BQRepo: dataSourceId
-            RPF->>RPF: aliasRegistry.put(alias, subquery on records WHERE dataSourceId=X)
+            RPF->>BQRepo: fetchDatasourceDaId(datasourceName, periodId)
+            BQRepo->>DaRec: SELECT DaId FROM DaRefer WHERE SrceNm=? AND PerId=? AND StaCd='COMPLETED'
+            DaRec-->>BQRepo: DaId
+            RPF->>RPF: aliasRegistry.put(alias, "SELECT RowDaJsonTx FROM DaRec WHERE DaId=X")
         end
     end
 
     rect rgb(240, 230, 255)
         Note over RPF,DataBQ: Phase 5 — Transformation chain
         loop each ReportTransformStep (by step_order)
-            RPF->>RPF: resolveAliasTokens({alias} → record-table subquery)
-            RPF->>RPF: QueryParameterResolver.resolve(sql, step.queryParams, options)
+            RPF->>RPF: resolveAliasTokens({alias} → DaRec subquery or prior output table)
             RPF->>BQJob: runQueryToTable(resolvedSQL, step.outputBqTable)
             BQJob->>DataBQ: CREATE QueryJob → materialise to outputBqTable
-            DataBQ-->>BQJob: done
             RPF->>RPF: aliasRegistry.put(step.outputAlias, step.outputBqTable)
         end
     end
 
     rect rgb(255, 250, 220)
-        Note over RPF,GCS: Phase 6 — Export to GCS
+        Note over RPF,GCS: Phase 6 — Output sink routing (per ReportOutputConfig)
         loop each ReportOutputConfig (by output_order)
-            RPF->>RPF: aliasRegistry.get(inputAlias) → source table
-            RPF->>RPF: build gcsUri = gcsPath + prefix + name_period_date + suffix + .ext
-            alt outputFormat = CSV
-                RPF->>BQJob: exportToCsv(sourceTable, gcsUri, includeHeader)
-            else outputFormat = JSON
-                RPF->>BQJob: exportToJson(sourceTable, gcsUri)
+            RPF->>RPF: aliasRegistry.get(inputAlias) → sourceTable
+            RPF->>Router: route(outputConfig, sourceTable, config, options)
+            alt sinkType = GCS
+                Router->>BQJob: exportToCsv / exportToJson(sourceTable, gcsUri)
+                BQJob->>GCS: write file
+                Router-->>RPF: OutputResult(GCS, gcsUri, fileName, hasAttachment=true)
+            else sinkType = BQ
+                Router->>BQJob: copyTable(sourceTable, bqSinkTable)
+                Router-->>RPF: OutputResult(BQ, bqSinkTable, hasAttachment=false)
+            else sinkType = API
+                Router->>DataBQ: SELECT TO_JSON_STRING(t) FROM sourceTable
+                Router->>Router: POST JSON array (auth from Secret Manager)
+                Router-->>RPF: OutputResult(API, endpoint, rowCount, hasAttachment=false)
             end
-            BQJob->>DataBQ: CREATE ExtractJob
-            DataBQ->>GCS: write file
+            RPF->>CmnRpt: insertDetail(SrceSysNm=reportName, FlNm, RecCt, userId)
         end
     end
 
     rect rgb(220, 245, 255)
-        Note over RPF,SMTP: Phase 7 — Email with attachments (optional)
+        Note over RPF,SMTP: Phase 7 — Email (GCS outputs only, optional)
         opt hasEmail
-            loop each exported file
+            loop each OutputResult where hasAttachment=true
                 RPF->>GCS: GcsUtils.readBytes(gcsUri)
                 GCS-->>RPF: byte[]
-                RPF->>RPF: new EmailAttachment(ByteArrayInputStream, fileName, contentType)
             end
-            RPF->>RPF: resolveEmailTokens(subject/body templates)
-            RPF->>SMTP: SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
-            SMTP-->>RPF: sent
+            RPF->>SMTP: SmtpReportEmailAdapter.send(subject, body, to, cc, gcsAttachments)
         end
     end
 
-    RPF->>Checkpoint: updateStatus(dataSourceId, COMPLETED, null) or (FAILED, null)
+    RPF->>Checkpoint: updateStatus(DaId, COMPLETED, null) or (FAILED, null)
 ```
 
 ### 6b. ExampleWorkflow — key-value BigQueryParameterAdapter pattern
@@ -389,36 +391,36 @@ flowchart TD
 
 ---
 
-## 8. Checkpoint State Machine
+## 8. DaRefer State Machine
 
-Both `DATA_SOURCE_DOWNLOAD` (per source) and `REPORT_PROCESSING` write to the same `data_source_checkpoints` BQ table.
-Each run creates one checkpoint row (LOADING), then updates it to a terminal state.
+Both `DATA_SOURCE_DOWNLOAD` (per source) and `REPORT_PROCESSING` write to `DaRefer`.
+Each run creates one row (`StaCd=LOADING`), then updates it to a terminal state.
 
 ```mermaid
 stateDiagram-v2
     [*] --> LOADING : createCheckpoint() before pipeline.run() / report.execute()
 
-    LOADING --> COMPLETED : pipeline DONE + all row-count and BnC checks passed\nOR report exported all outputs successfully
+    LOADING --> COMPLETED : DATA_SOURCE_DOWNLOAD: pipeline DONE + row-count and BnC checks passed\nREPORT_PROCESSING: all outputs routed and COM_CmnRptDtl written
 
-    LOADING --> FAILED_BNC : pipeline DONE but row count outside bounds\nor BnC SUM exceeds tolerance %\n(DATA_SOURCE_DOWNLOAD only)
+    LOADING --> FAILED_BNC : DATA_SOURCE_DOWNLOAD only:\npipeline DONE but row count outside min/max\nor BnC SUM exceeds tolerance %
 
-    LOADING --> FAILED : pipeline threw exception\nor required datasource not COMPLETED\nor any ReportPipelineFactory phase threw
+    LOADING --> FAILED : pipeline threw exception\nor required datasource has no COMPLETED DaRefer row\nor any ReportPipelineFactory phase threw
 
     COMPLETED --> [*]
     FAILED_BNC --> [*]
     FAILED --> [*]
 
     note right of LOADING
-        createCheckpoint() writes this row.
-        dataSourceId = MAX(dataSourceId)+1 (BQ sequence).
-        vsnNo = MAX(vsnNo)+1 per (srcName, PerId).
-        All record rows share this dataSourceId.
+        createCheckpoint() inserts into DaRefer.
+        DaId = MAX(DaId)+1 across all DaRefer rows.
+        VsnNo = MAX(VsnNo)+1 per (SrceNm, PerId).
+        All DaRec rows for this run share the same DaId.
     end note
 
     note right of COMPLETED
         updateStatus() sets StaCd and BalAndCntlSmryTx.
-        BalAndCntlSmryTx JSON: status, srcCount, dstCount,
-        srcAmount, dstAmount per BnC field.
+        BalAndCntlSmryTx JSON: {status, srcCount, dstCount,
+        srcAmount_X, dstAmount_X} per BnC field.
     end note
 ```
 
@@ -469,19 +471,20 @@ classDiagram
     }
 
     class DataSourceCheckpoint {
-        +long dataSourceId
-        +String srcName
-        +long vsnNo
-        +String perId
-        +String dsNm
+        +long DaId
+        +String SrceNm
+        +long VsnNo
+        +String PerId
+        +String FlNm
         +String balAndCntlSmryTx
-        +String staCd
-        +Instant createdTs
-        +Instant lstUpdtTs
+        +String StaCd
+        +Instant CreatedTs
+        +Instant LstUpdtTs
         +static STA_LOADING
         +static STA_COMPLETED
         +static STA_FAILED_BNC
         +static STA_FAILED
+        +static loading(DaId, VsnNo, SrceNm, PerId, FlNm)
     }
 
     class ReportConfig {
@@ -545,10 +548,20 @@ erDiagram
         STRING LstUpdateUserId
     }
 
+    MSTR_Per {
+        STRING PerId PK
+        DATE PerDt
+        INT64 MoNo
+        STRING YrNo
+        STRING PerTypeCd
+        TIMESTAMP LstUpdtTs
+    }
+
     source_config {
+        STRING parent_id PK
+        STRING subprocess_name PK
         STRING datasource_name PK
         STRING period_id PK
-        STRING subprocess_name PK
         STRING source_type
         STRING bq_query
         STRING query_params_json
@@ -636,45 +649,61 @@ erDiagram
 
 ## 11. BigQuery Tables — Runtime State
 
-These are BQ tables written to at runtime (not the config dataset).
-Both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` write to the same two tables.
+These tables are written at runtime (in `--checkpointBqDataset`, default `pipeline_metadata`).
+Both process types use `DaRefer`. `DATA_SOURCE_DOWNLOAD` writes `DaRec`. `REPORT_PROCESSING` writes `COM_CmnRptDtl`.
 
 ```mermaid
 erDiagram
-    data_source_checkpoints {
-        INT64 dataSourceId PK
-        STRING srcName
-        INT64 vsnNo
+    DaRefer {
+        INT64 DaId PK
+        STRING SrceNm
+        INT64 VsnNo
         STRING PerId
-        STRING DSNm
+        STRING FlNm
         STRING BalAndCntlSmryTx
         STRING StaCd
         TIMESTAMP CreatedTs
         TIMESTAMP LstUpdtTs
     }
 
-    data_source_records {
+    DaRec {
         STRING RecId PK
-        INT64 dataSourceId FK
-        STRING RowDSJsonTx
+        INT64 DaId FK
+        STRING RowDaJsonTx
         DATE LoadDt
         TIMESTAMP LstUpdtTs
     }
 
-    data_source_checkpoints ||--o{ data_source_records : "dataSourceId"
+    COM_CmnRptDtl {
+        STRING SrceSysNm
+        STRING FlNm
+        TIMESTAMP SrceFlCreateTs
+        STRING FlDaJsonTx
+        INT64 RecCt
+        TIMESTAMP CreatTs
+        STRING CreateUserId
+        TIMESTAMP LstUpdtTs
+        STRING LstUpdtUserId
+    }
+
+    DaRefer ||--o{ DaRec : "DaId (DATA_SOURCE_DOWNLOAD rows)"
+    DaRefer ||--o{ COM_CmnRptDtl : "SrceNm = SrceSysNm (REPORT_PROCESSING outputs)"
 ```
 
-`StaCd` is one of: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`.
+`StaCd` values: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`.
 
-For `DATA_SOURCE_DOWNLOAD`: `srcName` = datasource name, `DSNm` = BQ table ref / file path / API endpoint.
-For `REPORT_PROCESSING`: `srcName` = report name, `DSNm` = report name.
+For `DATA_SOURCE_DOWNLOAD`: `SrceNm` = datasource name, `FlNm` = BQ table ref / file path / API endpoint.
+For `REPORT_PROCESSING`: `SrceNm` = report name, `FlNm` = report name.
 
-`BalAndCntlSmryTx` (BnC summary JSON):
+`VsnNo` increments each time the same `(SrceNm, PerId)` is re-run (e.g. after `--overrideDownload=true`).
+
+`BalAndCntlSmryTx` (BnC summary JSON, DATA_SOURCE_DOWNLOAD only):
 ```json
 { "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
 ```
 
-`vsnNo` increments each time the same `(srcName, PerId)` is re-run (e.g. after `--overrideDownload=true`).
+`COM_CmnRptDtl` — one row per output step, written by `REPORT_PROCESSING` for all sink types (GCS, BQ, API).
+`FlNm` = GCS file name, destination BQ table, or API endpoint. `RecCt` = row count written to that sink.
 
 ---
 
@@ -724,17 +753,20 @@ DataflowStartJobOperator(
     task_id="download_trades",
     jar="gs://bucket/jars/beam-runner-bundled.jar",
     options={
-        "--processType":        "DATA_SOURCE_DOWNLOAD",
-        "--datasourceName":     "trades",
-        "--subprocessName":     "eod",
-        "--periodId":           "2024-01",
-        "--periodStart":        "2024-01-01",
-        "--periodEnd":          "2024-01-31",
-        "--runDate":            "{{ ds }}",
-        "--paramBqProject":     "my-gcp-project",
-        "--paramBqDataset":     "pipeline_config",
+        "--processType":         "DATA_SOURCE_DOWNLOAD",
+        "--parentId":            "TRADING",      # → parent_id in source_config
+        "--datasourceName":      "trades",
+        "--subprocessName":      "eod",
+        "--periodId":            "202401",        # MONTHLY YYYYMM — must exist in MSTR_Per
+        "--periodStart":         "2024-01-01",
+        "--periodEnd":           "2024-01-31",
+        "--runDate":             "{{ ds }}",
+        "--paramBqProject":      "my-gcp-project",
+        "--paramBqDataset":      "pipeline_config",
+        "--checkpointBqProject": "my-gcp-project",
         "--checkpointBqDataset": "pipeline_metadata",
-        "--processStatusBqDataset": "pipeline_metadata",
+        "--daReferTable":        "DaRefer",
+        "--daRecTable":          "DaRec",
     }
 )
 ```
@@ -749,27 +781,33 @@ DataflowStartJobOperator(
     task_id="run_trades_report",
     jar="gs://bucket/jars/beam-runner-bundled.jar",
     options={
-        "--processType":        "REPORT_PROCESSING",
-        "--reportName":         "daily_trades_report",
-        "--reportSubprocess":   "eod",
-        "--periodId":           "2024-01",
-        "--periodStart":        "2024-01-01",
-        "--periodEnd":          "2024-01-31",
-        "--runDate":            "{{ ds }}",
-        "--paramBqProject":     "my-gcp-project",
-        "--paramBqDataset":     "pipeline_config",        # BQ dataset holding all report config tables
-        "--processStatusBqDataset": "pipeline_metadata",
-        "--emailSmtpHost":      "smtp.gmail.com",
-        "--emailSmtpPort":      "587",
+        "--processType":         "REPORT_PROCESSING",
+        "--parentId":            "TRADING",      # → ParameterGroupName in parameter_store
+        "--reportName":          "daily_trades_summary",
+        "--reportSubprocess":    "eod",
+        "--periodId":            "202401",        # MONTHLY YYYYMM — must exist in MSTR_Per
+        "--periodStart":         "2024-01-01",
+        "--periodEnd":           "2024-01-31",
+        "--runDate":             "{{ ds }}",
+        "--paramBqProject":      "my-gcp-project",
+        "--paramBqDataset":      "pipeline_config",
+        "--checkpointBqProject": "my-gcp-project",
+        "--checkpointBqDataset": "pipeline_metadata",
+        "--daReferTable":        "DaRefer",
+        "--daRecTable":          "DaRec",
+        "--cmnRptDtlTable":      "COM_CmnRptDtl",
+        "--emailSmtpHost":       "smtp.gmail.com",
+        "--emailSmtpPort":       "587",
         "--smtpPasswordSecretId": "projects/p/secrets/smtp-password/versions/latest",
-        "--devErrorEmail":      "reports@company.com",
-        # --sinkType is NOT required for BQ-configured REPORT_PROCESSING
+        "--devErrorEmail":       "reports@company.com",
+        # --sinkType / --sourceType / --transformChain are NOT used here;
+        # all output routing comes from report_output_config.sink_type (GCS | BQ | API)
     }
 )
 ```
 
 > **Note**: When `--reportName` is set, `--sinkType`, `--sourceType`, and `--transformChain` are not used.
-> All config is loaded from BigQuery — use `--paramBqProject` + `--paramBqDataset` to point at the config dataset.
+> All config (including output sink type per output step) is loaded from BigQuery.
 
 ---
 

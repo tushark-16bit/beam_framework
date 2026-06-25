@@ -316,8 +316,8 @@ substitutions:
 
 | `--processType` | What runs | Source config from |
 |---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | Fetches raw data from external sources and persists it per-source | Parameter DB (`source_config` table) |
-| `REPORT_PROCESSING` (DB-configured) | Checks datasource availability, runs BQ transformation chain, exports files, sends email | Parameter DB (`report_config` + related tables) |
+| `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer` | BQ `source_config` table (keyed by `parent_id`, `subprocess_name`, `datasource_name`, `period_id`) |
+| `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, runs BQ transform chain, routes output to GCS/BQ/API, writes `COM_CmnRptDtl`, sends email | BQ `report_config` + 5 related tables |
 | `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
 
 The two process types are designed to be scheduled as **separate, sequential Airflow DAGs**:
@@ -326,8 +326,8 @@ first `DATA_SOURCE_DOWNLOAD`, then `REPORT_PROCESSING` once all sources are `COM
 ## DATA_SOURCE_DOWNLOAD — per-source independent pipelines
 
 Sources are **never merged**. Each source in `source_config` produces its own independent
-Beam branch: read → transform chain → per-source output table. Adding a new datasource
-requires only a DB row — no code change.
+Beam branch: read → transform chain → rows written as JSON blobs to `DaRec` (keyed by `DaId` from `DaRefer`).
+Adding a new datasource requires only a BQ row in `source_config` — no code change.
 
 ### Supported source types
 
@@ -358,41 +358,33 @@ Each source can have an ordered list of transforms stored in `source_transforms_
 
 | Transform type | What it does |
 |---|---|
-| `LOOKUP` | Left-joins rows with a lookup table (from BQ or param JDBC DB). Config: lookup source, key fields, which output fields to merge. |
+| `LOOKUP` | Left-joins rows with a BQ lookup table. Config: BQ table ref, key fields, which output fields to merge into each row. |
 | `GROUP_BY` | Groups rows by specified fields and applies aggregations: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`. |
 | `SORT_BY` | Sorts rows per-bundle by specified fields. For global ordering, use a BQ view with `ORDER BY` instead. |
 
 ### Per-source validation
 
-After the pipeline writes data, the driver JVM validates against the output table:
+After the pipeline writes rows to `DaRec`, the driver JVM validates:
 
 | Check | Configuration | Result on failure |
 |---|---|---|
 | Header check | `required_headers_json` | Logged at pipeline-assembly time |
-| Row count | `min_row_count`, `max_row_count` | `VALIDATION_FAILED` status |
-| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `VALIDATION_FAILED` status |
+| Row count | `min_row_count`, `max_row_count` | `DaRefer.StaCd = FAILED_BNC` |
+| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `DaRefer.StaCd = FAILED_BNC` |
 
-### Process status tracking
+### Run tracking (DaRefer)
 
-Every fetched source writes a row to the `process_status` BQ table
-(configured via `--processStatusBqDataset`, `--processStatusBqTable`):
+Every run writes one row to `DaRefer` (configured via `--daReferTable`, default `DaRefer`):
 
-| Status | Written when |
+| `StaCd` | Written when |
 |---|---|
-| `PENDING` | Before `pipeline.run()` |
-| `COMPLETED` | Pipeline succeeded + all validation checks passed |
-| `VALIDATION_FAILED` | Pipeline succeeded but row count or BnC check failed |
+| `LOADING` | Before `pipeline.run()` — always |
+| `COMPLETED` | Pipeline succeeded + all row-count and BnC checks passed |
+| `FAILED_BNC` | Pipeline succeeded but row count outside bounds or BnC SUM exceeded tolerance |
 | `FAILED` | Pipeline threw an exception |
 
-Create the table before first run:
-```sql
-CREATE TABLE pipeline_metadata.process_status (
-  job_run_id STRING, process_type STRING, datasource_name STRING,
-  subprocess_name STRING, period_id STRING, period_start STRING, period_end STRING,
-  status STRING, row_count INT64, error_message STRING, validation_details STRING,
-  started_at TIMESTAMP, completed_at TIMESTAMP
-) PARTITION BY DATE(started_at);
-```
+All source rows are written to `DaRec` (configured via `--daRecTable`, default `DaRec`),
+keyed by `DaId` from the `DaRefer` row. See `EXAMPLE.md` for full DDL.
 
 ## REPORT_PROCESSING — DB-configured reports
 
@@ -402,89 +394,55 @@ When `--reportName` is set alongside `--processType=REPORT_PROCESSING`, the
 ### Execution flow
 
 ```
-1. Fetch ReportConfig from parameter DB  (report_config + related tables)
-2. Write PENDING status                  (process_status BQ table)
-3. Run preprocessing steps               (BQ jobs — BQ_QUERY or API_ENRICHMENT)
-4. Check datasource availability         (all required DSes must be COMPLETED)
-5. Build alias registry                  (alias → BQ output table of each datasource)
-6. Run transformation chain              (BQ jobs; each step materialises to a BQ table)
-7. Export outputs to GCS                 (BQ extract jobs → CSV or JSON files)
-8. Send email                            (SMTP; GCS files attached as InputStream)
-9. Write COMPLETED / FAILED status
+ 1. Resolve MSTR_Per for --periodId            (validate period exists)
+ 2. Fetch ReportConfig from BQ                 (report_config + 5 related tables)
+ 3. Insert DaRefer row StaCd=LOADING
+ 4. Run preprocessing steps                    (BQ jobs — BQ_QUERY or API_ENRICHMENT)
+ 5. Check datasource availability              (all required DSes must have DaRefer StaCd=COMPLETED)
+ 6. Build alias registry                       (alias → SELECT RowDaJsonTx FROM DaRec WHERE DaId=X)
+ 7. Run transformation chain                   (BQ jobs; each step materialises to a BQ table)
+ 8. Route each output via ReportOutputSinkRouter:
+      GCS  → BQ extract job → CSV or JSON file
+      BQ   → SELECT * INTO destination table (WRITE_TRUNCATE)
+      API  → POST JSON array to external endpoint (auth via Secret Manager)
+ 9. Insert COM_CmnRptDtl row per output        (all sink types)
+10. Send email                                 (GCS outputs as attachments; if configured)
+11. Update DaRefer StaCd → COMPLETED / FAILED
 ```
 
-### DB tables required (create before first run)
+### BQ config tables required
+
+All report config tables live in the BQ dataset specified by `--paramBqProject` and `--paramBqDataset`.
+See `EXAMPLE.md` for full DDL. Summary:
 
 ```sql
-CREATE TABLE report_config (
-  report_name       VARCHAR(100) NOT NULL,
-  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
-  period_id         VARCHAR(50)  NOT NULL,
-  override_key      BOOLEAN      DEFAULT FALSE,
-  PRIMARY KEY (report_name, report_subprocess, period_id)
-);
+-- report_config: one row per (report_name, report_subprocess, period_id)
+-- report_datasource_ref: which DaRec datasources are needed and under what alias
+-- report_preprocessing_config: optional BQ/API enrichment before transforms
+-- report_transformation_config: ordered BQ jobs; each materialises to a BQ table
+-- report_email_config: SMTP recipients and message templates
 
-CREATE TABLE report_datasource_ref (
-  report_name           VARCHAR(100) NOT NULL,
-  report_subprocess     VARCHAR(100) NOT NULL DEFAULT 'default',
-  period_id             VARCHAR(50)  NOT NULL,
-  datasource_name       VARCHAR(100) NOT NULL,
-  datasource_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
-  transform_alias       VARCHAR(100) NOT NULL,  -- used as {alias} in query templates
-  is_required           BOOLEAN      DEFAULT TRUE,
-  PRIMARY KEY (report_name, report_subprocess, period_id, datasource_name, datasource_subprocess)
-);
-
-CREATE TABLE report_preprocessing_config (
-  report_name       VARCHAR(100) NOT NULL,
-  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
-  period_id         VARCHAR(50)  NOT NULL,
-  step_order        INT NOT NULL,
-  step_type         VARCHAR(30)  NOT NULL,  -- BQ_QUERY | API_ENRICHMENT
-  step_name         VARCHAR(200),
-  bq_query          TEXT,
-  bq_output_table   VARCHAR(500),
-  api_endpoint      TEXT,
-  api_params_json   TEXT,
-  PRIMARY KEY (report_name, report_subprocess, period_id, step_order)
-);
-
-CREATE TABLE report_transformation_config (
-  report_name       VARCHAR(100) NOT NULL,
-  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
-  period_id         VARCHAR(50)  NOT NULL,
-  step_order        INT NOT NULL,
-  step_name         VARCHAR(200),
-  input_alias       VARCHAR(100) NOT NULL,
-  output_alias      VARCHAR(100) NOT NULL,
-  query_template    TEXT,         -- SQL; {alias} → BQ table ref, {periodStart} etc.
-  output_bq_table   VARCHAR(500), -- project.dataset.table
-  PRIMARY KEY (report_name, report_subprocess, period_id, step_order)
-);
-
-CREATE TABLE report_output_config (
-  report_name       VARCHAR(100) NOT NULL,
-  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
-  period_id         VARCHAR(50)  NOT NULL,
-  output_order      INT NOT NULL,
-  input_alias       VARCHAR(100) NOT NULL,
-  output_format     VARCHAR(20)  NOT NULL,  -- CSV | JSON
-  gcs_path          TEXT         NOT NULL,
-  file_prefix       VARCHAR(200),
-  file_suffix       VARCHAR(200),
-  include_header    BOOLEAN      DEFAULT TRUE,
-  PRIMARY KEY (report_name, report_subprocess, period_id, output_order)
-);
-
-CREATE TABLE report_email_config (
-  report_name       VARCHAR(100) NOT NULL,
-  report_subprocess VARCHAR(100) NOT NULL DEFAULT 'default',
-  period_id         VARCHAR(50)  NOT NULL,
-  to_list           TEXT         NOT NULL,  -- comma-separated or JSON array
-  cc_list           TEXT,
-  subject_template  TEXT,  -- tokens: {reportName} {reportSubprocess} {periodId} {periodStart} {periodEnd} {runDate}
-  body_template     TEXT,
-  PRIMARY KEY (report_name, report_subprocess, period_id)
+-- report_output_config: one row per output — sink_type drives where the result goes
+CREATE TABLE IF NOT EXISTS `my-project.pipeline_config.report_output_config` (
+  report_name        STRING NOT NULL,
+  report_subprocess  STRING NOT NULL,
+  period_id          STRING NOT NULL,
+  output_order       INT64  NOT NULL,
+  input_alias        STRING NOT NULL,   -- alias whose BQ table to export
+  sink_type          STRING,            -- GCS (default) | BQ | API
+  -- GCS sink
+  output_format      STRING,            -- CSV | JSON
+  gcs_path           STRING,            -- gs://bucket/reports/
+  file_prefix        STRING,
+  file_suffix        STRING,
+  include_header     BOOL,
+  -- BQ sink
+  bq_sink_table      STRING,            -- project.dataset.table to WRITE_TRUNCATE into
+  -- API sink
+  api_endpoint       STRING,            -- target URL
+  api_method         STRING,            -- POST | PUT (default POST)
+  api_auth_secret_id STRING,            -- Secret Manager ID for Bearer token
+  api_headers_json   STRING             -- {"X-Custom-Header": "value"}
 );
 ```
 
@@ -508,16 +466,21 @@ They resolve to `` `project.dataset.table` `` BQ standard SQL references at runt
 
 ```python
 options={
-    "--processType":       "REPORT_PROCESSING",
-    "--reportName":        "daily_trades_report",
-    "--reportSubprocess":  "eod",
-    "--periodId":          "2024-01",
-    "--periodStart":       "2024-01-01",
-    "--periodEnd":         "2024-01-31",
-    "--runDate":           "{{ ds }}",
-    "--paramBqProject":    "my-gcp-project",
-    "--paramBqDataset":    "pipeline_config",
-    # ... other standard options
+    "--processType":          "REPORT_PROCESSING",
+    "--parentId":             "TRADING",          # → ParameterGroupName in parameter_store
+    "--reportName":           "daily_trades_summary",
+    "--reportSubprocess":     "eod",
+    "--periodId":             "202401",           # MONTHLY format YYYYMM (must exist in MSTR_Per)
+    "--periodStart":          "2024-01-01",
+    "--periodEnd":            "2024-01-31",
+    "--runDate":              "{{ ds }}",
+    "--paramBqProject":       "my-gcp-project",
+    "--paramBqDataset":       "pipeline_config",
+    "--checkpointBqDataset":  "pipeline_metadata",
+    "--daReferTable":         "DaRefer",
+    "--daRecTable":           "DaRec",
+    "--cmnRptDtlTable":       "COM_CmnRptDtl",
+    # --sinkType is NOT required — output routing comes from report_output_config.sink_type
 }
 ```
 

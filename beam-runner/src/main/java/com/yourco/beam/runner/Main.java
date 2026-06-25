@@ -20,22 +20,29 @@ import org.slf4j.LoggerFactory;
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
  * <pre>
  *   1. DataSourcePipelineFactory.assemble()
- *        ├─ Validate params in BQ
+ *        ├─ Resolve MSTR_Per row for --periodId
+ *        ├─ Validate params in BQ (source_config row present)
  *        ├─ Fetch source configs (transforms, validationConfig)
- *        ├─ Filter by checkpoint (skip already-COMPLETED sources)
- *        ├─ Create LOADING checkpoint rows (returns dataSourceId per source)
- *        └─ Assemble independent per-source Beam branches → DataSourceRecordSinkTransform
+ *        ├─ Skip sources already COMPLETED in DaRefer (unless --overrideDownload)
+ *        ├─ Insert DaRefer row StaCd=LOADING → returns DaId per source
+ *        └─ Assemble per-source Beam branches → rows written to DaRec as RowDaJsonTx JSON
  *   2. pipeline.run().waitUntilFinish()
  *   3. DataSourcePipelineFactory.runPostPipelineSteps()
- *        ├─ On success: validate record table (row count, BnC) per source
- *        └─ Update checkpoint to COMPLETED / FAILED_BNC / FAILED
+ *        ├─ COUNT(*) FROM DaRec WHERE DaId=X; SUM BnC fields
+ *        └─ UPDATE DaRefer StaCd → COMPLETED / FAILED_BNC / FAILED
  * </pre>
  *
- * <h2>REPORT_PROCESSING lifecycle</h2>
+ * <h2>REPORT_PROCESSING lifecycle (DB-configured)</h2>
  * <pre>
- *   1. PipelineFactory.assemble()     — assembles source → transform chain → sink
- *   2. pipeline.run()
- *   3. waitUntilFinish() for batch; streaming runs indefinitely until cancelled
+ *   ReportPipelineFactory.execute() — runs entirely in the driver JVM (no Beam workers):
+ *        ├─ Resolve MSTR_Per, load ReportConfig from BQ
+ *        ├─ Insert DaRefer row StaCd=LOADING
+ *        ├─ Check all required datasources have DaRefer StaCd=COMPLETED
+ *        ├─ Run transform chain (BQ jobs, each materialised to a temp table)
+ *        ├─ Route each output → GCS / BQ / API via ReportOutputSinkRouter
+ *        ├─ Insert COM_CmnRptDtl row per output
+ *        ├─ Send email (GCS outputs as attachments, if configured)
+ *        └─ UPDATE DaRefer StaCd → COMPLETED / FAILED
  * </pre>
  */
 public final class Main {

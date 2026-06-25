@@ -58,7 +58,7 @@ import java.util.Map;
  *     --paramStoreTable=parameter_store
  *     --reportName=daily_trades_summary
  *     --reportSubprocess=eod
- *     --periodId=2024-01
+ *     --periodId=202401
  *     --periodStart=2024-01-01
  *     --periodEnd=2024-01-31
  *     --parentId=TRADING
@@ -94,8 +94,8 @@ public final class ExampleWorkflow {
 
         // ── Step 1: Fetch and validate parameters from BigQuery ───────────────
         //
-        // fetchRequiredParameters() does three things in one BQ round-trip:
-        //   1. SELECT the row by (ParameterGroupName, ParameterDataSource, ParameterName)
+        // fetchRequiredParameters() in one BQ round-trip:
+        //   1. SELECT the row by (ParameterGroupName=parentId, ParameterDataSource=subprocess, ParameterName=reportName)
         //   2. Parse SchemaOfJson to find fields with "required": true
         //   3. Parse ParametersValJson into Map<String, String>
         //   4. Validate all required fields are present — throws if any are missing

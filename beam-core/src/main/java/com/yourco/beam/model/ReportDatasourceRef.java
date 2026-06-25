@@ -9,8 +9,8 @@ import java.io.Serializable;
  * field is the key used in query templates: a template containing {@code {alias}}
  * is resolved to the actual BQ output table ref for this datasource.
  *
- * <p>When {@code required=true} and the datasource has no {@code COMPLETED} status
- * in {@code process_status} for the current period, the report run fails fast
+ * <p>When {@code required=true} and {@code DaRefer} has no {@code StaCd=COMPLETED} row
+ * for {@code (SrceNm=datasourceName, PerId=periodId)}, the report run fails fast
  * rather than producing incomplete output.
  */
 public final class ReportDatasourceRef implements Serializable {

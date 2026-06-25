@@ -9,9 +9,9 @@ import java.util.Map;
  * <h2>Table schema</h2>
  * <pre>{@code
  * CREATE TABLE pipeline_config.parameter_store (
- *   ParameterName       STRING NOT NULL,   -- grouping name, e.g. "daily_trades_report"
- *   ParameterGroupName  STRING NOT NULL,   -- parent process, e.g. "REPORT_PROCESSING"
- *   ParameterDataSource STRING NOT NULL,   -- subprocess,    e.g. "eod"
+ *   ParameterName       STRING NOT NULL,   -- parameter / report name, e.g. "daily_trades_summary"
+ *   ParameterGroupName  STRING NOT NULL,   -- top-level business group (--parentId), e.g. "TRADING"
+ *   ParameterDataSource STRING NOT NULL,   -- subprocess variant (--reportSubprocess), e.g. "eod"
  *   SchemaOfJson        STRING,            -- JSON object: {"field": {"required": true, "type": "string"}, ...}
  *   ParametersValJson   STRING,            -- JSON object: {"field": "value", ...}
  *   EditGrpNm           STRING,
@@ -37,9 +37,11 @@ import java.util.Map;
  * <pre>{@code
  * BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
  *
- * // Fetch, validate (via SchemaOfJson), and return all parameters in one call
+ * // Fetch, validate (via SchemaOfJson), and return all parameters in one call.
+ * // Three-identifier key: ParameterGroupName=--parentId, ParameterDataSource=--reportSubprocess,
+ * //                       ParameterName=--reportName
  * Map<String, String> params = adapter.fetchRequiredParameters(
- *     "REPORT_PROCESSING", "eod", "daily_trades_report");
+ *     "TRADING", "eod", "daily_trades_summary");
  *
  * String sourceTable  = params.get("source_bq_table");
  * String outputPath   = params.get("output_gcs_path");

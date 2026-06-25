@@ -32,11 +32,12 @@ import java.util.Map;
  * Fetches source configuration from the {@code source_config} BigQuery table.
  *
  * <p>All source configuration lives in the BQ dataset specified by
- * All source configuration lives in the BQ dataset specified by
  * {@code --paramBqProject} and {@code --paramBqDataset}.
  *
  * <h2>Required BQ table</h2>
- * {@code source_config} — one row per (datasource_name, period_id, subprocess_name).
+ * {@code source_config} — one row per (parent_id, subprocess_name, datasource_name, period_id).
+ * Three-identifier key: {@code parent_id} (--parentId), {@code subprocess_name} (--subprocessName),
+ * {@code datasource_name} (--datasourceName). Also filtered by {@code period_id} (--periodId, from MSTR_Per).
  * Table name configured via {@code --paramSourceConfigTable} (default: {@code source_config}).
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
