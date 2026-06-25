@@ -65,6 +65,14 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // DATA SOURCE SELECTION (DATA_SOURCE_DOWNLOAD only)
     // =========================================================================
 
+    @Description("Top-level business group identifier. "
+                 + "Acts as the parent key in both config tables: "
+                 + "ParameterGroupName in parameter_store (REPORT_PROCESSING) and "
+                 + "parent_id in source_config (DATA_SOURCE_DOWNLOAD). "
+                 + "Example: TRADING, RISK, MARKET_DATA")
+    String getParentId();
+    void setParentId(String value);
+
     @Description("Name of the data source as registered in the parameter DB source_config table. "
                  + "Required for DATA_SOURCE_DOWNLOAD. Used as the lookup key alongside "
                  + "--periodId and --subprocessName to fetch source configuration. "

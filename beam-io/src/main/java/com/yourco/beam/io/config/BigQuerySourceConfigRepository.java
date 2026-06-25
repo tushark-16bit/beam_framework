@@ -73,18 +73,20 @@ public final class BigQuerySourceConfigRepository {
      * {@code BigQueryParameterAdapter.fetchRequiredParameters()}, which reads
      * {@code SchemaOfJson} from the {@code parameter_store} table.
      */
-    public List<String> getMissingParameters(String datasource, String periodId, String subprocess) {
+    public List<String> getMissingParameters(String parentId, String datasource,
+                                              String subprocess, String periodId) {
         String sql = "SELECT COUNT(*) AS cnt FROM `" + sourceConfigTable + "`"
-            + " WHERE datasource_name = @datasource AND period_id = @periodId"
-            + " AND subprocess_name = @subprocess";
+            + " WHERE parent_id = @parentId AND datasource_name = @datasource"
+            + " AND subprocess_name = @subprocess AND period_id = @periodId";
 
         try {
-            for (FieldValueList row : bigquery.query(qConfig(sql, datasource, periodId, subprocess)).iterateAll()) {
+            for (FieldValueList row : bigquery.query(
+                    qConfig(sql, parentId, datasource, subprocess, periodId)).iterateAll()) {
                 if (row.get("cnt").getLongValue() == 0) {
-                    LOG.warn("No source_config row for datasource={}, period={}, subprocess={}",
-                             datasource, periodId, subprocess);
+                    LOG.warn("No source_config row for parent={}, datasource={}, subprocess={}, period={}",
+                             parentId, datasource, subprocess, periodId);
                     return List.of("source_config row missing for ("
-                        + datasource + ", " + periodId + ", " + subprocess + ")");
+                        + parentId + ", " + datasource + ", " + subprocess + ", " + periodId + ")");
                 }
             }
         } catch (InterruptedException e) {
@@ -96,14 +98,16 @@ public final class BigQuerySourceConfigRepository {
 
     // ── Config fetch ──────────────────────────────────────────────────────────
 
-    public List<SourceConfig> fetchSourceConfigs(String datasource, String periodId, String subprocess) {
+    public List<SourceConfig> fetchSourceConfigs(String parentId, String datasource,
+                                                   String subprocess, String periodId) {
         String sql = "SELECT * FROM `" + sourceConfigTable + "`"
-            + " WHERE datasource_name = @datasource AND period_id = @periodId"
-            + " AND subprocess_name = @subprocess";
+            + " WHERE parent_id = @parentId AND datasource_name = @datasource"
+            + " AND subprocess_name = @subprocess AND period_id = @periodId";
 
         List<SourceConfig> configs = new ArrayList<>();
         try {
-            for (FieldValueList row : bigquery.query(qConfig(sql, datasource, periodId, subprocess)).iterateAll()) {
+            for (FieldValueList row : bigquery.query(
+                    qConfig(sql, parentId, datasource, subprocess, periodId)).iterateAll()) {
                 configs.add(rowToSourceConfig(row));
             }
         } catch (InterruptedException e) {
@@ -113,17 +117,18 @@ public final class BigQuerySourceConfigRepository {
 
         if (configs.isEmpty()) {
             throw new IllegalStateException(
-                "No source_config found for datasource=" + datasource
-                + ", period=" + periodId + ", subprocess=" + subprocess);
+                "No source_config found for parent=" + parentId + ", datasource=" + datasource
+                + ", subprocess=" + subprocess + ", period=" + periodId);
         }
-        LOG.info("Fetched {} source config(s) for datasource={}, period={}, subprocess={}",
-                 configs.size(), datasource, periodId, subprocess);
+        LOG.info("Fetched {} source config(s) for parent={}, datasource={}, subprocess={}, period={}",
+                 configs.size(), parentId, datasource, subprocess, periodId);
         return configs;
     }
 
     // ── Row mapping ───────────────────────────────────────────────────────────
 
     private SourceConfig rowToSourceConfig(FieldValueList row) {
+        String parentId       = str(row, "parent_id");
         String datasourceName = str(row, "datasource_name");
         String periodId       = str(row, "period_id");
         String subprocessName = str(row, "subprocess_name");
@@ -137,6 +142,7 @@ public final class BigQuerySourceConfigRepository {
         }
 
         SourceConfig.Builder builder = SourceConfig.builder()
+            .parentId(parentId)
             .datasourceName(datasourceName)
             .periodId(periodId)
             .subprocessName(subprocessName)
@@ -348,12 +354,13 @@ public final class BigQuerySourceConfigRepository {
         }
     }
 
-    private static QueryJobConfiguration qConfig(String sql, String datasource,
-                                                  String periodId, String subprocess) {
+    private static QueryJobConfiguration qConfig(String sql, String parentId, String datasource,
+                                                  String subprocess, String periodId) {
         return QueryJobConfiguration.newBuilder(sql)
+            .addNamedParameter("parentId",   QueryParameterValue.string(parentId))
             .addNamedParameter("datasource", QueryParameterValue.string(datasource))
-            .addNamedParameter("periodId",   QueryParameterValue.string(periodId))
             .addNamedParameter("subprocess", QueryParameterValue.string(subprocess))
+            .addNamedParameter("periodId",   QueryParameterValue.string(periodId))
             .setUseLegacySql(false)
             .build();
     }

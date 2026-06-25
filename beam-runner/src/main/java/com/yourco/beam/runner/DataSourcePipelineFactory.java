@@ -88,7 +88,8 @@ public final class DataSourcePipelineFactory {
         BigQuerySourceConfigRepository bqRepo = new BigQuerySourceConfigRepository(options);
         validateRequiredParameters(bqRepo, options);
         List<SourceConfig> sourceConfigs = bqRepo.fetchSourceConfigs(
-            options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
+            options.getParentId(), options.getDatasourceName(),
+            options.getSubprocessName(), options.getPeriodId());
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
 
         // ── Step 3: Filter by checkpoint ──────────────────────────────────
@@ -297,7 +298,8 @@ public final class DataSourcePipelineFactory {
 
         LOG.info("Validating required parameters in BQ for datasource={}, period={}, subprocess={}",
                  datasource, period, subprocess);
-        List<String> missing = repo.getMissingParameters(datasource, period, subprocess);
+        List<String> missing = repo.getMissingParameters(
+            options.getParentId(), datasource, subprocess, period);
         if (!missing.isEmpty()) {
             throw new PipelineConfigurationException(
                 "Required parameters missing from BQ — cannot start pipeline. Missing: " + missing

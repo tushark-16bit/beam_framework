@@ -31,6 +31,50 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.parameter_store` (
   LstUpdateUserId     STRING
 );
 
+-- Source config: one row per (parent_id, datasource_name, subprocess_name, period_id).
+-- parent_id  = top-level business group (e.g. TRADING).
+-- datasource_name = the data source name (child within the group).
+-- subprocess_name = variant within the datasource (e.g. EOD, INTRADAY).
+-- period_id  = the period this config applies to (e.g. 2024-01-15).
+CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.source_config` (
+  parent_id           STRING    NOT NULL,
+  datasource_name     STRING    NOT NULL,
+  subprocess_name     STRING    NOT NULL,
+  period_id           STRING    NOT NULL,
+  source_type         STRING    NOT NULL,   -- BQ | API | FILE
+  -- BQ source columns
+  bq_project_id       STRING,
+  bq_dataset          STRING,
+  bq_table            STRING,
+  bq_query            STRING,
+  query_params_json   STRING,               -- {"key": "value"} token overrides
+  -- API source columns
+  api_endpoint        STRING,
+  api_auth_type       STRING,
+  api_auth_secret_id  STRING,
+  api_headers_json    STRING,
+  api_query_params_json STRING,
+  api_pagination_enabled BOOL,
+  api_pagination_strategy STRING,
+  api_page_size       INT64,
+  api_next_page_field STRING,
+  api_data_array_field STRING,
+  -- FILE source columns
+  file_type           STRING,
+  file_location       STRING,
+  file_prefix         STRING,
+  file_suffix         STRING,
+  file_delimiter      STRING,
+  file_has_header     BOOL,
+  file_sheet_index    INT64,
+  -- Transform + validation
+  source_transforms_json STRING,            -- JSON array of LOOKUP/GROUP_BY/SORT_BY configs
+  min_row_count       INT64,
+  max_row_count       INT64,
+  required_headers_json STRING,
+  bnc_rules_json      STRING                -- [{"field":"amount","expectedTotal":5000000}]
+);
+
 -- Source data table for the example (raw trades)
 CREATE TABLE IF NOT EXISTS `my-gcp-project.raw_data.trades` (
   trade_id    STRING,
@@ -151,6 +195,7 @@ mvn -pl beam-runner exec:java \
   -Dexec.mainClass=com.yourco.beam.runner.example.ExampleWorkflow \
   -Dexec.args="
     --project=my-gcp-project
+    --parentId=TRADING
     --paramBqProject=my-gcp-project
     --paramBqDataset=pipeline_config
     --paramStoreTable=parameter_store
@@ -184,6 +229,7 @@ LOADING checkpoint → datasource availability check → transform chain → COM
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --processType=REPORT_PROCESSING \
   --project=my-gcp-project \
+  --parentId=TRADING \
   --reportName=daily_trades_summary \
   --reportSubprocess=eod \
   --periodId=2024-01 \
@@ -257,6 +303,7 @@ VALUES (
 
 | Option | Default | Purpose |
 |--------|---------|---------|
+| `--parentId` | — | Top-level business group. Maps to `ParameterGroupName` in `parameter_store` and `parent_id` in `source_config`. Example: `TRADING`, `RISK` |
 | `--paramBqProject` | `--project` | GCP project for the `parameter_store` table |
 | `--paramBqDataset` | `pipeline_config` | BQ dataset containing `parameter_store` |
 | `--paramStoreTable` | `parameter_store` | Table name (keyed by `ParameterName`, `ParameterGroupName`, `ParameterDataSource`) |

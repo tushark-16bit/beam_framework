@@ -28,6 +28,7 @@ public final class SourceConfig implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    public final String parentId;        // top-level business group (parent_id in source_config)
     public final String datasourceName;
     public final String periodId;
     public final String subprocessName;
@@ -60,6 +61,7 @@ public final class SourceConfig implements Serializable {
     public final ValidationConfig validationConfig;
 
     private SourceConfig(Builder b) {
+        this.parentId         = b.parentId;
         this.datasourceName   = b.datasourceName;
         this.periodId         = b.periodId;
         this.subprocessName   = b.subprocessName;
@@ -102,7 +104,7 @@ public final class SourceConfig implements Serializable {
     // ── Builder ───────────────────────────────────────────────────────────────
 
     public static final class Builder {
-        private String datasourceName, periodId, subprocessName;
+        private String parentId, datasourceName, periodId, subprocessName;
         private SourceType sourceType;
         private ApiSourceConfig apiConfig;
         private FileSourceConfig fileConfig;
@@ -111,7 +113,8 @@ public final class SourceConfig implements Serializable {
         private List<SourceTransformConfig> sourceTransforms;
         private ValidationConfig validationConfig;
 
-        public Builder datasourceName(String v)                   { datasourceName = v;    return this; }
+        public Builder parentId(String v)                         { parentId = v;           return this; }
+        public Builder datasourceName(String v)                   { datasourceName = v;     return this; }
         public Builder periodId(String v)                         { periodId = v;           return this; }
         public Builder subprocessName(String v)                   { subprocessName = v;     return this; }
         public Builder sourceType(SourceType v)                   { sourceType = v;         return this; }
@@ -127,7 +130,8 @@ public final class SourceConfig implements Serializable {
 
     @Override
     public String toString() {
-        return "SourceConfig{datasource=" + datasourceName
+        return "SourceConfig{parent=" + parentId
+            + ", datasource=" + datasourceName
             + ", period=" + periodId
             + ", subprocess=" + subprocessName
             + ", type=" + sourceType

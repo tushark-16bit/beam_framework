@@ -28,9 +28,9 @@ import java.util.Map;
  *
  * <h2>parameter_store row for this example</h2>
  * <pre>
- * ParameterGroupName  = "REPORT_PROCESSING"
- * ParameterDataSource = "eod"
- * ParameterName       = "daily_trades_summary"
+ * ParameterGroupName  = "TRADING"          ← --parentId (business group)
+ * ParameterDataSource = "eod"             ← --reportSubprocess (child)
+ * ParameterName       = "daily_trades_summary"  ← --reportName (name)
  * SchemaOfJson        = {
  *   "source_bq_table":       {"required": true,  "type": "string"},
  *   "transform_query":       {"required": true,  "type": "string"},
@@ -61,6 +61,7 @@ import java.util.Map;
  *     --periodId=2024-01
  *     --periodStart=2024-01-01
  *     --periodEnd=2024-01-31
+ *     --parentId=TRADING
  *     --processType=REPORT_PROCESSING"
  * </pre>
  *
@@ -80,16 +81,16 @@ public final class ExampleWorkflow {
     }
 
     public void run(FrameworkOptions options) {
+        String parentId    = options.getParentId();          // → ParameterGroupName column
         String reportName  = options.getReportName();       // → ParameterName column
         String subprocess  = options.getReportSubprocess(); // → ParameterDataSource column
-        String processType = "REPORT_PROCESSING";           // → ParameterGroupName column
         String periodId    = options.getPeriodId();
         String periodStart = options.getPeriodStart();
         String periodEnd   = options.getPeriodEnd();
 
         LOG.info("=== ExampleWorkflow START ===");
-        LOG.info("Report: {} / {} | Period: {} ({} → {})",
-                 reportName, subprocess, periodId, periodStart, periodEnd);
+        LOG.info("Parent: {} | Report: {} / {} | Period: {} ({} → {})",
+                 parentId, reportName, subprocess, periodId, periodStart, periodEnd);
 
         // ── Step 1: Fetch and validate parameters from BigQuery ───────────────
         //
@@ -101,7 +102,7 @@ public final class ExampleWorkflow {
 
         BigQueryParameterAdapter paramAdapter = new BigQueryParameterAdapterImpl(options);
         Map<String, String> params = paramAdapter.fetchRequiredParameters(
-            processType, subprocess, reportName);
+            parentId, subprocess, reportName);
 
         LOG.info("Parameters loaded ({} key(s)):", params.size());
         params.forEach((k, v) -> LOG.info("  {} = {}", k, v));
