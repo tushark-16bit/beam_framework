@@ -12,6 +12,7 @@ import com.yourco.beam.model.ReportConfig;
 import com.yourco.beam.model.ReportDatasourceRef;
 import com.yourco.beam.model.ReportEmailConfig;
 import com.yourco.beam.model.ReportOutputConfig;
+import com.yourco.beam.options.ReportOutputSinkType;
 import com.yourco.beam.model.ReportPreprocessingStep;
 import com.yourco.beam.model.ReportTransformStep;
 import com.yourco.beam.options.FrameworkOptions;
@@ -103,38 +104,38 @@ public final class BigQueryReportRepository {
      * @throws IllegalArgumentException if no source_config row exists or BQ output fields are null
      */
     /**
-     * Returns the latest COMPLETED {@code dataSourceId} for a datasource run.
+     * Returns the {@code DaId} of the latest COMPLETED DaRefer row for a datasource run.
      *
-     * <p>Queries the checkpoint table ({@code data_source_checkpoints}) for the most recent
-     * COMPLETED row matching (srcName, PerId). This id is used by callers to build a record-table
-     * subquery: {@code SELECT RowDSJsonTx FROM records WHERE dataSourceId = X}.
+     * <p>Queries {@code DaRefer} for the most recent COMPLETED row matching (SrceNm, PerId).
+     * The DaId is used to build a DaRec subquery:
+     * {@code SELECT RowDaJsonTx FROM DaRec WHERE DaId = X}.
      *
      * @throws IllegalArgumentException if no COMPLETED checkpoint exists
      */
-    public long fetchDatasourceDataSourceId(String datasourceName, String periodId,
-                                            FrameworkOptions options) {
+    public long fetchDatasourceDaId(String datasourceName, String periodId,
+                                    FrameworkOptions options) {
         String project = options.getCheckpointBqProject() != null
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
-        String checkpointTable = "`" + project + "." + options.getCheckpointBqDataset()
-                               + "." + options.getCheckpointBqTable() + "`";
+        String daReferTable = "`" + project + "." + options.getCheckpointBqDataset()
+                            + "." + options.getDaReferTable() + "`";
 
-        String sql = "SELECT dataSourceId FROM " + checkpointTable
-                   + " WHERE srcName = @srcName AND PerId = @perId AND StaCd = 'COMPLETED'"
+        String sql = "SELECT DaId FROM " + daReferTable
+                   + " WHERE SrceNm = @srceNm AND PerId = @perId AND StaCd = 'COMPLETED'"
                    + " ORDER BY LstUpdtTs DESC LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("srcName", QueryParameterValue.string(datasourceName))
-            .addNamedParameter("perId",   QueryParameterValue.string(periodId))
+            .addNamedParameter("srceNm", QueryParameterValue.string(datasourceName))
+            .addNamedParameter("perId",  QueryParameterValue.string(periodId))
             .setUseLegacySql(false)
             .build();
 
         for (FieldValueList row : runQuery(config).iterateAll()) {
-            return row.get("dataSourceId").getLongValue();
+            return row.get("DaId").getLongValue();
         }
         throw new IllegalArgumentException(
-            "No COMPLETED checkpoint found for datasource=" + datasourceName
-            + " period=" + periodId + " — ensure DATA_SOURCE_DOWNLOAD ran successfully first");
+            "No COMPLETED DaRefer row found for SrceNm=" + datasourceName
+            + " PerId=" + periodId + " — ensure DATA_SOURCE_DOWNLOAD ran successfully first");
     }
 
     // ── Private loaders ───────────────────────────────────────────────────────
@@ -229,8 +230,10 @@ public final class BigQueryReportRepository {
     private List<ReportOutputConfig> fetchOutputConfigs(String reportName,
                                                          String reportSubprocess,
                                                          String periodId) {
-        String sql = "SELECT output_order, input_alias, output_format, gcs_path, "
-                   + "       file_prefix, file_suffix, include_header "
+        String sql = "SELECT output_order, input_alias, sink_type, "
+                   + "       output_format, gcs_path, file_prefix, file_suffix, include_header, "
+                   + "       bq_sink_table, "
+                   + "       api_endpoint, api_method, api_auth_secret_id, api_headers_json "
                    + "FROM `" + ref("report_output_config") + "` "
                    + "WHERE report_name       = @reportName "
                    + "  AND report_subprocess = @subprocess "
@@ -240,16 +243,33 @@ public final class BigQueryReportRepository {
         for (FieldValueList row : runQuery(qConfig(sql, reportName, reportSubprocess, periodId)).iterateAll()) {
             boolean includeHeader = !row.get("include_header").isNull()
                                     && row.get("include_header").getBooleanValue();
+            ReportOutputSinkType sinkType = parseSinkType(str(row, "sink_type"));
             result.add(new ReportOutputConfig(
                 intVal(row, "output_order"),
                 str(row, "input_alias"),
+                sinkType,
                 str(row, "output_format"),
                 str(row, "gcs_path"),
                 str(row, "file_prefix"),
                 str(row, "file_suffix"),
-                includeHeader));
+                includeHeader,
+                str(row, "bq_sink_table"),
+                str(row, "api_endpoint"),
+                str(row, "api_method"),
+                str(row, "api_auth_secret_id"),
+                str(row, "api_headers_json")));
         }
         return result;
+    }
+
+    private static ReportOutputSinkType parseSinkType(String value) {
+        if (value == null || value.isBlank()) return ReportOutputSinkType.GCS;
+        try {
+            return ReportOutputSinkType.valueOf(value.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "Unknown sink_type '" + value + "' in report_output_config — expected GCS, BQ, or API");
+        }
     }
 
     private ReportEmailConfig fetchEmailConfig(String reportName, String reportSubprocess,

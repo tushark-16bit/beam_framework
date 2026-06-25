@@ -1,36 +1,36 @@
 package com.yourco.beam.io.records;
 
 /**
- * Queries the record table for post-pipeline validation.
+ * Queries the {@code DaRec} record table for post-pipeline validation.
  *
  * <p>Used by {@link com.yourco.beam.runner.DataSourcePipelineFactory} after
  * {@code pipeline.run()} to perform row-count and Balance &amp; Control (BnC) checks
- * against rows written to the record table for a given run.
+ * against rows written to DaRec for a given run.
  *
  * <p>The concrete implementation ({@link BigQueryDataSourceRecordAdapter}) queries
- * {@code RowDSJsonTx} using {@code JSON_VALUE} to extract field values from the
+ * {@code RowDaJsonTx} using {@code JSON_VALUE} to extract field values from the
  * JSON blobs stored per row.
  */
 public interface DataSourceRecordAdapter {
 
     /**
-     * Returns the number of records written to the record table for this run.
+     * Returns the number of records in DaRec for this run.
      *
-     * @param dataSourceId the run identifier
+     * @param DaId the run identifier (FK from DaRefer)
      * @return row count, or -1 if the table cannot be queried
      */
-    long countRecords(long dataSourceId);
+    long countRecords(long DaId);
 
     /**
-     * Returns the sum of a numeric field extracted from the {@code RowDSJsonTx} JSON blobs
+     * Returns the sum of a numeric field extracted from {@code RowDaJsonTx} JSON blobs
      * for all records of this run.
      *
-     * <p>Uses {@code JSON_VALUE(RowDSJsonTx, '$.field')} — the field must be a numeric
-     * value stored in the JSON row blob.
+     * <p>Uses {@code JSON_VALUE(RowDaJsonTx, '$.field')} — the field must be a numeric
+     * value at the root of the JSON blob.
      *
-     * @param dataSourceId the run identifier
-     * @param field        JSON key name (direct child of root)
+     * @param DaId  the run identifier
+     * @param field JSON key name (direct child of root)
      * @return the sum, or {@link Double#NaN} if the table cannot be queried
      */
-    double sumField(long dataSourceId, String field);
+    double sumField(long DaId, String field);
 }

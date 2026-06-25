@@ -81,6 +81,24 @@ public final class BigQueryJobService {
         awaitJob(bigquery.create(JobInfo.of(config)), "query");
     }
 
+    // ── Table → BQ table ─────────────────────────────────────────────────────
+
+    /**
+     * Copies all rows from {@code sourceTable} into {@code destinationTable}
+     * (WRITE_TRUNCATE, CREATE_IF_NEEDED) using a {@code SELECT *} query.
+     *
+     * <p>This is the BQ output sink: shares a result table with a downstream
+     * dataset (e.g. analytics project) without needing a GCS intermediate step.
+     *
+     * @param sourceTable      fully-qualified source: {@code project.dataset.table}
+     * @param destinationTable fully-qualified destination: {@code project.dataset.table}
+     */
+    public void copyTable(String sourceTable, String destinationTable) {
+        LOG.info("Copying BQ table {} → {}", sourceTable, destinationTable);
+        runQueryToTable("SELECT * FROM `" + sourceTable + "`", destinationTable);
+        LOG.info("BQ copy complete: {} → {}", sourceTable, destinationTable);
+    }
+
     // ── Table → GCS ───────────────────────────────────────────────────────────
 
     /**

@@ -18,25 +18,23 @@ import java.time.ZoneOffset;
 import java.util.UUID;
 
 /**
- * Writes a {@code PCollection<Row>} to the unified data-source record table.
+ * Writes a {@code PCollection<Row>} to the {@code DaRec} record table.
  *
- * <p>Every row is stored as a JSON blob in {@code RowDSJsonTx}. This replaces
- * per-source output BQ tables — all sources (BQ, API, file) and all reports write
- * to the same record table.
+ * <p>Every row is serialised as a JSON blob in {@code RowDaJsonTx}.
+ * All rows from one run share the same {@code DaId} (FK → {@code DaRefer.DaId}).
  *
- * <p>All rows from one run share the same {@code dataSourceId} (generated in
- * the driver JVM by {@link com.yourco.beam.io.checkpoint.DataSourceCheckpointAdapter#createCheckpoint}).
- * Consumers join on {@code dataSourceId} to retrieve all rows for a run.
+ * <p>{@code LoadDt} and {@code LstUpdtTs} are captured once in the constructor so that
+ * retried Beam bundles and runs spanning midnight all land in the same partition.
  *
- * <p>The record table must already exist ({@code CREATE_NEVER}):
+ * <p>The DaRec table must already exist ({@code CREATE_NEVER}):
  * <pre>{@code
- * CREATE TABLE pipeline_metadata.data_source_records (
- *   RecId          STRING    NOT NULL,
- *   dataSourceId   INT64     NOT NULL,
- *   RowDSJsonTx    STRING,
- *   LoadDt         DATE      NOT NULL,
- *   LstUpdtTs      TIMESTAMP NOT NULL
- * );
+ * CREATE TABLE pipeline_metadata.DaRec (
+ *   RecId        STRING    NOT NULL,
+ *   DaId         INT64     NOT NULL,
+ *   RowDaJsonTx  STRING,
+ *   LoadDt       DATE      NOT NULL,
+ *   LstUpdtTs    TIMESTAMP NOT NULL
+ * ) PARTITION BY LoadDt;
  * }</pre>
  */
 public final class DataSourceRecordSinkTransform extends PTransform<PCollection<Row>, PDone> {
@@ -44,28 +42,28 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
     private static final long serialVersionUID = 1L;
 
     private final String recordTableRef; // project:dataset.table — BigQueryIO format
-    private final long   dataSourceId;
+    private final long   DaId;
     private final String loadDt;         // captured once — all rows in this run share the same date
-    private final String lstUpdtTs;      // captured once — avoids per-element clock calls and midnight splits
+    private final String lstUpdtTs;      // captured once — avoids per-element clock calls
 
-    public DataSourceRecordSinkTransform(FrameworkOptions options, long dataSourceId) {
+    public DataSourceRecordSinkTransform(FrameworkOptions options, long DaId) {
         String project = options.getCheckpointBqProject() != null
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
         this.recordTableRef = project + ":" + options.getCheckpointBqDataset()
-                            + "." + options.getRecordBqTable();
-        this.dataSourceId = dataSourceId;
-        this.loadDt       = LocalDate.now(ZoneOffset.UTC).toString();
-        this.lstUpdtTs    = Instant.now().toString();
+                            + "." + options.getDaRecTable();
+        this.DaId      = DaId;
+        this.loadDt    = LocalDate.now(ZoneOffset.UTC).toString();
+        this.lstUpdtTs = Instant.now().toString();
     }
 
     @Override
     public PDone expand(PCollection<Row> input) {
         input
-            .apply("Row-to-RecordTableRow", MapElements
+            .apply("Row-to-DaRecRow", MapElements
                 .into(TypeDescriptor.of(TableRow.class))
-                .via(new RowToRecordTableRowFn(dataSourceId, loadDt, lstUpdtTs)))
-            .apply("WriteTo-RecordTable", BigQueryIO.writeTableRows()
+                .via(new RowToDaRecFn(DaId, loadDt, lstUpdtTs)))
+            .apply("WriteTo-DaRec", BigQueryIO.writeTableRows()
                 .to(recordTableRef)
                 .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
                 .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER));
@@ -73,29 +71,28 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
     }
 
     /** Serializable — safe for Beam worker serialization. */
-    private static final class RowToRecordTableRowFn
-            implements SerializableFunction<Row, TableRow> {
+    private static final class RowToDaRecFn implements SerializableFunction<Row, TableRow> {
 
         private static final long serialVersionUID = 1L;
 
-        private final long   dataSourceId;
+        private final long   DaId;
         private final String loadDt;
         private final String lstUpdtTs;
 
-        RowToRecordTableRowFn(long dataSourceId, String loadDt, String lstUpdtTs) {
-            this.dataSourceId = dataSourceId;
-            this.loadDt       = loadDt;
-            this.lstUpdtTs    = lstUpdtTs;
+        RowToDaRecFn(long DaId, String loadDt, String lstUpdtTs) {
+            this.DaId      = DaId;
+            this.loadDt    = loadDt;
+            this.lstUpdtTs = lstUpdtTs;
         }
 
         @Override
         public TableRow apply(Row row) {
             return new TableRow()
-                .set("RecId",        UUID.randomUUID().toString())
-                .set("dataSourceId", dataSourceId)
-                .set("RowDSJsonTx",  JsonUtils.rowToJson(row))
-                .set("LoadDt",       loadDt)
-                .set("LstUpdtTs",    lstUpdtTs);
+                .set("RecId",       UUID.randomUUID().toString())
+                .set("DaId",        DaId)
+                .set("RowDaJsonTx", JsonUtils.rowToJson(row))
+                .set("LoadDt",      loadDt)
+                .set("LstUpdtTs",   lstUpdtTs);
         }
     }
 }

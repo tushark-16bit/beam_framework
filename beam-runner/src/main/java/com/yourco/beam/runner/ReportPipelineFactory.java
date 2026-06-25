@@ -2,6 +2,7 @@ package com.yourco.beam.runner;
 
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.checkpoint.DataSourceCheckpointAdapter;
+import com.yourco.beam.io.report.BigQueryCommonReportDetailAdapter;
 import com.yourco.beam.io.email.EmailAttachment;
 import com.yourco.beam.io.email.ReportEmailAdapter;
 import com.yourco.beam.io.report.BigQueryJobService;
@@ -57,7 +58,8 @@ public final class ReportPipelineFactory {
     private static final Logger LOG = LoggerFactory.getLogger(ReportPipelineFactory.class);
     private static final String PROCESS_TYPE = "REPORT_PROCESSING";
 
-    private final BigQueryJobService bqJobService;
+    private final BigQueryJobService     bqJobService;
+    private final ReportOutputSinkRouter sinkRouter;
 
     public ReportPipelineFactory() {
         this(new BigQueryJobService());
@@ -65,6 +67,12 @@ public final class ReportPipelineFactory {
 
     ReportPipelineFactory(BigQueryJobService bqJobService) {
         this.bqJobService = bqJobService;
+        this.sinkRouter   = new ReportOutputSinkRouter(bqJobService);
+    }
+
+    ReportPipelineFactory(BigQueryJobService bqJobService, ReportOutputSinkRouter sinkRouter) {
+        this.bqJobService = bqJobService;
+        this.sinkRouter   = sinkRouter;
     }
 
     // ── Entry point ───────────────────────────────────────────────────────────
@@ -86,10 +94,11 @@ public final class ReportPipelineFactory {
         BigQueryReportRepository repo = new BigQueryReportRepository(options);
         ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
 
-        // ── 2. Checkpoint: LOADING ────────────────────────────────────────────
+        // ── 2. DaRefer: LOADING ───────────────────────────────────────────────
         DataSourceCheckpointAdapter checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(options);
+        BigQueryCommonReportDetailAdapter cmnRptAdapter = new BigQueryCommonReportDetailAdapter(options);
         long dsId = checkpointAdapter.createCheckpoint(reportName, periodId, reportName);
-        LOG.info("REPORT_PROCESSING checkpoint created: dataSourceId={}", dsId);
+        LOG.info("REPORT_PROCESSING DaRefer LOADING row created: DaId={}", dsId);
 
         int outputCount = 0;
         try {
@@ -109,15 +118,28 @@ public final class ReportPipelineFactory {
                 runTransformChain(config, options, aliasRegistry);
             }
 
-            // ── 7 + 8. Export outputs and send email ──────────────────────────
-            List<ExportedFile> exportedFiles = exportOutputs(config, options, aliasRegistry);
-            outputCount = exportedFiles.size();
+            // ── 7. Route outputs to sinks (GCS / BQ / API) ───────────────────
+            List<ReportOutputSinkRouter.OutputResult> outputResults =
+                exportOutputs(config, options, aliasRegistry);
+            outputCount = outputResults.size();
 
-            if (config.hasEmail()) {
-                sendEmail(config, options, exportedFiles);
+            // ── 8. Write to COM_CmnRptDtl ─────────────────────────────────────
+            for (ReportOutputSinkRouter.OutputResult r : outputResults) {
+                String flNm = r.fileName() != null ? r.fileName() : r.destination();
+                cmnRptAdapter.insertDetail(reportName, flNm, null,
+                                           r.rowCount(), options.getJobRunId());
             }
 
-            // ── 9. Checkpoint: COMPLETED ──────────────────────────────────────
+            // ── 9. Send email (GCS outputs only, as attachments) ──────────────
+            if (config.hasEmail()) {
+                List<ExportedFile> attachments = outputResults.stream()
+                    .filter(ReportOutputSinkRouter.OutputResult::hasAttachment)
+                    .map(r -> new ExportedFile(r.destination(), r.fileName(), r.contentType()))
+                    .toList();
+                sendEmail(config, options, attachments);
+            }
+
+            // ── 10. DaRefer: COMPLETED ────────────────────────────────────────
             checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_COMPLETED, null);
             LOG.info("REPORT_PROCESSING completed: {} files exported", outputCount);
 
@@ -183,30 +205,29 @@ public final class ReportPipelineFactory {
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
         String recordTable = project + "." + options.getCheckpointBqDataset()
-                           + "." + options.getRecordBqTable();
+                           + "." + options.getDaRecTable();
 
         for (ReportDatasourceRef ref : config.datasources) {
-            // Resolve the dataSourceId of the most recent COMPLETED run for this datasource.
-            // The alias expands to a record-table subquery; transform SQL uses JSON_VALUE to
-            // extract individual columns: JSON_VALUE({alias}.RowDSJsonTx, '$.fieldName').
-            long dsDatId;
+            // Resolve the DaId of the most recent COMPLETED run for this datasource.
+            // The alias expands to a DaRec subquery; transform SQL uses JSON_VALUE to
+            // extract individual columns: JSON_VALUE({alias}.RowDaJsonTx, '$.fieldName').
+            long daDatId;
             try {
-                dsDatId = bqRepo.fetchDatasourceDataSourceId(
+                daDatId = bqRepo.fetchDatasourceDaId(
                     ref.datasourceName, config.periodId, options);
             } catch (IllegalArgumentException e) {
                 if (ref.required) {
                     throw e;  // required datasource must be present — re-throw
                 }
-                LOG.warn("Optional datasource '{}' has no COMPLETED run for period={} "
+                LOG.warn("Optional datasource '{}' has no COMPLETED DaRefer row for period={} "
                          + "— alias '{}' will not be registered",
                          ref.datasourceName, config.periodId, ref.transformAlias);
                 continue;
             }
-            String subquery = "(SELECT RowDSJsonTx FROM `" + recordTable
-                            + "` WHERE dataSourceId = " + dsDatId + ")";
+            String subquery = "(SELECT RowDaJsonTx FROM `" + recordTable
+                            + "` WHERE DaId = " + daDatId + ")";
             registry.put(ref.transformAlias, subquery);
-            LOG.info("Alias '{}' → record table subquery (dataSourceId={})",
-                     ref.transformAlias, dsDatId);
+            LOG.info("Alias '{}' → DaRec subquery (DaId={})", ref.transformAlias, daDatId);
         }
         return registry;
     }
@@ -230,10 +251,10 @@ public final class ReportPipelineFactory {
         }
     }
 
-    private List<ExportedFile> exportOutputs(ReportConfig config, FrameworkOptions options,
-                                              Map<String, String> aliasRegistry) {
-        LocalDate runDate = DateUtils.resolveRunDate(options);
-        List<ExportedFile> result = new ArrayList<>();
+    private List<ReportOutputSinkRouter.OutputResult> exportOutputs(
+            ReportConfig config, FrameworkOptions options,
+            Map<String, String> aliasRegistry) {
+        List<ReportOutputSinkRouter.OutputResult> result = new ArrayList<>();
 
         for (ReportOutputConfig output : config.outputConfigs) {
             String sourceTable = aliasRegistry.get(output.inputAlias);
@@ -242,27 +263,23 @@ public final class ReportPipelineFactory {
                     "Output alias '" + output.inputAlias + "' not found in alias registry. "
                     + "Available: " + aliasRegistry.keySet());
             }
-
-            String ext       = output.isCsv() ? "csv" : "json";
-            String fileName  = output.filePrefix
-                             + config.reportName + "_" + config.periodId + "_"
-                             + runDate
-                             + output.fileSuffix
-                             + "." + ext;
-            String gcsDir    = output.gcsPath.endsWith("/") ? output.gcsPath
-                                                             : output.gcsPath + "/";
-            String gcsUri    = gcsDir + fileName;
-
-            LOG.info("Exporting alias '{}' ({}) → {}", output.inputAlias, sourceTable, gcsUri);
-
-            if (output.isCsv()) {
-                bqJobService.exportToCsv(sourceTable, gcsUri, output.includeHeader);
-            } else {
-                bqJobService.exportToJson(sourceTable, gcsUri);
+            // If the alias points to a record-table subquery, materialise it first
+            if (sourceTable.startsWith("(")) {
+                String tempTable = options.getProject() + "."
+                    + options.getCheckpointBqDataset()
+                    + ".tmp_" + config.reportName + "_" + output.inputAlias;
+                bqJobService.runQueryToTable("SELECT * FROM " + sourceTable, tempTable);
+                sourceTable = tempTable;
             }
 
-            result.add(new ExportedFile(gcsUri, fileName,
-                                        output.isCsv() ? "text/csv" : "application/json"));
+            LOG.info("Output {}: sinkType={} alias='{}' source={}",
+                     output.outputOrder, output.sinkType, output.inputAlias, sourceTable);
+
+            ReportOutputSinkRouter.OutputResult outputResult =
+                sinkRouter.route(output, sourceTable, config, options);
+            result.add(outputResult);
+
+            LOG.info("Output {} done → {}", output.outputOrder, outputResult.destination());
         }
         return result;
     }
@@ -295,8 +312,8 @@ public final class ReportPipelineFactory {
      * All other values are treated as BQ table refs and wrapped with backticks.
      *
      * <p>For datasource aliases backed by the record table, the subquery form is:
-     * {@code (SELECT RowDSJsonTx FROM `records` WHERE dataSourceId = X)}.
-     * Transform SQL should use {@code JSON_VALUE({alias}.RowDSJsonTx, '$.fieldName')}
+     * {@code (SELECT RowDaJsonTx FROM `DaRec` WHERE DaId = X)}.
+     * Transform SQL should use {@code JSON_VALUE({alias}.RowDaJsonTx, '$.fieldName')}
      * to extract individual columns.
      */
     private static String resolveAliasTokens(String template,

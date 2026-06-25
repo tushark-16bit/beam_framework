@@ -17,13 +17,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * BigQuery implementation of {@link DataSourceCheckpointAdapter}.
  *
- * <p>Uses BQ DML for all operations. The checkpoint table is small and
- * accessed only from the driver JVM — never from Beam workers.
+ * <p>Reads and writes the {@code DaRefer} table using BQ DML.
+ * The table is small and accessed only from the driver JVM — never from Beam workers.
  *
- * <h2>dataSourceId generation</h2>
- * Queries {@code SELECT IFNULL(MAX(dataSourceId), 0) + 1} from the checkpoint table
- * to get the next sequential ID. This is not atomic across concurrent pipelines —
- * use a single driver JVM per period to avoid collisions.
+ * <h2>DaId generation</h2>
+ * {@code SELECT IFNULL(MAX(DaId), 0) + 1} — not atomic across concurrent pipelines.
+ * Use a single driver JVM per period to avoid collisions, or switch DaId to UUID.
  */
 public final class BigQueryDataSourceCheckpointAdapter implements DataSourceCheckpointAdapter {
 
@@ -42,69 +41,68 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
         this.table = "`" + project + "." + options.getCheckpointBqDataset()
-                   + "." + options.getCheckpointBqTable() + "`";
-        LOG.info("DataSourceCheckpointAdapter: {}", table);
+                   + "." + options.getDaReferTable() + "`";
+        LOG.info("DaRefer table: {}", table);
     }
 
     @Override
-    public long createCheckpoint(String srcName, String perId, String dsNm) {
-        long dsId  = nextDataSourceId();
-        long vsnNo = nextVsnNo(srcName, perId);
+    public long createCheckpoint(String SrceNm, String PerId, String FlNm) {
+        long daId  = nextDaId();
+        long vsnNo = nextVsnNo(SrceNm, PerId);
         long nowMicros = TimeUnit.MILLISECONDS.toMicros(Instant.now().toEpochMilli());
 
         String sql = "INSERT INTO " + table
-            + " (dataSourceId, srcName, vsnNo, PerId, DSNm, BalAndCntlSmryTx, StaCd, CreatedTs, LstUpdtTs)"
-            + " VALUES (@dsId, @srcName, @vsnNo, @perId, @dsNm, NULL, @staCd, @now, @now)";
+            + " (DaId, SrceNm, VsnNo, PerId, FlNm, BalAndCntlSmryTx, StaCd, CreatedTs, LstUpdtTs)"
+            + " VALUES (@daId, @srceNm, @vsnNo, @perId, @flNm, NULL, @staCd, @now, @now)";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("dsId",   QueryParameterValue.int64(dsId))
-            .addNamedParameter("srcName",QueryParameterValue.string(srcName))
+            .addNamedParameter("daId",   QueryParameterValue.int64(daId))
+            .addNamedParameter("srceNm", QueryParameterValue.string(SrceNm))
             .addNamedParameter("vsnNo",  QueryParameterValue.int64(vsnNo))
-            .addNamedParameter("perId",  QueryParameterValue.string(perId))
-            .addNamedParameter("dsNm",   QueryParameterValue.string(dsNm != null ? dsNm : ""))
+            .addNamedParameter("perId",  QueryParameterValue.string(PerId))
+            .addNamedParameter("flNm",   QueryParameterValue.string(FlNm != null ? FlNm : ""))
             .addNamedParameter("staCd",  QueryParameterValue.string(DataSourceCheckpoint.STA_LOADING))
             .addNamedParameter("now",    QueryParameterValue.timestamp(nowMicros))
             .setUseLegacySql(false)
             .build();
 
         runDml(config);
-        LOG.info("Checkpoint created: dataSourceId={} srcName={} perId={} vsnNo={} sta=LOADING",
-                 dsId, srcName, perId, vsnNo);
-        return dsId;
+        LOG.info("DaRefer row created: DaId={} SrceNm={} PerId={} VsnNo={} StaCd=LOADING",
+                 daId, SrceNm, PerId, vsnNo);
+        return daId;
     }
 
     @Override
-    public void updateStatus(long dataSourceId, String staCd, String balAndCntlSmryTx) {
+    public void updateStatus(long DaId, String StaCd, String balAndCntlSmryTx) {
         long nowMicros = TimeUnit.MILLISECONDS.toMicros(Instant.now().toEpochMilli());
         String sql = "UPDATE " + table
             + " SET StaCd = @staCd, BalAndCntlSmryTx = @bnc, LstUpdtTs = @now"
-            + " WHERE dataSourceId = @dsId";
+            + " WHERE DaId = @daId";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("staCd", QueryParameterValue.string(staCd))
+            .addNamedParameter("staCd", QueryParameterValue.string(StaCd))
             .addNamedParameter("bnc",   balAndCntlSmryTx != null
                                         ? QueryParameterValue.string(balAndCntlSmryTx)
                                         : QueryParameterValue.string(""))
             .addNamedParameter("now",   QueryParameterValue.timestamp(nowMicros))
-            .addNamedParameter("dsId",  QueryParameterValue.int64(dataSourceId))
+            .addNamedParameter("daId",  QueryParameterValue.int64(DaId))
             .setUseLegacySql(false)
             .build();
 
         runDml(config);
-        LOG.info("Checkpoint updated: dataSourceId={} staCd={}", dataSourceId, staCd);
+        LOG.info("DaRefer updated: DaId={} StaCd={}", DaId, StaCd);
     }
 
     @Override
-    public boolean isCompleted(String srcName, String perId) {
-        // Filter on StaCd before ordering so a newer LOADING/FAILED row cannot shadow
-        // an older COMPLETED row for the same (srcName, PerId) pair.
-        String sql = "SELECT dataSourceId FROM " + table
-            + " WHERE srcName = @srcName AND PerId = @perId AND StaCd = @completed"
+    public boolean isCompleted(String SrceNm, String PerId) {
+        // Filter on StaCd first so a newer LOADING/FAILED row cannot shadow an older COMPLETED row.
+        String sql = "SELECT DaId FROM " + table
+            + " WHERE SrceNm = @srceNm AND PerId = @perId AND StaCd = @completed"
             + " LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("srcName",   QueryParameterValue.string(srcName))
-            .addNamedParameter("perId",     QueryParameterValue.string(perId))
+            .addNamedParameter("srceNm",    QueryParameterValue.string(SrceNm))
+            .addNamedParameter("perId",     QueryParameterValue.string(PerId))
             .addNamedParameter("completed", QueryParameterValue.string(DataSourceCheckpoint.STA_COMPLETED))
             .setUseLegacySql(false)
             .build();
@@ -113,30 +111,30 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             return bigquery.query(config).iterateAll().iterator().hasNext();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ checkpoint query interrupted", e);
+            throw new IllegalStateException("DaRefer isCompleted query interrupted", e);
         }
     }
 
     @Override
-    public Optional<DataSourceCheckpoint> getLatest(String srcName, String perId) {
+    public Optional<DataSourceCheckpoint> getLatest(String SrceNm, String PerId) {
         String sql = "SELECT * FROM " + table
-            + " WHERE srcName = @srcName AND PerId = @perId"
+            + " WHERE SrceNm = @srceNm AND PerId = @perId"
             + " ORDER BY LstUpdtTs DESC LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("srcName", QueryParameterValue.string(srcName))
-            .addNamedParameter("perId",   QueryParameterValue.string(perId))
+            .addNamedParameter("srceNm", QueryParameterValue.string(SrceNm))
+            .addNamedParameter("perId",  QueryParameterValue.string(PerId))
             .setUseLegacySql(false)
             .build();
 
         try {
             for (FieldValueList row : bigquery.query(config).iterateAll()) {
                 return Optional.of(new DataSourceCheckpoint(
-                    row.get("dataSourceId").getLongValue(),
-                    row.get("srcName").getStringValue(),
-                    row.get("vsnNo").getLongValue(),
+                    row.get("DaId").getLongValue(),
+                    row.get("SrceNm").getStringValue(),
+                    row.get("VsnNo").getLongValue(),
                     strOrNull(row, "PerId"),
-                    strOrNull(row, "DSNm"),
+                    strOrNull(row, "FlNm"),
                     strOrNull(row, "BalAndCntlSmryTx"),
                     row.get("StaCd").getStringValue(),
                     Instant.parse(row.get("CreatedTs").getStringValue()),
@@ -145,24 +143,24 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ checkpoint query interrupted", e);
+            throw new IllegalStateException("DaRefer getLatest query interrupted", e);
         }
         return Optional.empty();
     }
 
     // ── Sequence helpers ──────────────────────────────────────────────────────
 
-    private long nextDataSourceId() {
-        String sql = "SELECT IFNULL(MAX(dataSourceId), 0) + 1 AS next_id FROM " + table;
+    private long nextDaId() {
+        String sql = "SELECT IFNULL(MAX(DaId), 0) + 1 AS next_id FROM " + table;
         return queryLong(sql, "next_id");
     }
 
-    private long nextVsnNo(String srcName, String perId) {
-        String sql = "SELECT IFNULL(MAX(vsnNo), 0) + 1 AS next_vsn FROM " + table
-            + " WHERE srcName = @srcName AND PerId = @perId";
+    private long nextVsnNo(String SrceNm, String PerId) {
+        String sql = "SELECT IFNULL(MAX(VsnNo), 0) + 1 AS next_vsn FROM " + table
+            + " WHERE SrceNm = @srceNm AND PerId = @perId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("srcName", QueryParameterValue.string(srcName))
-            .addNamedParameter("perId",   QueryParameterValue.string(perId))
+            .addNamedParameter("srceNm", QueryParameterValue.string(SrceNm))
+            .addNamedParameter("perId",  QueryParameterValue.string(PerId))
             .setUseLegacySql(false)
             .build();
         try {
@@ -171,7 +169,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ vsnNo query interrupted", e);
+            throw new IllegalStateException("DaRefer VsnNo query interrupted", e);
         }
         return 1L;
     }
@@ -184,7 +182,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ sequence query interrupted", e);
+            throw new IllegalStateException("DaRefer sequence query interrupted", e);
         }
         return 1L;
     }
@@ -194,7 +192,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             bigquery.query(config);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ DML interrupted", e);
+            throw new IllegalStateException("DaRefer DML interrupted", e);
         }
     }
 

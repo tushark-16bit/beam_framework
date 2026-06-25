@@ -12,11 +12,11 @@ import java.util.List;
  * <p>Fetched from the {@code source_config} BigQuery table by {@code BigQuerySourceConfigRepository}.
  * One {@link SourceConfig} corresponds to one independent Beam pipeline branch —
  * sources are <em>never</em> merged; each source reads, transforms, validates, and
- * writes all rows as JSON blobs to the shared record table (keyed by {@code dataSourceId}).
+ * writes all rows as JSON blobs to {@code DaRec} (keyed by {@code DaId}).
  *
  * <h2>Per-source pipeline shape</h2>
  * <pre>
- *   source read → {@link #queryConfig} applied → transform chain → record table (JSON blobs)
+ *   source read → {@link #queryConfig} applied → transform chain → DaRec (JSON blobs)
  *                                                     ↑
  *                              {@link #sourceTransforms} (LOOKUP, GROUP_BY, SORT_BY)
  * </pre>

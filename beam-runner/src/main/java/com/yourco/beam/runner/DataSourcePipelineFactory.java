@@ -38,7 +38,7 @@ import java.util.stream.Collectors;
  * <pre>
  *   source read → transform chain → DataSourceRecordSinkTransform
  *                                          ↓
- *                               data_source_records table (JSON blobs)
+ *                               DaRec table (JSON blobs keyed by DaId)
  * </pre>
  *
  * <h2>Orchestration steps</h2>
@@ -46,10 +46,10 @@ import java.util.stream.Collectors;
  *   <li><b>Fetch source config from BQ</b> — {@link BigQuerySourceConfigRepository}.</li>
  *   <li><b>Validate required parameters</b> — fail fast before launching Dataflow.</li>
  *   <li><b>Filter by checkpoint</b> — skip COMPLETED sources unless {@code --overrideDownload=true}.</li>
- *   <li><b>Create LOADING checkpoints</b> — one BQ row per source; returns the {@code dataSourceId}
+ *   <li><b>Create LOADING DaRefer rows</b> — one row per source; returns the {@code DaId}
  *       used for all record rows and the final status update.</li>
  *   <li><b>Assemble parallel source branches</b> — source read → transforms →
- *       {@link DataSourceRecordSinkTransform} (all rows stored as JSON blobs, keyed by dataSourceId).</li>
+ *       {@link DataSourceRecordSinkTransform} (all rows stored as JSON blobs in DaRec, keyed by DaId).</li>
  *   <li><b>Run pipeline</b> (called by {@link Main})</li>
  *   <li><b>Post-pipeline validation</b> — row count and BnC against the record table.
  *       Results written to {@code BalAndCntlSmryTx}; checkpoint updated to COMPLETED / FAILED_BNC / FAILED.</li>
@@ -63,7 +63,7 @@ public final class DataSourcePipelineFactory {
 
     // Held after assembly so Main can call runPostPipelineSteps()
     private List<SourceConfig>               processedConfigs;
-    private Map<String, Long>                dataSourceIds;   // datasourceName → dataSourceId
+    private Map<String, Long>                dataSourceIds;   // datasourceName → DaId
     private DataSourceCheckpointAdapter      checkpointAdapter;
     private DataSourceRecordAdapter          recordAdapter;
 
@@ -111,7 +111,7 @@ public final class DataSourcePipelineFactory {
             long dsId = checkpointAdapter.createCheckpoint(
                 config.datasourceName, config.periodId, dsNm);
             dataSourceIds.put(config.datasourceName, dsId);
-            LOG.info("LOADING checkpoint created for '{}': dataSourceId={}", config.datasourceName, dsId);
+            LOG.info("DaRefer LOADING row created for '{}': DaId={}", config.datasourceName, dsId);
         }
 
         // ── Step 5-6: Assemble per-source independent pipeline branches ────
@@ -146,7 +146,7 @@ public final class DataSourcePipelineFactory {
                 try {
                     runValidationAndUpdateCheckpoint(config, dsId);
                 } catch (Exception e) {
-                    LOG.error("Post-pipeline validation failed for '{}' (dataSourceId={}): {}",
+                    LOG.error("Post-pipeline validation failed for '{}' (DaId={}): {}",
                               config.datasourceName, dsId, e.getMessage(), e);
                     checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
                 }
@@ -163,7 +163,7 @@ public final class DataSourcePipelineFactory {
 
         for (SourceConfig config : configs) {
             long dsId = dataSourceIds.get(config.datasourceName);
-            LOG.info("Assembling source branch: {} ({}) → record table (dataSourceId={})",
+            LOG.info("Assembling source branch: {} ({}) → DaRec (DaId={})",
                      config.datasourceName, config.sourceType, dsId);
 
             PCollection<Row> sourceData = SourceRouter.routeFromConfig(
@@ -202,13 +202,13 @@ public final class DataSourcePipelineFactory {
 
         // -1 means the count query itself failed — treat as infrastructure error, not a BnC miss
         if (rowCount == -1L) {
-            LOG.error("Record count query failed for '{}' (dataSourceId={}) — marking FAILED",
+            LOG.error("DaRec count query failed for '{}' (DaId={}) — marking FAILED",
                       config.datasourceName, dsId);
             checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED,
                 "{\"error\":\"record count query failed — see pipeline logs\"}");
             return;
         }
-        LOG.info("Record count for '{}' (dataSourceId={}): {}", config.datasourceName, dsId, rowCount);
+        LOG.info("DaRec count for '{}' (DaId={}): {}", config.datasourceName, dsId, rowCount);
 
         List<String> failures = new ArrayList<>();
         boolean infraError = false;

@@ -196,22 +196,31 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getCheckpointBqDataset();
     void setCheckpointBqDataset(String value);
 
-    @Description("BigQuery table name for pipeline checkpoints. "
-                 + "Schema: dataSourceId INT64, srcName STRING, vsnNo INT64, PerId STRING, "
-                 + "DSNm STRING, BalAndCntlSmryTx STRING, StaCd STRING, "
+    @Description("BigQuery table name for the DaRefer reference/checkpoint table. "
+                 + "Schema: DaId INT64, SrceNm STRING, VsnNo INT64, PerId STRING, "
+                 + "FlNm STRING, BalAndCntlSmryTx STRING, StaCd STRING, "
                  + "CreatedTs TIMESTAMP, LstUpdtTs TIMESTAMP. "
-                 + "The table is never created automatically — provision it before the first run.")
-    @Default.String("data_source_checkpoints")
-    String getCheckpointBqTable();
-    void setCheckpointBqTable(String value);
+                 + "One row per pipeline run. StaCd: LOADING → COMPLETED / FAILED_BNC / FAILED.")
+    @Default.String("DaRefer")
+    String getDaReferTable();
+    void setDaReferTable(String value);
 
-    @Description("BigQuery table name for source and report output records. "
-                 + "Schema: RecId STRING, dataSourceId INT64, RowDSJsonTx STRING, "
-                 + "LoadDt DATE, LstUpdtTs TIMESTAMP. "
-                 + "Replaces per-source output tables — all sources write here as JSON blobs.")
-    @Default.String("data_source_records")
-    String getRecordBqTable();
-    void setRecordBqTable(String value);
+    @Description("BigQuery table name for the DaRec record table. "
+                 + "Schema: RecId STRING, DaId INT64, RowDaJsonTx STRING, "
+                 + "LoadDt DATE, LstUpdtTs TIMESTAMP. Partitioned by LoadDt. "
+                 + "All source rows stored as JSON blobs, keyed by DaId.")
+    @Default.String("DaRec")
+    String getDaRecTable();
+    void setDaRecTable(String value);
+
+    @Description("BigQuery table name for the COM_CmnRptDtl common report detail table. "
+                 + "Schema: SrceSysNm STRING, FlNm STRING, SrceFlCreateTs TIMESTAMP, "
+                 + "FlDaJsonTx STRING, RecCt INT64, CreatTs TIMESTAMP, CreateUserId STRING, "
+                 + "LstUpdtTs TIMESTAMP, LstUpdtUserId STRING. "
+                 + "REPORT_PROCESSING writes final output rows here after each transform run.")
+    @Default.String("COM_CmnRptDtl")
+    String getCmnRptDtlTable();
+    void setCmnRptDtlTable(String value);
 
     // =========================================================================
     // SOURCE CONFIGURATION
