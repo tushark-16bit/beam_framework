@@ -139,7 +139,7 @@ public final class ExampleWorkflow {
 
         // ── Step 4: Run BQ transform query → materialise output table ─────────
 
-        BigQueryJobService bqJob = new BigQueryJobService(options);
+        BigQueryJobService bqJob = new BigQueryJobService();
         bqJob.runQueryToTable(resolvedQuery, transformOutputTable);
         LOG.info("Transform complete. Output in: {}", transformOutputTable);
 

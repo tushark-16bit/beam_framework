@@ -66,7 +66,6 @@ public final class DataSourcePipelineFactory {
     private Map<String, Long>                dataSourceIds;   // datasourceName → dataSourceId
     private DataSourceCheckpointAdapter      checkpointAdapter;
     private DataSourceRecordAdapter          recordAdapter;
-    private FrameworkOptions                 assembledOptions;
 
     /**
      * Validates parameters, assembles the Beam pipeline graph, and returns the pipeline
@@ -75,8 +74,6 @@ public final class DataSourcePipelineFactory {
      * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility.
      */
     public Pipeline assemble(FrameworkOptions options) {
-        assembledOptions = options;
-
         // ── Resolve job run ID ─────────────────────────────────────────────
         String jobRunId = options.getJobRunId();
         if (jobRunId == null || jobRunId.isBlank()) {
@@ -107,7 +104,7 @@ public final class DataSourcePipelineFactory {
         LOG.info("Will process {} of {} source(s)", toProcess.size(), sourceConfigs.size());
 
         // ── Step 4: Create LOADING checkpoints ────────────────────────────
-        dataSourceIds = new LinkedHashMap<>();
+        dataSourceIds = new HashMap<>();
         for (SourceConfig config : toProcess) {
             String dsNm = extractDsNm(config);
             long dsId = checkpointAdapter.createCheckpoint(
@@ -145,7 +142,13 @@ public final class DataSourcePipelineFactory {
                 LOG.warn("Pipeline failed for source '{}': {}", config.datasourceName, errorMsg);
                 checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
             } else {
-                runValidationAndUpdateCheckpoint(config, dsId);
+                try {
+                    runValidationAndUpdateCheckpoint(config, dsId);
+                } catch (Exception e) {
+                    LOG.error("Post-pipeline validation failed for '{}' (dataSourceId={}): {}",
+                              config.datasourceName, dsId, e.getMessage(), e);
+                    checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
+                }
             }
         }
     }
@@ -195,9 +198,19 @@ public final class DataSourcePipelineFactory {
     private void runValidationAndUpdateCheckpoint(SourceConfig config, long dsId) {
         ValidationConfig validation = config.validationConfig;
         long rowCount = recordAdapter.countRecords(dsId);
+
+        // -1 means the count query itself failed — treat as infrastructure error, not a BnC miss
+        if (rowCount == -1L) {
+            LOG.error("Record count query failed for '{}' (dataSourceId={}) — marking FAILED",
+                      config.datasourceName, dsId);
+            checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED,
+                "{\"error\":\"record count query failed — see pipeline logs\"}");
+            return;
+        }
         LOG.info("Record count for '{}' (dataSourceId={}): {}", config.datasourceName, dsId, rowCount);
 
         List<String> failures = new ArrayList<>();
+        boolean infraError = false;
 
         // Row count check
         if (validation.hasMinRowCheck() && rowCount < validation.minRowCount) {
@@ -214,12 +227,17 @@ public final class DataSourcePipelineFactory {
 
         for (BncRule rule : validation.bncRules) {
             double actual = recordAdapter.sumField(dsId, rule.field);
-            boolean passes = !Double.isNaN(actual) && rule.passes(actual);
-            bncSummary.put("srcAmount_" + rule.field, rule.expectedTotal);
-            bncSummary.put("dstAmount_" + rule.field, actual);
-            if (!passes) {
-                failures.add("BnC SUM(" + rule.field + ") actual=" + actual
-                    + " expected=" + rule.expectedTotal + " ±" + rule.tolerancePct * 100 + "%");
+            if (Double.isNaN(actual)) {
+                // NaN means the BQ query failed, not a data mismatch — mark FAILED, not FAILED_BNC
+                failures.add("BnC SUM(" + rule.field + ") query failed (infrastructure error — check logs)");
+                infraError = true;
+            } else {
+                bncSummary.put("srcAmount_" + rule.field, rule.expectedTotal);
+                bncSummary.put("dstAmount_" + rule.field, actual);
+                if (!rule.passes(actual)) {
+                    failures.add("BnC SUM(" + rule.field + ") actual=" + actual
+                        + " expected=" + rule.expectedTotal + " ±" + rule.tolerancePct * 100 + "%");
+                }
             }
         }
 
@@ -231,7 +249,8 @@ public final class DataSourcePipelineFactory {
         } else {
             bncSummary.put("status", "Not Matched");
             bncSummary.put("failures", failures);
-            staCd = DataSourceCheckpoint.STA_FAILED_BNC;
+            // Infrastructure failures (query errors) map to FAILED; data mismatches to FAILED_BNC
+            staCd = infraError ? DataSourceCheckpoint.STA_FAILED : DataSourceCheckpoint.STA_FAILED_BNC;
             LOG.warn("Validation FAILED for '{}': {}", config.datasourceName, failures);
         }
 
@@ -243,12 +262,12 @@ public final class DataSourcePipelineFactory {
 
     private static String extractDsNm(SourceConfig config) {
         if (config.bqFetchConfig != null) {
-            return config.bqFetchConfig.project + "."
+            return config.bqFetchConfig.projectId + "."
                 + config.bqFetchConfig.dataset + "."
                 + config.bqFetchConfig.table;
         }
-        if (config.fileConfig != null && config.fileConfig.fileLocation != null) {
-            return config.fileConfig.fileLocation;
+        if (config.fileConfig != null && config.fileConfig.location != null) {
+            return config.fileConfig.location;
         }
         if (config.apiConfig != null && config.apiConfig.endpoint != null) {
             return config.apiConfig.endpoint;

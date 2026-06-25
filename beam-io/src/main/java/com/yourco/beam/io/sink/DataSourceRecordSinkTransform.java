@@ -45,6 +45,8 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
 
     private final String recordTableRef; // project:dataset.table — BigQueryIO format
     private final long   dataSourceId;
+    private final String loadDt;         // captured once — all rows in this run share the same date
+    private final String lstUpdtTs;      // captured once — avoids per-element clock calls and midnight splits
 
     public DataSourceRecordSinkTransform(FrameworkOptions options, long dataSourceId) {
         String project = options.getCheckpointBqProject() != null
@@ -53,6 +55,8 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         this.recordTableRef = project + ":" + options.getCheckpointBqDataset()
                             + "." + options.getRecordBqTable();
         this.dataSourceId = dataSourceId;
+        this.loadDt       = LocalDate.now(ZoneOffset.UTC).toString();
+        this.lstUpdtTs    = Instant.now().toString();
     }
 
     @Override
@@ -60,7 +64,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         input
             .apply("Row-to-RecordTableRow", MapElements
                 .into(TypeDescriptor.of(TableRow.class))
-                .via(new RowToRecordTableRowFn(dataSourceId)))
+                .via(new RowToRecordTableRowFn(dataSourceId, loadDt, lstUpdtTs)))
             .apply("WriteTo-RecordTable", BigQueryIO.writeTableRows()
                 .to(recordTableRef)
                 .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
@@ -74,21 +78,24 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
 
         private static final long serialVersionUID = 1L;
 
-        private final long dataSourceId;
+        private final long   dataSourceId;
+        private final String loadDt;
+        private final String lstUpdtTs;
 
-        RowToRecordTableRowFn(long dataSourceId) {
+        RowToRecordTableRowFn(long dataSourceId, String loadDt, String lstUpdtTs) {
             this.dataSourceId = dataSourceId;
+            this.loadDt       = loadDt;
+            this.lstUpdtTs    = lstUpdtTs;
         }
 
         @Override
         public TableRow apply(Row row) {
-            String now = Instant.now().toString();
             return new TableRow()
                 .set("RecId",        UUID.randomUUID().toString())
                 .set("dataSourceId", dataSourceId)
                 .set("RowDSJsonTx",  JsonUtils.rowToJson(row))
-                .set("LoadDt",       LocalDate.now(ZoneOffset.UTC).toString())
-                .set("LstUpdtTs",    now);
+                .set("LoadDt",       loadDt)
+                .set("LstUpdtTs",    lstUpdtTs);
         }
     }
 }

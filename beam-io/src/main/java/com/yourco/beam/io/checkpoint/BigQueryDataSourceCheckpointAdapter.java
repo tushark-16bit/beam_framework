@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 /**
  * BigQuery implementation of {@link DataSourceCheckpointAdapter}.
@@ -49,7 +50,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
     public long createCheckpoint(String srcName, String perId, String dsNm) {
         long dsId  = nextDataSourceId();
         long vsnNo = nextVsnNo(srcName, perId);
-        String now = Instant.now().toString();
+        long nowMicros = TimeUnit.MILLISECONDS.toMicros(Instant.now().toEpochMilli());
 
         String sql = "INSERT INTO " + table
             + " (dataSourceId, srcName, vsnNo, PerId, DSNm, BalAndCntlSmryTx, StaCd, CreatedTs, LstUpdtTs)"
@@ -62,7 +63,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             .addNamedParameter("perId",  QueryParameterValue.string(perId))
             .addNamedParameter("dsNm",   QueryParameterValue.string(dsNm != null ? dsNm : ""))
             .addNamedParameter("staCd",  QueryParameterValue.string(DataSourceCheckpoint.STA_LOADING))
-            .addNamedParameter("now",    QueryParameterValue.timestamp(now))
+            .addNamedParameter("now",    QueryParameterValue.timestamp(nowMicros))
             .setUseLegacySql(false)
             .build();
 
@@ -74,7 +75,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
 
     @Override
     public void updateStatus(long dataSourceId, String staCd, String balAndCntlSmryTx) {
-        String now = Instant.now().toString();
+        long nowMicros = TimeUnit.MILLISECONDS.toMicros(Instant.now().toEpochMilli());
         String sql = "UPDATE " + table
             + " SET StaCd = @staCd, BalAndCntlSmryTx = @bnc, LstUpdtTs = @now"
             + " WHERE dataSourceId = @dsId";
@@ -84,7 +85,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             .addNamedParameter("bnc",   balAndCntlSmryTx != null
                                         ? QueryParameterValue.string(balAndCntlSmryTx)
                                         : QueryParameterValue.string(""))
-            .addNamedParameter("now",   QueryParameterValue.timestamp(now))
+            .addNamedParameter("now",   QueryParameterValue.timestamp(nowMicros))
             .addNamedParameter("dsId",  QueryParameterValue.int64(dataSourceId))
             .setUseLegacySql(false)
             .build();
@@ -95,25 +96,25 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
 
     @Override
     public boolean isCompleted(String srcName, String perId) {
-        String sql = "SELECT StaCd FROM " + table
-            + " WHERE srcName = @srcName AND PerId = @perId"
-            + " ORDER BY LstUpdtTs DESC LIMIT 1";
+        // Filter on StaCd before ordering so a newer LOADING/FAILED row cannot shadow
+        // an older COMPLETED row for the same (srcName, PerId) pair.
+        String sql = "SELECT dataSourceId FROM " + table
+            + " WHERE srcName = @srcName AND PerId = @perId AND StaCd = @completed"
+            + " LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("srcName", QueryParameterValue.string(srcName))
-            .addNamedParameter("perId",   QueryParameterValue.string(perId))
+            .addNamedParameter("srcName",   QueryParameterValue.string(srcName))
+            .addNamedParameter("perId",     QueryParameterValue.string(perId))
+            .addNamedParameter("completed", QueryParameterValue.string(DataSourceCheckpoint.STA_COMPLETED))
             .setUseLegacySql(false)
             .build();
 
         try {
-            for (FieldValueList row : bigquery.query(config).iterateAll()) {
-                return DataSourceCheckpoint.STA_COMPLETED.equals(row.get("StaCd").getStringValue());
-            }
+            return bigquery.query(config).iterateAll().iterator().hasNext();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("BQ checkpoint query interrupted", e);
         }
-        return false;
     }
 
     @Override

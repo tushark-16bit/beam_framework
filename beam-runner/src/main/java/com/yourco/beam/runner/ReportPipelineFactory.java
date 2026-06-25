@@ -179,17 +179,29 @@ public final class ReportPipelineFactory {
                                                     FrameworkOptions options) {
         Map<String, String> registry = new LinkedHashMap<>();
         BigQueryReportRepository bqRepo = new BigQueryReportRepository(options);
+        String project = options.getCheckpointBqProject() != null
+                         && !options.getCheckpointBqProject().isBlank()
+                         ? options.getCheckpointBqProject() : options.getProject();
+        String recordTable = project + "." + options.getCheckpointBqDataset()
+                           + "." + options.getRecordBqTable();
+
         for (ReportDatasourceRef ref : config.datasources) {
             // Resolve the dataSourceId of the most recent COMPLETED run for this datasource.
             // The alias expands to a record-table subquery; transform SQL uses JSON_VALUE to
             // extract individual columns: JSON_VALUE({alias}.RowDSJsonTx, '$.fieldName').
-            long dsDatId = bqRepo.fetchDatasourceDataSourceId(
-                ref.datasourceName, config.periodId, options);
-            String project = options.getCheckpointBqProject() != null
-                             && !options.getCheckpointBqProject().isBlank()
-                             ? options.getCheckpointBqProject() : options.getProject();
-            String recordTable = project + "." + options.getCheckpointBqDataset()
-                               + "." + options.getRecordBqTable();
+            long dsDatId;
+            try {
+                dsDatId = bqRepo.fetchDatasourceDataSourceId(
+                    ref.datasourceName, config.periodId, options);
+            } catch (IllegalArgumentException e) {
+                if (ref.required) {
+                    throw e;  // required datasource must be present — re-throw
+                }
+                LOG.warn("Optional datasource '{}' has no COMPLETED run for period={} "
+                         + "— alias '{}' will not be registered",
+                         ref.datasourceName, config.periodId, ref.transformAlias);
+                continue;
+            }
             String subquery = "(SELECT RowDSJsonTx FROM `" + recordTable
                             + "` WHERE dataSourceId = " + dsDatId + ")";
             registry.put(ref.transformAlias, subquery);
