@@ -20,21 +20,21 @@ import java.util.UUID;
 /**
  * Writes a {@code PCollection<Row>} to the {@code DaRec} record table.
  *
- * <p>Every row is serialised as a JSON blob in {@code RowDaJsonTx}.
- * All rows from one run share the same {@code DaId} (FK → {@code DaRefer.DaId}).
+ * <p>Every row is serialised as a JSON blob in {@code row_da_json_tx}.
+ * All rows from one run share the same {@code da_id} (FK → {@code DaRefer.da_id}).
  *
- * <p>{@code LoadDt} and {@code LstUpdtTs} are captured once in the constructor so that
+ * <p>{@code load_dt} and {@code lst_updt_ts} are captured once in the constructor so that
  * retried Beam bundles and runs spanning midnight all land in the same partition.
  *
  * <p>The DaRec table must already exist ({@code CREATE_NEVER}):
  * <pre>{@code
  * CREATE TABLE pipeline_metadata.DaRec (
- *   RecId        STRING    NOT NULL,
- *   DaId         INT64     NOT NULL,
- *   RowDaJsonTx  STRING,
- *   LoadDt       DATE      NOT NULL,
- *   LstUpdtTs    TIMESTAMP NOT NULL
- * ) PARTITION BY LoadDt;
+ *   rec_id         STRING    NOT NULL,
+ *   da_id          INT64     NOT NULL,
+ *   row_da_json_tx STRING,
+ *   load_dt        DATE      NOT NULL,
+ *   lst_updt_ts    TIMESTAMP NOT NULL
+ * ) PARTITION BY load_dt;
  * }</pre>
  */
 public final class DataSourceRecordSinkTransform extends PTransform<PCollection<Row>, PDone> {
@@ -42,17 +42,17 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
     private static final long serialVersionUID = 1L;
 
     private final String recordTableRef; // project:dataset.table — BigQueryIO format
-    private final long   DaId;
+    private final long   daId;
     private final String loadDt;         // captured once — all rows in this run share the same date
     private final String lstUpdtTs;      // captured once — avoids per-element clock calls
 
-    public DataSourceRecordSinkTransform(FrameworkOptions options, long DaId) {
+    public DataSourceRecordSinkTransform(FrameworkOptions options, long daId) {
         String project = options.getCheckpointBqProject() != null
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
         this.recordTableRef = project + ":" + options.getCheckpointBqDataset()
                             + "." + options.getDaRecTable();
-        this.DaId      = DaId;
+        this.daId      = daId;
         this.loadDt    = LocalDate.now(ZoneOffset.UTC).toString();
         this.lstUpdtTs = Instant.now().toString();
     }
@@ -62,7 +62,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         input
             .apply("Row-to-DaRecRow", MapElements
                 .into(TypeDescriptor.of(TableRow.class))
-                .via(new RowToDaRecFn(DaId, loadDt, lstUpdtTs)))
+                .via(new RowToDaRecFn(daId, loadDt, lstUpdtTs)))
             .apply("WriteTo-DaRec", BigQueryIO.writeTableRows()
                 .to(recordTableRef)
                 .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
@@ -75,12 +75,12 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
 
         private static final long serialVersionUID = 1L;
 
-        private final long   DaId;
+        private final long   daId;
         private final String loadDt;
         private final String lstUpdtTs;
 
-        RowToDaRecFn(long DaId, String loadDt, String lstUpdtTs) {
-            this.DaId      = DaId;
+        RowToDaRecFn(long daId, String loadDt, String lstUpdtTs) {
+            this.daId      = daId;
             this.loadDt    = loadDt;
             this.lstUpdtTs = lstUpdtTs;
         }
@@ -88,11 +88,11 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         @Override
         public TableRow apply(Row row) {
             return new TableRow()
-                .set("RecId",       UUID.randomUUID().toString())
-                .set("DaId",        DaId)
-                .set("RowDaJsonTx", JsonUtils.rowToJson(row))
-                .set("LoadDt",      loadDt)
-                .set("LstUpdtTs",   lstUpdtTs);
+                .set("rec_id",         UUID.randomUUID().toString())
+                .set("da_id",          daId)
+                .set("row_da_json_tx", JsonUtils.rowToJson(row))
+                .set("load_dt",        loadDt)
+                .set("lst_updt_ts",    lstUpdtTs);
         }
     }
 }

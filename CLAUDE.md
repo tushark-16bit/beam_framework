@@ -137,8 +137,8 @@ retry/RetryingDoFn.java               Generic retry + DLQ routing via TupleTag.
 
 model/FailedRecord.java               DLQ envelope. @DefaultCoder(SerializableCoder.class).
 model/Schemas.java                    RAW_JSON schema constant.
-model/DataSourceCheckpoint.java       Checkpoint row: dataSourceId, srcName, vsnNo, PerId, DSNm, BalAndCntlSmryTx, StaCd.
-model/DataSourceRecord.java           Record row: RecId (UUID), dataSourceId, RowDSJsonTx (JSON blob), LoadDt.
+model/DataSourceCheckpoint.java       Checkpoint row: daId, srceNm, vsnNo, perId, flNm, balAndCntlSmryTx, staCd. BQ cols: da_id, srce_nm, vsn_no, per_id, fl_nm, bal_and_cntl_smry_tx, sta_cd.
+model/DataSourceRecord.java           Record row: recId (UUID), daId, rowDaJsonTx (JSON blob), loadDt. BQ cols: rec_id, da_id, row_da_json_tx, load_dt.
 
 -- DATA_SOURCE_DOWNLOAD models --
 model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config.
@@ -181,10 +181,10 @@ sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ pat
 sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs (all sources).
 
 checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest().
-checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(dataSourceId)+1 sequence. MAX(vsnNo)+1 per (srcName,PerId).
+checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id).
 
-records/DataSourceRecordAdapter.java          Interface: countRecords(dataSourceId), sumField(dataSourceId, field).
-records/BigQueryDataSourceRecordAdapter.java  BQ query using JSON_VALUE(RowDSJsonTx, '$.field') for BnC sums.
+records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field).
+records/BigQueryDataSourceRecordAdapter.java  BQ query using JSON_VALUE(row_da_json_tx, '$.field') for BnC sums.
 
 email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
 email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
@@ -359,11 +359,11 @@ Main.runDataSourceDownload(options)
 │   │
 │   └─ for each SourceConfig:
 │       ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()  skip if COMPLETED
-│       ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId (LOADING row)
+│       ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id (LOADING row)
 │       ├─ SourceRouter.routeFromConfig()                     API / FILE / BQ → PCollection<Row>
 │       │   └─ QueryParameterResolver.resolve()               inject {periodStart}, custom tokens
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
-│       └─ DataSourceRecordSinkTransform(dataSourceId)        rows → JSON blobs → data_source_records
+│       └─ DataSourceRecordSinkTransform(da_id)               rows → JSON blobs → DaRec
 │
 ├─ Pipeline assembled. No data has moved.
 ├─ pipeline.run()                                      submit to Dataflow (or DirectRunner)
@@ -371,10 +371,10 @@ Main.runDataSourceDownload(options)
 │
 └─ DataSourcePipelineFactory.runPostPipelineSteps(state, error)
     └─ for each SourceConfig that ran:
-        ├─ BigQueryDataSourceRecordAdapter.countRecords(dataSourceId)
-        ├─ BigQueryDataSourceRecordAdapter.sumField(dataSourceId, field) per BnC rule
+        ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)
+        ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule
         ├─ ValidationConfig checks (row count bounds, BnC SUM via JSON_VALUE)
-        └─ BigQueryDataSourceCheckpointAdapter.updateStatus(dataSourceId, COMPLETED/FAILED_BNC/FAILED, bncJson)
+        └─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
 ```
 
 ---
@@ -393,7 +393,7 @@ Main.runReportProcessing(options)
     │                                                   report_transformation_config,
     │                                                   report_output_config, report_email_config)
     ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint(reportName, periodId, reportName)
-    │   → dataSourceId (LOADING row in data_source_checkpoints)
+    │   → da_id (LOADING row in DaRefer)
     │
     ├─ Phase 1: Preprocessing (optional)
     │   └─ for each ReportPreprocessingStep (by step_order):
@@ -401,11 +401,11 @@ Main.runReportProcessing(options)
     │
     ├─ Phase 2: Datasource availability check
     │   └─ for each required ReportDatasourceRef:
-    │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srcName, perId) → must be true
+    │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srceNm, perId) → must be true
     │
     ├─ Phase 3: Build alias registry
-    │   └─ BigQueryReportRepository.fetchDatasourceDataSourceId() × N
-    │       → alias → record-table subquery (SELECT RowDSJsonTx ... WHERE dataSourceId=X)
+    │   └─ BigQueryReportRepository.fetchDatasourceDaId() × N
+    │       → alias → record-table subquery (SELECT row_da_json_tx ... WHERE da_id=X)
     │
     ├─ Phase 4: Transformation chain
     │   └─ for each ReportTransformStep (by step_order):
@@ -424,8 +424,8 @@ Main.runReportProcessing(options)
     │   ├─ resolve subject/body templates ({reportName}, {periodId}, etc.)
     │   └─ SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
     │
-    └─ BigQueryDataSourceCheckpointAdapter.updateStatus(dataSourceId, COMPLETED, null)
-       or updateStatus(dataSourceId, FAILED, null) if any phase threw
+    └─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED, null)
+       or updateStatus(daId, FAILED, null) if any phase threw
 ```
 
 ---
@@ -553,29 +553,29 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 
 ## 13. DataSourceCheckpointAdapter — lifecycle contract
 
-One row per run in `data_source_checkpoints`. Both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` use this table.
+One row per run in `DaRefer`. Both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` use this table.
 
 ```
 // Before pipeline.run() / report.execute():
-long dsId = adapter.createCheckpoint(srcName, perId, dsNm)
+long dsId = adapter.createCheckpoint(srceNm, perId, flNm)
     — inserts LOADING row
-    — dataSourceId = SELECT MAX(dataSourceId)+1 FROM checkpoints  (BQ sequence)
-    — vsnNo = SELECT MAX(vsnNo)+1 WHERE srcName=X AND PerId=Y     (per-source version)
-    — returns dataSourceId for use in all record rows and final updateStatus()
+    — da_id = SELECT MAX(da_id)+1 FROM DaRefer  (BQ sequence)
+    — vsn_no = SELECT MAX(vsn_no)+1 WHERE srce_nm=X AND per_id=Y  (per-source version)
+    — returns da_id for use in all record rows and final updateStatus()
 
 // After waitUntilFinish() / report completes:
-adapter.updateStatus(dataSourceId, DataSourceCheckpoint.STA_COMPLETED, bncJson)
-adapter.updateStatus(dataSourceId, DataSourceCheckpoint.STA_FAILED_BNC, bncJson)
-adapter.updateStatus(dataSourceId, DataSourceCheckpoint.STA_FAILED, null)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_COMPLETED, bncJson)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED_BNC, bncJson)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED, null)
 
 // Skip-logic check (DATA_SOURCE_DOWNLOAD):
-adapter.isCompleted(srcName, perId) — true if latest StaCd == 'COMPLETED'
+adapter.isCompleted(srceNm, perId) — true if latest sta_cd == 'COMPLETED'
 
 // DataSourceRecordAdapter — validates written records:
-recordAdapter.countRecords(dataSourceId)               — COUNT(*) for row-count check
-recordAdapter.sumField(dataSourceId, "amount")         — SUM(JSON_VALUE(RowDSJsonTx, '$.amount'))
+recordAdapter.countRecords(daId)               — COUNT(*) for row-count check
+recordAdapter.sumField(daId, "amount")         — SUM(JSON_VALUE(row_da_json_tx, '$.amount'))
 
-// BalAndCntlSmryTx JSON written on COMPLETED or FAILED_BNC:
+// bal_and_cntl_smry_tx JSON written on COMPLETED or FAILED_BNC:
 { "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
 ```
 
@@ -627,12 +627,12 @@ inject it into `ReportPipelineFactory` via constructor.
 
 | Concept | Table | Written by | Read by |
 |---|---|---|---|
-| "Start/end of a source or report run" | `data_source_checkpoints` | `DataSourcePipelineFactory`, `ReportPipelineFactory` | `DataSourcePipelineFactory` (skip logic), `ReportPipelineFactory` (DS availability check) |
-| "Loaded rows from any source/report" | `data_source_records` | `DataSourceRecordSinkTransform` (Beam workers) | `BigQueryDataSourceRecordAdapter` (validation), report transform chain |
+| "Start/end of a source or report run" | `DaRefer` | `DataSourcePipelineFactory`, `ReportPipelineFactory` | `DataSourcePipelineFactory` (skip logic), `ReportPipelineFactory` (DS availability check) |
+| "Loaded rows from any source/report" | `DaRec` | `DataSourceRecordSinkTransform` (Beam workers) | `BigQueryDataSourceRecordAdapter` (validation), report transform chain |
 
 Checkpoint lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED`.
-All rows from one run share the same `dataSourceId` — shard-safe.
-`vsnNo` increments each time (srcName, PerId) is re-run.
+All rows from one run share the same `da_id` — shard-safe.
+`vsn_no` increments each time `(srce_nm, per_id)` is re-run.
 
 ---
 

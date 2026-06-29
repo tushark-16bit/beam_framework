@@ -80,30 +80,30 @@ sequenceDiagram
 
     Main->>DSF: assemble(options)
     DSF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
-    Per-->>DSF: Period (PerDt, MoNo, YrNo, PerTypeCd)
+    Per-->>DSF: Period (per_dt, mo_no, yr_no, per_typ_cd)
     DSF->>BQCfg: BigQuerySourceConfigRepository.getMissingParameters(parentId, datasource, subprocess, period)
     BQCfg-->>DSF: [] or list of missing keys (fail fast if non-empty)
     DSF->>BQCfg: BigQuerySourceConfigRepository.fetchSourceConfigs(parentId, datasource, subprocess, period)
     BQCfg-->>DSF: List<SourceConfig>
 
     loop for each SourceConfig
-        DSF->>Checkpoint: isCompleted(SrceNm, PerId)
+        DSF->>Checkpoint: isCompleted(srce_nm, per_id)
         Checkpoint-->>DSF: true / false
         alt already COMPLETED and not overrideDownload
             DSF->>DSF: skip this source
         else
-            DSF->>Checkpoint: createCheckpoint(SrceNm, PerId, FlNm)
-            Checkpoint-->>DSF: DaId (MAX(DaId)+1 across DaRefer)
+            DSF->>Checkpoint: createCheckpoint(srce_nm, per_id, fl_nm)
+            Checkpoint-->>DSF: da_id (MAX(da_id)+1 across DaRefer)
             DSF->>Beam: SourceRouter.routeFromConfig() → PCollection<Row>
             DSF->>Beam: SourceTransformChainAssembler.assemble() → PCollection<Row>
-            DSF->>Beam: DataSourceRecordSinkTransform(DaId)
+            DSF->>Beam: DataSourceRecordSinkTransform(da_id)
         end
     end
 
     DSF-->>Main: Pipeline (graph assembled, no data moved yet)
 
     Main->>Beam: pipeline.run()
-    Beam->>DaRec: streams rows as JSON blobs (RecId, DaId, RowDaJsonTx, LoadDt)
+    Beam->>DaRec: streams rows as JSON blobs (rec_id, da_id, row_da_json_tx, load_dt)
     Beam-->>Main: PipelineResult
 
     Main->>Main: result.waitUntilFinish()
@@ -111,18 +111,18 @@ sequenceDiagram
 
     loop for each SourceConfig that ran
         alt pipeline DONE or UPDATED
-            DSF->>DaRec: COUNT(*) WHERE DaId = X
+            DSF->>DaRec: COUNT(*) WHERE da_id = X
             DaRec-->>DSF: rowCount
-            DSF->>DaRec: SUM(JSON_VALUE(RowDaJsonTx, @field)) WHERE DaId = X (BnC)
+            DSF->>DaRec: SUM(JSON_VALUE(row_da_json_tx, @field)) WHERE da_id = X (BnC)
             DaRec-->>DSF: actual sum
             DSF->>DSF: ValidationConfig checks (min/max rows, BnC tolerance%)
             alt all checks pass
-                DSF->>Checkpoint: updateStatus(DaId, COMPLETED, bncJson)
+                DSF->>Checkpoint: updateStatus(da_id, COMPLETED, bncJson)
             else validation failed
-                DSF->>Checkpoint: updateStatus(DaId, FAILED_BNC, bncJson)
+                DSF->>Checkpoint: updateStatus(da_id, FAILED_BNC, bncJson)
             end
         else pipeline FAILED
-            DSF->>Checkpoint: updateStatus(DaId, FAILED, null)
+            DSF->>Checkpoint: updateStatus(da_id, FAILED, null)
         end
     end
 ```
@@ -151,8 +151,8 @@ flowchart TD
         D1 --> D2["GROUP_BY transform\n(if configured)\nGroupByTransform\nMapElements → GroupByKey → AggregateDoFn"]
         D2 --> D3["SORT_BY transform\n(if configured)\nSortByTransform\nper-bundle sort only"]
 
-        D3 --> F["DataSourceRecordSinkTransform\nserialize Row → JSON (JsonUtils.rowToJson)\nset RecId=UUID, DaId, LoadDt\nBigQueryIO.writeTableRows() APPEND"]
-        F --> RecTab[("DaRec\nRecId, DaId\nRowDaJsonTx, LoadDt")]
+        D3 --> F["DataSourceRecordSinkTransform\nserialize Row → JSON (JsonUtils.rowToJson)\nset rec_id=UUID, da_id, load_dt\nBigQueryIO.writeTableRows() APPEND"]
+        F --> RecTab[("DaRec\nrec_id, da_id\nrow_da_json_tx, load_dt")]
     end
 
     subgraph "Driver JVM (before pipeline.run)"
@@ -161,9 +161,9 @@ flowchart TD
     end
 
     subgraph "Driver JVM (after waitUntilFinish)"
-        RecTab --> I["DataSourceRecordAdapter\n.countRecords(DaId)\n.sumField(DaId, field)"]
+        RecTab --> I["DataSourceRecordAdapter\n.countRecords(da_id)\n.sumField(da_id, field)"]
         I --> J["ValidationConfig\nmin/max row count\nBnC JSON_VALUE SUM checks"]
-        J --> K[("DaRefer\nCOMPLETED / FAILED_BNC / FAILED\n+ BalAndCntlSmryTx JSON")]
+        J --> K[("DaRefer\nCOMPLETED / FAILED_BNC / FAILED\n+ bal_and_cntl_smry_tx JSON")]
     end
 ```
 
@@ -223,15 +223,15 @@ sequenceDiagram
     rect rgb(230, 240, 255)
         Note over RPF,Per: Phase 1 — Period + config load
         RPF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
-        Per-->>RPF: Period (PerDt, MoNo, YrNo, PerTypeCd)
+        Per-->>RPF: Period (per_dt, mo_no, yr_no, per_typ_cd)
         RPF->>BQRepo: fetchReportConfig(reportName, subprocess, periodId)
         BQRepo->>CfgBQ: SELECT FROM report_config, report_datasource_ref,<br/>report_preprocessing_config, report_transformation_config,<br/>report_output_config, report_email_config
         CfgBQ-->>BQRepo: rows
         BQRepo-->>RPF: ReportConfig
     end
 
-    RPF->>Checkpoint: createCheckpoint(SrceNm=reportName, PerId, FlNm=reportName)
-    Checkpoint-->>RPF: DaId (LOADING row inserted into DaRefer)
+    RPF->>Checkpoint: createCheckpoint(srce_nm=reportName, per_id, fl_nm=reportName)
+    Checkpoint-->>RPF: da_id (LOADING row inserted into DaRefer)
 
     rect rgb(255, 245, 220)
         Note over RPF,DataBQ: Phase 2 — Preprocessing (optional)
@@ -246,11 +246,11 @@ sequenceDiagram
     rect rgb(255, 235, 235)
         Note over RPF,Checkpoint: Phase 3 — Datasource availability check
         loop each required ReportDatasourceRef
-            RPF->>Checkpoint: isCompleted(SrceNm=datasourceName, PerId)
-            Checkpoint->>DaRec: SELECT DaId FROM DaRefer WHERE SrceNm=? AND PerId=? AND StaCd='COMPLETED'
-            DaRec-->>Checkpoint: DaId or empty
+            RPF->>Checkpoint: isCompleted(srce_nm=datasourceName, per_id)
+            Checkpoint->>DaRec: SELECT da_id FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED'
+            DaRec-->>Checkpoint: da_id or empty
             alt no COMPLETED row
-                RPF->>Checkpoint: updateStatus(DaId, FAILED, null)
+                RPF->>Checkpoint: updateStatus(da_id, FAILED, null)
                 RPF-->>Main: throws RuntimeException
             end
         end
@@ -260,9 +260,9 @@ sequenceDiagram
         Note over RPF,DaRec: Phase 4 — Build alias registry
         loop each ReportDatasourceRef
             RPF->>BQRepo: fetchDatasourceDaId(datasourceName, periodId)
-            BQRepo->>DaRec: SELECT DaId FROM DaRefer WHERE SrceNm=? AND PerId=? AND StaCd='COMPLETED'
-            DaRec-->>BQRepo: DaId
-            RPF->>RPF: aliasRegistry.put(alias, "SELECT RowDaJsonTx FROM DaRec WHERE DaId=X")
+            BQRepo->>DaRec: SELECT da_id FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED'
+            DaRec-->>BQRepo: da_id
+            RPF->>RPF: aliasRegistry.put(alias, "SELECT row_da_json_tx FROM DaRec WHERE da_id=X")
         end
     end
 
@@ -293,7 +293,7 @@ sequenceDiagram
                 Router->>Router: POST JSON array (auth from Secret Manager)
                 Router-->>RPF: OutputResult(API, endpoint, rowCount, hasAttachment=false)
             end
-            RPF->>CmnRpt: insertDetail(SrceSysNm=reportName, FlNm, RecCt, userId)
+            RPF->>CmnRpt: insertDetail(srce_sys_nm=reportName, fl_nm, rec_ct, userId)
         end
     end
 
@@ -308,7 +308,7 @@ sequenceDiagram
         end
     end
 
-    RPF->>Checkpoint: updateStatus(DaId, COMPLETED, null) or (FAILED, null)
+    RPF->>Checkpoint: updateStatus(da_id, COMPLETED, null) or (FAILED, null)
 ```
 
 ### 6b. ExampleWorkflow — key-value BigQueryParameterAdapter pattern
@@ -394,7 +394,7 @@ flowchart TD
 ## 8. DaRefer State Machine
 
 Both `DATA_SOURCE_DOWNLOAD` (per source) and `REPORT_PROCESSING` write to `DaRefer`.
-Each run creates one row (`StaCd=LOADING`), then updates it to a terminal state.
+Each run creates one row (`sta_cd=LOADING`), then updates it to a terminal state.
 
 ```mermaid
 stateDiagram-v2
@@ -412,14 +412,14 @@ stateDiagram-v2
 
     note right of LOADING
         createCheckpoint() inserts into DaRefer.
-        DaId = MAX(DaId)+1 across all DaRefer rows.
-        VsnNo = MAX(VsnNo)+1 per (SrceNm, PerId).
-        All DaRec rows for this run share the same DaId.
+        da_id = MAX(da_id)+1 across all DaRefer rows.
+        vsn_no = MAX(vsn_no)+1 per (srce_nm, per_id).
+        All DaRec rows for this run share the same da_id.
     end note
 
     note right of COMPLETED
-        updateStatus() sets StaCd and BalAndCntlSmryTx.
-        BalAndCntlSmryTx JSON: {status, srcCount, dstCount,
+        updateStatus() sets sta_cd and bal_and_cntl_smry_tx.
+        bal_and_cntl_smry_tx JSON: {status, srcCount, dstCount,
         srcAmount_X, dstAmount_X} per BnC field.
     end note
 ```
@@ -471,20 +471,20 @@ classDiagram
     }
 
     class DataSourceCheckpoint {
-        +long DaId
-        +String SrceNm
-        +long VsnNo
-        +String PerId
-        +String FlNm
+        +long daId
+        +String srceNm
+        +long vsnNo
+        +String perId
+        +String flNm
         +String balAndCntlSmryTx
-        +String StaCd
-        +Instant CreatedTs
-        +Instant LstUpdtTs
+        +String staCd
+        +Instant createdTs
+        +Instant lstUpdtTs
         +static STA_LOADING
         +static STA_COMPLETED
         +static STA_FAILED_BNC
         +static STA_FAILED
-        +static loading(DaId, VsnNo, SrceNm, PerId, FlNm)
+        +static loading(daId, vsnNo, srceNm, perId, flNm)
     }
 
     class ReportConfig {
@@ -549,12 +549,12 @@ erDiagram
     }
 
     MSTR_Per {
-        STRING PerId PK
-        DATE PerDt
-        INT64 MoNo
-        STRING YrNo
-        STRING PerTypeCd
-        TIMESTAMP LstUpdtTs
+        STRING per_id PK
+        DATE per_dt
+        INT64 mo_no
+        STRING yr_no
+        STRING per_typ_cd
+        TIMESTAMP lst_updt_ts
     }
 
     report_config {
@@ -640,55 +640,55 @@ Both process types use `DaRefer`. `DATA_SOURCE_DOWNLOAD` writes `DaRec`. `REPORT
 ```mermaid
 erDiagram
     DaRefer {
-        INT64 DaId PK
-        STRING SrceNm
-        INT64 VsnNo
-        STRING PerId
-        STRING FlNm
-        STRING BalAndCntlSmryTx
-        STRING StaCd
-        TIMESTAMP CreatedTs
-        TIMESTAMP LstUpdtTs
+        INT64 da_id PK
+        STRING srce_nm
+        INT64 vsn_no
+        STRING per_id
+        STRING fl_nm
+        STRING bal_and_cntl_smry_tx
+        STRING sta_cd
+        TIMESTAMP created_ts
+        TIMESTAMP lst_updt_ts
     }
 
     DaRec {
-        STRING RecId PK
-        INT64 DaId FK
-        STRING RowDaJsonTx
-        DATE LoadDt
-        TIMESTAMP LstUpdtTs
+        STRING rec_id PK
+        INT64 da_id FK
+        STRING row_da_json_tx
+        DATE load_dt
+        TIMESTAMP lst_updt_ts
     }
 
     COM_CmnRptDtl {
-        STRING SrceSysNm
-        STRING FlNm
-        TIMESTAMP SrceFlCreateTs
-        STRING FlDaJsonTx
-        INT64 RecCt
-        TIMESTAMP CreatTs
-        STRING CreateUserId
-        TIMESTAMP LstUpdtTs
-        STRING LstUpdtUserId
+        STRING srce_sys_nm
+        STRING fl_nm
+        TIMESTAMP srce_fl_create_ts
+        STRING fl_da_json_tx
+        INT64 rec_ct
+        TIMESTAMP creat_ts
+        STRING create_user_id
+        TIMESTAMP lst_updt_ts
+        STRING lst_updt_user_id
     }
 
-    DaRefer ||--o{ DaRec : "DaId (DATA_SOURCE_DOWNLOAD rows)"
-    DaRefer ||--o{ COM_CmnRptDtl : "SrceNm = SrceSysNm (REPORT_PROCESSING outputs)"
+    DaRefer ||--o{ DaRec : "da_id (DATA_SOURCE_DOWNLOAD rows)"
+    DaRefer ||--o{ COM_CmnRptDtl : "srce_nm = srce_sys_nm (REPORT_PROCESSING outputs)"
 ```
 
-`StaCd` values: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`.
+`sta_cd` values: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`.
 
-For `DATA_SOURCE_DOWNLOAD`: `SrceNm` = datasource name, `FlNm` = BQ table ref / file path / API endpoint.
-For `REPORT_PROCESSING`: `SrceNm` = report name, `FlNm` = report name.
+For `DATA_SOURCE_DOWNLOAD`: `srce_nm` = datasource name, `fl_nm` = BQ table ref / file path / API endpoint.
+For `REPORT_PROCESSING`: `srce_nm` = report name, `fl_nm` = report name.
 
-`VsnNo` increments each time the same `(SrceNm, PerId)` is re-run (e.g. after `--overrideDownload=true`).
+`vsn_no` increments each time the same `(srce_nm, per_id)` is re-run (e.g. after `--overrideDownload=true`).
 
-`BalAndCntlSmryTx` (BnC summary JSON, DATA_SOURCE_DOWNLOAD only):
+`bal_and_cntl_smry_tx` (BnC summary JSON, DATA_SOURCE_DOWNLOAD only):
 ```json
 { "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
 ```
 
 `COM_CmnRptDtl` — one row per output step, written by `REPORT_PROCESSING` for all sink types (GCS, BQ, API).
-`FlNm` = GCS file name, destination BQ table, or API endpoint. `RecCt` = row count written to that sink.
+`fl_nm` = GCS file name, destination BQ table, or API endpoint. `rec_ct` = row count written to that sink.
 
 ---
 

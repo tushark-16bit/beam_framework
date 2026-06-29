@@ -96,7 +96,7 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
 
     @Description("When true, re-downloads data even if a COMPLETED DaRefer row exists for "
                  + "this (datasourceName, periodId). Use for forced reprocessing. "
-                 + "Default is false: sources with StaCd=COMPLETED for the current period are skipped.")
+                 + "Default is false: sources with sta_cd=COMPLETED for the current period are skipped.")
     @Default.Boolean(false)
     boolean getOverrideDownload();
     void setOverrideDownload(boolean value);
@@ -191,26 +191,26 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setCheckpointBqDataset(String value);
 
     @Description("BigQuery table name for the DaRefer reference/checkpoint table. "
-                 + "Schema: DaId INT64, SrceNm STRING, VsnNo INT64, PerId STRING, "
-                 + "FlNm STRING, BalAndCntlSmryTx STRING, StaCd STRING, "
-                 + "CreatedTs TIMESTAMP, LstUpdtTs TIMESTAMP. "
-                 + "One row per pipeline run. StaCd: LOADING → COMPLETED / FAILED_BNC / FAILED.")
+                 + "Schema: da_id INT64, srce_nm STRING, vsn_no INT64, per_id STRING, "
+                 + "fl_nm STRING, bal_and_cntl_smry_tx STRING, sta_cd STRING, "
+                 + "created_ts TIMESTAMP, lst_updt_ts TIMESTAMP. "
+                 + "One row per pipeline run. sta_cd: LOADING → COMPLETED / FAILED_BNC / FAILED.")
     @Default.String("DaRefer")
     String getDaReferTable();
     void setDaReferTable(String value);
 
     @Description("BigQuery table name for the DaRec record table. "
-                 + "Schema: RecId STRING, DaId INT64, RowDaJsonTx STRING, "
-                 + "LoadDt DATE, LstUpdtTs TIMESTAMP. Partitioned by LoadDt. "
-                 + "All source rows stored as JSON blobs, keyed by DaId.")
+                 + "Schema: rec_id STRING, da_id INT64, row_da_json_tx STRING, "
+                 + "load_dt DATE, lst_updt_ts TIMESTAMP. Partitioned by load_dt. "
+                 + "All source rows stored as JSON blobs, keyed by da_id.")
     @Default.String("DaRec")
     String getDaRecTable();
     void setDaRecTable(String value);
 
     @Description("BigQuery table name for the COM_CmnRptDtl common report detail table. "
-                 + "Schema: SrceSysNm STRING, FlNm STRING, SrceFlCreateTs TIMESTAMP, "
-                 + "FlDaJsonTx STRING, RecCt INT64, CreatTs TIMESTAMP, CreateUserId STRING, "
-                 + "LstUpdtTs TIMESTAMP, LstUpdtUserId STRING. "
+                 + "Schema: srce_sys_nm STRING, fl_nm STRING, srce_fl_create_ts TIMESTAMP, "
+                 + "fl_da_json_tx STRING, rec_ct INT64, creat_ts TIMESTAMP, create_user_id STRING, "
+                 + "lst_updt_ts TIMESTAMP, lst_updt_user_id STRING. "
                  + "REPORT_PROCESSING writes final output rows here after each transform run.")
     @Default.String("COM_CmnRptDtl")
     String getCmnRptDtlTable();

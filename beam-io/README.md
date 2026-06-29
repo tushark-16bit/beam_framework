@@ -27,14 +27,14 @@ io/sink/
 
 io/checkpoint/
     DataSourceCheckpointAdapter         — interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest()
-    BigQueryDataSourceCheckpointAdapter — BQ DML impl; MAX(dataSourceId)+1 sequence, MAX(vsnNo)+1 per (srcName,PerId)
+    BigQueryDataSourceCheckpointAdapter — BQ DML impl; MAX(da_id)+1 sequence, MAX(vsn_no)+1 per (srce_nm, per_id)
 
 io/records/
-    DataSourceRecordAdapter         — interface: countRecords(dataSourceId), sumField(dataSourceId, field)
-    BigQueryDataSourceRecordAdapter — BQ query using JSON_VALUE(RowDSJsonTx, '$.field') for BnC validation
+    DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field)
+    BigQueryDataSourceRecordAdapter — BQ query using JSON_VALUE(row_da_json_tx, '$.field') for BnC validation
 
 io/sink/
-    DataSourceRecordSinkTransform   — Beam PTransform writing all rows as JSON blobs to data_source_records
+    DataSourceRecordSinkTransform   — Beam PTransform writing all rows as JSON blobs to DaRec (keyed by da_id)
 
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer

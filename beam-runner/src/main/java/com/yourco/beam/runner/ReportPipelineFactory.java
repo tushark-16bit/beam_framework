@@ -44,15 +44,15 @@ import java.util.Map;
  * <ol>
  *   <li>Resolve {@code PerId} via {@code MSTR_Per}</li>
  *   <li>Load {@link ReportConfig} from parameter DB</li>
- *   <li>Insert DaRefer row with {@code StaCd=LOADING}</li>
+ *   <li>Insert DaRefer row with {@code sta_cd=LOADING}</li>
  *   <li>Run preprocessing steps (BQ queries or API enrichment)</li>
- *   <li>Verify each required datasource has {@code StaCd=COMPLETED} in DaRefer for this period</li>
- *   <li>Build alias registry: alias → {@code SELECT RowDaJsonTx FROM DaRec WHERE DaId=X}</li>
+ *   <li>Verify each required datasource has {@code sta_cd=COMPLETED} in DaRefer for this period</li>
+ *   <li>Build alias registry: alias → {@code SELECT row_da_json_tx FROM DaRec WHERE da_id=X}</li>
  *   <li>Run transformation chain (BQ jobs, each materialised to a BQ table)</li>
  *   <li>Route each output via {@link ReportOutputSinkRouter} (GCS / BQ / API)</li>
  *   <li>Insert one {@code COM_CmnRptDtl} row per output</li>
  *   <li>Send email — GCS outputs as file attachments; BQ/API outputs noted in body</li>
- *   <li>Update DaRefer to {@code StaCd=COMPLETED} or {@code FAILED}</li>
+ *   <li>Update DaRefer to {@code sta_cd=COMPLETED} or {@code FAILED}</li>
  * </ol>
  */
 public final class ReportPipelineFactory {
@@ -100,7 +100,7 @@ public final class ReportPipelineFactory {
         DataSourceCheckpointAdapter checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(options);
         BigQueryCommonReportDetailAdapter cmnRptAdapter = new BigQueryCommonReportDetailAdapter(options);
         long dsId = checkpointAdapter.createCheckpoint(reportName, periodId, reportName);
-        LOG.info("REPORT_PROCESSING DaRefer LOADING row created: DaId={}", dsId);
+        LOG.info("REPORT_PROCESSING DaRefer LOADING row created: da_id={}", dsId);
 
         int outputCount = 0;
         try {
@@ -210,9 +210,9 @@ public final class ReportPipelineFactory {
                            + "." + options.getDaRecTable();
 
         for (ReportDatasourceRef ref : config.datasources) {
-            // Resolve the DaId of the most recent COMPLETED run for this datasource.
+            // Resolve the da_id of the most recent COMPLETED run for this datasource.
             // The alias expands to a DaRec subquery; transform SQL uses JSON_VALUE to
-            // extract individual columns: JSON_VALUE({alias}.RowDaJsonTx, '$.fieldName').
+            // extract individual columns: JSON_VALUE({alias}.row_da_json_tx, '$.fieldName').
             long daDatId;
             try {
                 daDatId = bqRepo.fetchDatasourceDaId(
@@ -226,8 +226,8 @@ public final class ReportPipelineFactory {
                          ref.datasourceName, config.periodId, ref.transformAlias);
                 continue;
             }
-            String subquery = "(SELECT RowDaJsonTx FROM `" + recordTable
-                            + "` WHERE DaId = " + daDatId + ")";
+            String subquery = "(SELECT row_da_json_tx FROM `" + recordTable
+                            + "` WHERE da_id = " + daDatId + ")";
             registry.put(ref.transformAlias, subquery);
             LOG.info("Alias '{}' → DaRec subquery (DaId={})", ref.transformAlias, daDatId);
         }
@@ -314,8 +314,8 @@ public final class ReportPipelineFactory {
      * All other values are treated as BQ table refs and wrapped with backticks.
      *
      * <p>For datasource aliases backed by the record table, the subquery form is:
-     * {@code (SELECT RowDaJsonTx FROM `DaRec` WHERE DaId = X)}.
-     * Transform SQL should use {@code JSON_VALUE({alias}.RowDaJsonTx, '$.fieldName')}
+     * {@code (SELECT row_da_json_tx FROM `DaRec` WHERE da_id = X)}.
+     * Transform SQL should use {@code JSON_VALUE({alias}.row_da_json_tx, '$.fieldName')}
      * to extract individual columns.
      */
     private static String resolveAliasTokens(String template,

@@ -13,7 +13,7 @@ import org.slf4j.LoggerFactory;
  * BigQuery implementation of {@link DataSourceRecordAdapter}.
  *
  * <p>Queries the {@code DaRec} table using {@code JSON_VALUE} to extract numeric
- * fields from {@code RowDaJsonTx} blobs. All queries filter by {@code DaId}.
+ * fields from {@code row_da_json_tx} blobs. All queries filter by {@code da_id}.
  */
 public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAdapter {
 
@@ -37,10 +37,10 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
     }
 
     @Override
-    public long countRecords(long DaId) {
-        String sql = "SELECT COUNT(*) AS cnt FROM " + table + " WHERE DaId = @daId";
+    public long countRecords(long daId) {
+        String sql = "SELECT COUNT(*) AS cnt FROM " + table + " WHERE da_id = @daId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
-            .addNamedParameter("daId", QueryParameterValue.int64(DaId))
+            .addNamedParameter("daId", QueryParameterValue.int64(daId))
             .setUseLegacySql(false)
             .build();
         try {
@@ -49,20 +49,20 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            LOG.warn("DaRec count query interrupted for DaId={}", DaId);
+            LOG.warn("DaRec count query interrupted for da_id={}", daId);
         } catch (Exception e) {
-            LOG.warn("DaRec count query failed for DaId={}: {}", DaId, e.getMessage());
+            LOG.warn("DaRec count query failed for da_id={}: {}", daId, e.getMessage());
         }
         return -1L;
     }
 
     @Override
-    public double sumField(long DaId, String field) {
-        String sql = "SELECT SUM(CAST(JSON_VALUE(RowDaJsonTx, @jsonPath) AS FLOAT64)) AS total"
-            + " FROM " + table + " WHERE DaId = @daId";
+    public double sumField(long daId, String field) {
+        String sql = "SELECT SUM(CAST(JSON_VALUE(row_da_json_tx, @jsonPath) AS FLOAT64)) AS total"
+            + " FROM " + table + " WHERE da_id = @daId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("jsonPath", QueryParameterValue.string("$." + field))
-            .addNamedParameter("daId",     QueryParameterValue.int64(DaId))
+            .addNamedParameter("daId",     QueryParameterValue.int64(daId))
             .setUseLegacySql(false)
             .build();
         try {
@@ -72,9 +72,9 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            LOG.warn("DaRec sum query interrupted for DaId={}, field={}", DaId, field);
+            LOG.warn("DaRec sum query interrupted for da_id={}, field={}", daId, field);
         } catch (Exception e) {
-            LOG.warn("DaRec sum query failed for DaId={}, field={}: {}", DaId, field, e.getMessage());
+            LOG.warn("DaRec sum query failed for da_id={}, field={}: {}", daId, field, e.getMessage());
         }
         return Double.NaN;
     }

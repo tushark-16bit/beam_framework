@@ -32,17 +32,17 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.dw.parameter_store` (
 );
 
 -- Period master: one row per period. Pre-populated; framework reads only.
--- PerId encoding:
+-- per_id encoding:
 --   YYYYMM       → MONTHLY    (203012 = Dec 2030)
 --   YYYYMMDD     → DAILY      (20301112 = 12 Nov 2030)
 --   YYYYMMDDQQ   → QUARTERLY  (2030111201 = 12 Nov 2030 Q1)
 CREATE TABLE IF NOT EXISTS `my-gcp-project.dw.MSTR_Per` (
-  PerId      STRING    NOT NULL,
-  PerDt      DATE      NOT NULL,   -- the specific date for this period
-  MoNo       INT64     NOT NULL,   -- calendar month (1–12)
-  YrNo       STRING    NOT NULL,   -- fiscal year label e.g. "25-26"
-  PerTypeCd  STRING    NOT NULL,   -- MONTHLY | DAILY | ANNUALLY | QUARTERLY
-  LstUpdtTs  TIMESTAMP NOT NULL
+  per_id      STRING    NOT NULL,
+  per_dt      DATE      NOT NULL,   -- the specific date for this period
+  mo_no       INT64     NOT NULL,   -- calendar month (1–12)
+  yr_no       STRING    NOT NULL,   -- fiscal year label e.g. "25-26"
+  per_typ_cd  STRING    NOT NULL,   -- MONTHLY | DAILY | ANNUALLY | QUARTERLY
+  lst_updt_ts TIMESTAMP NOT NULL
 );
 
 -- Raw trades source data (example source for DATA_SOURCE_DOWNLOAD)
@@ -70,40 +70,40 @@ CREATE SCHEMA IF NOT EXISTS `my-gcp-project.pipeline_metadata`;
 -- DaRefer: one row per pipeline run (DATA_SOURCE_DOWNLOAD or REPORT_PROCESSING).
 -- Created LOADING before the run; updated to COMPLETED / FAILED_BNC / FAILED after.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.DaRefer` (
-  DaId              INT64     NOT NULL,   -- surrogate PK: MAX(DaId)+1 per run
-  SrceNm            STRING    NOT NULL,   -- data source name or report name
-  VsnNo             INT64     NOT NULL,   -- rerun counter per (SrceNm, PerId): 1, 2, 3 …
-  PerId             STRING    NOT NULL,   -- period identifier (from MSTR_Per)
-  FlNm              STRING,               -- source location: BQ table, GCS path, or API endpoint
-  BalAndCntlSmryTx  STRING,               -- JSON BnC summary: {status, srcCount, dstCount, …}
-  StaCd             STRING    NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED
-  CreatedTs         TIMESTAMP NOT NULL,
-  LstUpdtTs         TIMESTAMP NOT NULL
+  da_id              INT64     NOT NULL,   -- surrogate PK: MAX(da_id)+1 per run
+  srce_nm            STRING    NOT NULL,   -- data source name or report name
+  vsn_no             INT64     NOT NULL,   -- rerun counter per (srce_nm, per_id): 1, 2, 3 …
+  per_id             STRING    NOT NULL,   -- period identifier (from MSTR_Per)
+  fl_nm              STRING,               -- source location: BQ table, GCS path, or API endpoint
+  bal_and_cntl_smry_tx STRING,            -- JSON BnC summary: {status, srcCount, dstCount, …}
+  sta_cd             STRING    NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED
+  created_ts         TIMESTAMP NOT NULL,
+  lst_updt_ts        TIMESTAMP NOT NULL
 );
 
 -- DaRec: all data rows from every DATA_SOURCE_DOWNLOAD run, stored as JSON blobs.
--- Filter by DaId (FK → DaRefer) to retrieve all rows for one run.
+-- Filter by da_id (FK → DaRefer) to retrieve all rows for one run.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.DaRec` (
-  RecId        STRING    NOT NULL,   -- UUID per row
-  DaId         INT64     NOT NULL,   -- FK → DaRefer.DaId
-  RowDaJsonTx  STRING,               -- source row serialised as JSON after transforms
-  LoadDt       DATE      NOT NULL,   -- partition column; set once per run
-  LstUpdtTs    TIMESTAMP NOT NULL
+  rec_id        STRING    NOT NULL,   -- UUID per row
+  da_id         INT64     NOT NULL,   -- FK → DaRefer.da_id
+  row_da_json_tx STRING,              -- source row serialised as JSON after transforms
+  load_dt       DATE      NOT NULL,   -- partition column; set once per run
+  lst_updt_ts   TIMESTAMP NOT NULL
 )
-PARTITION BY LoadDt;
+PARTITION BY load_dt;
 
 -- COM_CmnRptDtl: one row per output file written by REPORT_PROCESSING.
 -- Written for every sink type (GCS, BQ, API) after the output step completes.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.COM_CmnRptDtl` (
-  SrceSysNm      STRING    NOT NULL,   -- report name (matches SrceNm in DaRefer)
-  FlNm           STRING    NOT NULL,   -- output file name, BQ table ref, or API endpoint
-  SrceFlCreateTs TIMESTAMP NOT NULL,   -- when this output was generated
-  FlDaJsonTx     STRING,               -- output data as JSON (populated by future enhancements)
-  RecCt          INT64,                -- row count written to this output
-  CreatTs        TIMESTAMP NOT NULL,
-  CreateUserId   STRING,
-  LstUpdtTs      TIMESTAMP NOT NULL,
-  LstUpdtUserId  STRING
+  srce_sys_nm      STRING    NOT NULL,  -- report name (matches srce_nm in DaRefer)
+  fl_nm            STRING    NOT NULL,  -- output file name, BQ table ref, or API endpoint
+  srce_fl_create_ts TIMESTAMP NOT NULL, -- when this output was generated
+  fl_da_json_tx    STRING,              -- output data as JSON (populated by future enhancements)
+  rec_ct           INT64,               -- row count written to this output
+  creat_ts         TIMESTAMP NOT NULL,
+  create_user_id   STRING,
+  lst_updt_ts      TIMESTAMP NOT NULL,
+  lst_updt_user_id STRING
 );
 ```
 
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.COM_CmnRptDtl` (
 ```sql
 -- Period master rows
 INSERT INTO `my-gcp-project.dw.MSTR_Per`
-  (PerId, PerDt, MoNo, YrNo, PerTypeCd, LstUpdtTs)
+  (per_id, per_dt, mo_no, yr_no, per_typ_cd, lst_updt_ts)
 VALUES
   ('202401',   DATE '2024-01-31', 1,  '23-24', 'MONTHLY',   CURRENT_TIMESTAMP()),
   ('20240115', DATE '2024-01-15', 1,  '23-24', 'DAILY',     CURRENT_TIMESTAMP()),
@@ -222,9 +222,9 @@ VALUES (
 
 ```sql
 -- Check period master
-SELECT PerId, PerDt, MoNo, YrNo, PerTypeCd
+SELECT per_id, per_dt, mo_no, yr_no, per_typ_cd
 FROM `my-gcp-project.dw.MSTR_Per`
-WHERE PerId = '202401';
+WHERE per_id = '202401';
 
 -- Check parameter store row
 SELECT parameter_group_name, parameter_data_source, parameter_name,
@@ -312,14 +312,14 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 | 1 | Look up `MSTR_Per` for PerId=`202401` → resolve PerDt, MoNo, YrNo | — |
 | 2 | Load `ReportConfig` from `report_config` + related tables | — |
 | 3 | `createCheckpoint('daily_trades_summary', '202401', ...)` → inserts DaRefer row | → **LOADING** |
-| 4 | Check all required datasources have `StaCd = COMPLETED` in DaRefer for this PerId | — |
-| 5 | Build alias registry: datasource alias → `(SELECT RowDaJsonTx FROM DaRec WHERE DaId = X)` | — |
+| 4 | Check all required datasources have `sta_cd = COMPLETED` in DaRefer for this per_id | — |
+| 5 | Build alias registry: datasource alias → `(SELECT row_da_json_tx FROM DaRec WHERE da_id = X)` | — |
 | 6 | Run transform chain: BQ SQL → intermediate BQ tables | — |
 | 7 | Route each output via `ReportOutputSinkRouter` (GCS / BQ / API) | — |
 | 8 | Insert one row into `COM_CmnRptDtl` per output step | — |
 | 9 | Send email with GCS outputs as attachments (if email configured) | — |
-| 10a | Success → `updateStatus(DaId, COMPLETED, null)` | → **COMPLETED** |
-| 10b | Any failure → `updateStatus(DaId, FAILED, null)` | → **FAILED** |
+| 10a | Success → `updateStatus(da_id, COMPLETED, null)` | → **COMPLETED** |
+| 10b | Any failure → `updateStatus(da_id, FAILED, null)` | → **FAILED** |
 
 ### Output routing (step 7 detail)
 
@@ -335,31 +335,31 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 
 ```sql
 -- DaRefer: check run lifecycle for this report
-SELECT DaId, SrceNm, VsnNo, PerId, FlNm, StaCd, BalAndCntlSmryTx, LstUpdtTs
+SELECT da_id, srce_nm, vsn_no, per_id, fl_nm, sta_cd, bal_and_cntl_smry_tx, lst_updt_ts
 FROM `my-gcp-project.pipeline_metadata.DaRefer`
-WHERE SrceNm = 'daily_trades_summary'
-ORDER BY LstUpdtTs DESC
+WHERE srce_nm = 'daily_trades_summary'
+ORDER BY lst_updt_ts DESC
 LIMIT 5;
 
--- DaRec: count rows written by a specific run (replace 42 with actual DaId)
+-- DaRec: count rows written by a specific run (replace 42 with actual da_id)
 SELECT COUNT(*) AS row_count,
-       MIN(LoadDt) AS load_dt
+       MIN(load_dt) AS load_dt
 FROM `my-gcp-project.pipeline_metadata.DaRec`
-WHERE DaId = 42;
+WHERE da_id = 42;
 
 -- DaRec: sample a few rows for a run
-SELECT RecId, JSON_VALUE(RowDaJsonTx, '$.currency') AS currency,
-       CAST(JSON_VALUE(RowDaJsonTx, '$.amount') AS FLOAT64) AS amount,
-       LoadDt
+SELECT rec_id, JSON_VALUE(row_da_json_tx, '$.currency') AS currency,
+       CAST(JSON_VALUE(row_da_json_tx, '$.amount') AS FLOAT64) AS amount,
+       load_dt
 FROM `my-gcp-project.pipeline_metadata.DaRec`
-WHERE DaId = 42
+WHERE da_id = 42
 LIMIT 10;
 
 -- COM_CmnRptDtl: outputs written by this report run
-SELECT SrceSysNm, FlNm, SrceFlCreateTs, RecCt, CreateUserId
+SELECT srce_sys_nm, fl_nm, srce_fl_create_ts, rec_ct, create_user_id
 FROM `my-gcp-project.pipeline_metadata.COM_CmnRptDtl`
-WHERE SrceSysNm = 'daily_trades_summary'
-ORDER BY SrceFlCreateTs DESC
+WHERE srce_sys_nm = 'daily_trades_summary'
+ORDER BY srce_fl_create_ts DESC
 LIMIT 10;
 ```
 
@@ -394,11 +394,11 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 | 1 | Look up `MSTR_Per` for PerId=`202401` | — |
 | 2 | Fetch `parameter_store` row for (TRADING, trades, eod) | — |
 | 3 | Validate required parameters present in BQ | — |
-| 4 | Check DaRefer — skip if `StaCd=COMPLETED` already exists (unless `--overrideDownload`) | — |
+| 4 | Check DaRefer — skip if `sta_cd=COMPLETED` already exists (unless `--overrideDownload`) | — |
 | 5 | `createCheckpoint('trades', '202401', '<bq-table-ref>')` → DaRefer row | → **LOADING** |
-| 6 | Dataflow: read source → apply transforms → write rows to DaRec as `RowDaJsonTx` JSON | — |
+| 6 | Dataflow: read source → apply transforms → write rows to DaRec as `row_da_json_tx` JSON | — |
 | 7 | `waitUntilFinish()` | — |
-| 8 | `COUNT(*) FROM DaRec WHERE DaId = X` + BnC SUM checks | — |
+| 8 | `COUNT(*) FROM DaRec WHERE da_id = X` + BnC SUM checks | — |
 | 9a | All checks pass → `updateStatus(COMPLETED, bncJson)` | → **COMPLETED** |
 | 9b | BnC mismatch → `updateStatus(FAILED_BNC, bncJson)` | → **FAILED_BNC** |
 | 9c | Infrastructure error → `updateStatus(FAILED, errorJson)` | → **FAILED** |
@@ -433,7 +433,7 @@ VALUES (
 );
 
 INSERT INTO `my-gcp-project.dw.MSTR_Per`
-  (PerId, PerDt, MoNo, YrNo, PerTypeCd, LstUpdtTs)
+  (per_id, per_dt, mo_no, yr_no, per_typ_cd, lst_updt_ts)
 VALUES ('202402', DATE '2024-02-29', 2, '23-24', 'MONTHLY', CURRENT_TIMESTAMP());
 ```
 
@@ -480,7 +480,7 @@ VALUES ('202402', DATE '2024-02-29', 2, '23-24', 'MONTHLY', CURRENT_TIMESTAMP())
 
 | Option | Default | Purpose |
 |--------|---------|---------|
-| `--reportName` | required | Maps to `parameter_name`; also used as `SrceNm` in DaRefer |
+| `--reportName` | required | Maps to `parameter_name`; also used as `srce_nm` in DaRefer |
 | `--reportSubprocess` | `default` | Maps to `parameter_data_source` |
 | `--periodStart` | — | Substituted into `{periodStart}` query tokens |
 | `--periodEnd` | — | Substituted into `{periodEnd}` query tokens |

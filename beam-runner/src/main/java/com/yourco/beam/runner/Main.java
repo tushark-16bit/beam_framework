@@ -21,28 +21,28 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   1. DataSourcePipelineFactory.assemble()
  *        ├─ Resolve MSTR_Per row for --periodId
- *        ├─ Validate params in BQ (source_config row present)
+ *        ├─ Validate params in BQ (parameter_store row present)
  *        ├─ Fetch source configs (transforms, validationConfig)
  *        ├─ Skip sources already COMPLETED in DaRefer (unless --overrideDownload)
- *        ├─ Insert DaRefer row StaCd=LOADING → returns DaId per source
- *        └─ Assemble per-source Beam branches → rows written to DaRec as RowDaJsonTx JSON
+ *        ├─ Insert DaRefer row sta_cd=LOADING → returns da_id per source
+ *        └─ Assemble per-source Beam branches → rows written to DaRec as row_da_json_tx JSON
  *   2. pipeline.run().waitUntilFinish()
  *   3. DataSourcePipelineFactory.runPostPipelineSteps()
- *        ├─ COUNT(*) FROM DaRec WHERE DaId=X; SUM BnC fields
- *        └─ UPDATE DaRefer StaCd → COMPLETED / FAILED_BNC / FAILED
+ *        ├─ COUNT(*) FROM DaRec WHERE da_id=X; SUM BnC fields
+ *        └─ UPDATE DaRefer sta_cd → COMPLETED / FAILED_BNC / FAILED
  * </pre>
  *
  * <h2>REPORT_PROCESSING lifecycle (DB-configured)</h2>
  * <pre>
  *   ReportPipelineFactory.execute() — runs entirely in the driver JVM (no Beam workers):
  *        ├─ Resolve MSTR_Per, load ReportConfig from BQ
- *        ├─ Insert DaRefer row StaCd=LOADING
- *        ├─ Check all required datasources have DaRefer StaCd=COMPLETED
+ *        ├─ Insert DaRefer row sta_cd=LOADING
+ *        ├─ Check all required datasources have DaRefer sta_cd=COMPLETED
  *        ├─ Run transform chain (BQ jobs, each materialised to a temp table)
  *        ├─ Route each output → GCS / BQ / API via ReportOutputSinkRouter
  *        ├─ Insert COM_CmnRptDtl row per output
  *        ├─ Send email (GCS outputs as attachments, if configured)
- *        └─ UPDATE DaRefer StaCd → COMPLETED / FAILED
+ *        └─ UPDATE DaRefer sta_cd → COMPLETED / FAILED
  * </pre>
  */
 public final class Main {

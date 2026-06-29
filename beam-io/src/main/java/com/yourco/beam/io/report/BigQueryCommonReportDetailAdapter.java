@@ -54,15 +54,15 @@ public final class BigQueryCommonReportDetailAdapter {
         String now = Instant.now().toString();
 
         Map<String, Object> row = new HashMap<>();
-        row.put("SrceSysNm",      srceSysNm);
-        row.put("FlNm",           flNm);
-        row.put("SrceFlCreateTs", now);
-        row.put("FlDaJsonTx",     flDaJsonTx);
-        row.put("RecCt",          recCt);
-        row.put("CreatTs",        now);
-        row.put("CreateUserId",   createUserId);
-        row.put("LstUpdtTs",      now);
-        row.put("LstUpdtUserId",  createUserId);
+        row.put("srce_sys_nm",      srceSysNm);
+        row.put("fl_nm",           flNm);
+        row.put("srce_fl_create_ts", now);
+        row.put("fl_da_json_tx",   flDaJsonTx);
+        row.put("rec_ct",          recCt);
+        row.put("creat_ts",        now);
+        row.put("create_user_id",  createUserId);
+        row.put("lst_updt_ts",     now);
+        row.put("lst_updt_user_id", createUserId);
 
         String[] parts = dataset.split("\\.");
         String project  = parts[0];

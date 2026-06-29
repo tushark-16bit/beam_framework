@@ -110,9 +110,9 @@ public final class BigQueryReportRepository {
         String daReferTable = "`" + project + "." + options.getCheckpointBqDataset()
                             + "." + options.getDaReferTable() + "`";
 
-        String sql = "SELECT DaId FROM " + daReferTable
-                   + " WHERE SrceNm = @srceNm AND PerId = @perId AND StaCd = 'COMPLETED'"
-                   + " ORDER BY LstUpdtTs DESC LIMIT 1";
+        String sql = "SELECT da_id FROM " + daReferTable
+                   + " WHERE srce_nm = @srceNm AND per_id = @perId AND sta_cd = 'COMPLETED'"
+                   + " ORDER BY lst_updt_ts DESC LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("srceNm", QueryParameterValue.string(datasourceName))

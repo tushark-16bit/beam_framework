@@ -326,7 +326,7 @@ first `DATA_SOURCE_DOWNLOAD`, then `REPORT_PROCESSING` once all sources are `COM
 ## DATA_SOURCE_DOWNLOAD — per-source independent pipelines
 
 Sources are **never merged**. Each source in `parameter_store` produces its own independent
-Beam branch: read → transform chain → rows written as JSON blobs to `DaRec` (keyed by `DaId` from `DaRefer`).
+Beam branch: read → transform chain → rows written as JSON blobs to `DaRec` (keyed by `da_id` from `DaRefer`).
 Adding a new datasource requires only a BQ row in `parameter_store` — no code change.
 
 ### Supported source types
@@ -369,14 +369,14 @@ After the pipeline writes rows to `DaRec`, the driver JVM validates:
 | Check | Configuration | Result on failure |
 |---|---|---|
 | Header check | `required_headers_json` | Logged at pipeline-assembly time |
-| Row count | `min_row_count`, `max_row_count` | `DaRefer.StaCd = FAILED_BNC` |
-| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `DaRefer.StaCd = FAILED_BNC` |
+| Row count | `min_row_count`, `max_row_count` | `DaRefer.sta_cd = FAILED_BNC` |
+| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `DaRefer.sta_cd = FAILED_BNC` |
 
 ### Run tracking (DaRefer)
 
 Every run writes one row to `DaRefer` (configured via `--daReferTable`, default `DaRefer`):
 
-| `StaCd` | Written when |
+| `sta_cd` | Written when |
 |---|---|
 | `LOADING` | Before `pipeline.run()` — always |
 | `COMPLETED` | Pipeline succeeded + all row-count and BnC checks passed |
@@ -384,7 +384,7 @@ Every run writes one row to `DaRefer` (configured via `--daReferTable`, default 
 | `FAILED` | Pipeline threw an exception |
 
 All source rows are written to `DaRec` (configured via `--daRecTable`, default `DaRec`),
-keyed by `DaId` from the `DaRefer` row. See `EXAMPLE.md` for full DDL.
+keyed by `da_id` from the `DaRefer` row. See `EXAMPLE.md` for full DDL.
 
 ## REPORT_PROCESSING — DB-configured reports
 
@@ -396,10 +396,10 @@ When `--reportName` is set alongside `--processType=REPORT_PROCESSING`, the
 ```
  1. Resolve MSTR_Per for --periodId            (validate period exists)
  2. Fetch ReportConfig from BQ                 (report_config + 5 related tables)
- 3. Insert DaRefer row StaCd=LOADING
+ 3. Insert DaRefer row sta_cd=LOADING
  4. Run preprocessing steps                    (BQ jobs — BQ_QUERY or API_ENRICHMENT)
- 5. Check datasource availability              (all required DSes must have DaRefer StaCd=COMPLETED)
- 6. Build alias registry                       (alias → SELECT RowDaJsonTx FROM DaRec WHERE DaId=X)
+ 5. Check datasource availability              (all required DSes must have DaRefer sta_cd=COMPLETED)
+ 6. Build alias registry                       (alias → SELECT row_da_json_tx FROM DaRec WHERE da_id=X)
  7. Run transformation chain                   (BQ jobs; each step materialises to a BQ table)
  8. Route each output via ReportOutputSinkRouter:
       GCS  → BQ extract job → CSV or JSON file
@@ -407,7 +407,7 @@ When `--reportName` is set alongside `--processType=REPORT_PROCESSING`, the
       API  → POST JSON array to external endpoint (auth via Secret Manager)
  9. Insert COM_CmnRptDtl row per output        (all sink types)
 10. Send email                                 (GCS outputs as attachments; if configured)
-11. Update DaRefer StaCd → COMPLETED / FAILED
+11. Update DaRefer sta_cd → COMPLETED / FAILED
 ```
 
 ### BQ config tables required
