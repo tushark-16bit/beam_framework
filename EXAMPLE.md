@@ -45,47 +45,6 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.MSTR_Per` (
   LstUpdtTs  TIMESTAMP NOT NULL
 );
 
--- Source config: one row per (parent_id, datasource_name, subprocess_name, period_id).
--- Three-identifier key: parent_id (parent) / subprocess_name (child) / datasource_name (name).
-CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.source_config` (
-  parent_id           STRING    NOT NULL,   -- business group (--parentId)
-  datasource_name     STRING    NOT NULL,   -- data source name (--datasourceName)
-  subprocess_name     STRING    NOT NULL,   -- variant e.g. EOD, INTRADAY (--subprocessName)
-  period_id           STRING    NOT NULL,   -- period (--periodId, from MSTR_Per)
-  source_type         STRING    NOT NULL,   -- BQ | API | FILE
-  -- BQ source
-  bq_project_id       STRING,
-  bq_dataset          STRING,
-  bq_table            STRING,
-  bq_query            STRING,
-  query_params_json   STRING,               -- {"key": "value"} token overrides
-  -- API source
-  api_endpoint        STRING,
-  api_auth_type       STRING,
-  api_auth_secret_id  STRING,
-  api_headers_json    STRING,
-  api_query_params_json STRING,
-  api_pagination_enabled BOOL,
-  api_pagination_strategy STRING,
-  api_page_size       INT64,
-  api_next_page_field STRING,
-  api_data_array_field STRING,
-  -- FILE source
-  file_type           STRING,
-  file_location       STRING,
-  file_prefix         STRING,
-  file_suffix         STRING,
-  file_delimiter      STRING,
-  file_has_header     BOOL,
-  file_sheet_index    INT64,
-  -- Transform + validation
-  source_transforms_json STRING,
-  min_row_count       INT64,
-  max_row_count       INT64,
-  required_headers_json STRING,
-  bnc_rules_json      STRING                -- [{"field":"amount","expectedTotal":5000000}]
-);
-
 -- Raw trades source data (example source for DATA_SOURCE_DOWNLOAD)
 CREATE TABLE IF NOT EXISTS `my-gcp-project.raw_data.trades` (
   trade_id    STRING,
@@ -193,6 +152,32 @@ VALUES (
     "transform_output_table": "my-gcp-project.reports.daily_trades_summary",
     "output_gcs_path":        "gs://my-bucket/reports/daily_trades/",
     "output_file_name":       "daily_trades_summary_{periodId}.csv"
+  }',
+  'TRADING', CURRENT_TIMESTAMP(), 'setup_script'
+);
+
+-- Source config for DATA_SOURCE_DOWNLOAD — stored in parameter_store alongside report params.
+-- Key: ParameterGroupName=parentId, ParameterDataSource=subprocessName, ParameterName=datasourceName.
+-- Period-specific filtering is handled by {periodStart}/{periodEnd} tokens inside bq_query.
+INSERT INTO `my-gcp-project.pipeline_config.parameter_store`
+  (ParameterName, ParameterGroupName, ParameterDataSource,
+   SchemaOfJson, ParametersValJson, EditGrpNm, LastUpdtTs, LstUpdateUserId)
+VALUES (
+  'trades',           -- ← --datasourceName
+  'TRADING',          -- ← --parentId
+  'eod',              -- ← --subprocessName
+  JSON '{
+    "source_type": {"required": true,  "type": "string"},
+    "bq_query":    {"required": true,  "type": "string"}
+  }',
+  JSON '{
+    "source_type":    "BQ",
+    "bq_project_id":  "my-gcp-project",
+    "bq_dataset":     "raw_data",
+    "bq_table":       "trades",
+    "bq_query":       "SELECT trade_id, currency, amount, trade_date, desk FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\"",
+    "min_row_count":  "1",
+    "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000,\"tolerancePct\":0.01}]"
   }',
   'TRADING', CURRENT_TIMESTAMP(), 'setup_script'
 );
@@ -394,7 +379,6 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodId=202401 \
   --paramBqProject=my-gcp-project \
   --paramBqDataset=pipeline_config \
-  --paramSourceConfigTable=source_config \
   --checkpointBqProject=my-gcp-project \
   --checkpointBqDataset=pipeline_metadata \
   --daReferTable=DaRefer \
@@ -473,7 +457,6 @@ VALUES ('202402', DATE '2024-02-29', 2, '23-24', 'MONTHLY', CURRENT_TIMESTAMP())
 | `--paramBqProject` | `--project` | GCP project for config tables |
 | `--paramBqDataset` | `pipeline_config` | BQ dataset for `parameter_store`, `source_config`, `MSTR_Per`, `report_*` tables |
 | `--paramStoreTable` | `parameter_store` | Parameter store table |
-| `--paramSourceConfigTable` | `source_config` | Source config table (DATA_SOURCE_DOWNLOAD only) |
 
 ### Runtime tables (framework-managed)
 

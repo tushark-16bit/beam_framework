@@ -66,16 +66,15 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // =========================================================================
 
     @Description("Top-level business group identifier. "
-                 + "Acts as the parent key in both config tables: "
-                 + "ParameterGroupName in parameter_store (REPORT_PROCESSING) and "
-                 + "parent_id in source_config (DATA_SOURCE_DOWNLOAD). "
+                 + "Maps to ParameterGroupName in parameter_store for both "
+                 + "DATA_SOURCE_DOWNLOAD (source config) and REPORT_PROCESSING (report params). "
                  + "Example: TRADING, RISK, MARKET_DATA")
     String getParentId();
     void setParentId(String value);
 
-    @Description("Name of the data source as registered in the parameter DB source_config table. "
+    @Description("Name of the data source as registered in parameter_store (ParameterName column). "
                  + "Required for DATA_SOURCE_DOWNLOAD. Used as the lookup key alongside "
-                 + "--periodId and --subprocessName to fetch source configuration. "
+                 + "--parentId and --subprocessName to fetch source configuration. "
                  + "Example: trades, market-data, fx-rates, customer-positions")
     String getDatasourceName();
     void setDatasourceName(String value);
@@ -140,8 +139,9 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // All pipeline configuration is stored in BigQuery and fetched at startup.
     //
     // Tables in this dataset:
-    //   parameter_store  — key-value params keyed by (ParameterGroupName, ParameterDataSource, ParameterName)
-    //   source_config    — DATA_SOURCE_DOWNLOAD source configs; three-identifier key: (parent_id, subprocess_name, datasource_name)
+    //   parameter_store  — all pipeline params keyed by (ParameterGroupName, ParameterDataSource, ParameterName)
+    //                      Used by both DATA_SOURCE_DOWNLOAD (source configs in ParametersValJson)
+    //                      and REPORT_PROCESSING (report params). SchemaOfJson declares required fields.
     //   MSTR_Per         — period master (PerId → PerDt, MoNo, YrNo, PerTypeCd); pre-populated externally
     //   report_config + related — six tables that drive ReportPipelineFactory
     //
@@ -170,14 +170,6 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getParamStoreTable();
     void setParamStoreTable(String value);
 
-    @Description("BQ table name for the source configuration table. "
-                 + "Three-identifier key: parent_id (--parentId), subprocess_name (--subprocessName), "
-                 + "datasource_name (--datasourceName). Also keyed by period_id (--periodId, from MSTR_Per). "
-                 + "Contains source_type and source-type-specific columns (BQ / API / FILE). "
-                 + "Queried by DATA_SOURCE_DOWNLOAD before each run.")
-    @Default.String("source_config")
-    String getParamSourceConfigTable();
-    void setParamSourceConfigTable(String value);
 
     // =========================================================================
     // RUNTIME TABLE STORAGE (DaRefer, DaRec, COM_CmnRptDtl)
