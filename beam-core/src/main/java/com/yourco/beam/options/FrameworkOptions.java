@@ -66,13 +66,13 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // =========================================================================
 
     @Description("Top-level business group identifier. "
-                 + "Maps to ParameterGroupName in parameter_store for both "
+                 + "Maps to parameter_group_name in parameter_store for both "
                  + "DATA_SOURCE_DOWNLOAD (source config) and REPORT_PROCESSING (report params). "
                  + "Example: TRADING, RISK, MARKET_DATA")
     String getParentId();
     void setParentId(String value);
 
-    @Description("Name of the data source as registered in parameter_store (ParameterName column). "
+    @Description("Name of the data source as registered in parameter_store (parameter_name column). "
                  + "Required for DATA_SOURCE_DOWNLOAD. Used as the lookup key alongside "
                  + "--parentId and --subprocessName to fetch source configuration. "
                  + "Example: trades, market-data, fx-rates, customer-positions")
@@ -139,9 +139,9 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // All pipeline configuration is stored in BigQuery and fetched at startup.
     //
     // Tables in this dataset:
-    //   parameter_store  — all pipeline params keyed by (ParameterGroupName, ParameterDataSource, ParameterName)
-    //                      Used by both DATA_SOURCE_DOWNLOAD (source configs in ParametersValJson)
-    //                      and REPORT_PROCESSING (report params). SchemaOfJson declares required fields.
+    //   parameter_store  — all pipeline params keyed by (parameter_group_name, parameter_data_source, parameter_name)
+    //                      Used by both DATA_SOURCE_DOWNLOAD (source configs in parameters_val_json)
+    //                      and REPORT_PROCESSING (report params). schema_of_json declares required fields.
     //   MSTR_Per         — period master (PerId → PerDt, MoNo, YrNo, PerTypeCd); pre-populated externally
     //   report_config + related — six tables that drive ReportPipelineFactory
     //
@@ -155,17 +155,17 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setParamBqProject(String value);
 
     @Description("BigQuery dataset that contains all parameter and config tables. "
-                 + "Example: pipeline_config")
-    @Default.String("pipeline_config")
+                 + "Example: dw")
+    @Default.String("dw")
     String getParamBqDataset();
     void setParamBqDataset(String value);
 
     @Description("BQ table name for the parameter store. "
-                 + "Schema: ParameterName STRING, ParameterGroupName STRING, "
-                 + "ParameterDataSource STRING, SchemaOfJson STRING, ParametersValJson STRING, "
-                 + "EditGrpNm STRING, LastUpdtTs TIMESTAMP, LstUpdateUserId STRING. "
-                 + "Each row holds all parameters for a (ParameterGroupName, ParameterDataSource, ParameterName) group "
-                 + "as a JSON blob in ParametersValJson. Required fields are declared in SchemaOfJson.")
+                 + "Schema: parameter_name STRING, parameter_group_name STRING, "
+                 + "parameter_data_source STRING, schema_of_json STRING, parameters_val_json STRING, "
+                 + "edit_grp_nm STRING, last_updt_ts TIMESTAMP, lst_update_user_id STRING. "
+                 + "Each row holds all parameters for a (parameter_group_name, parameter_data_source, parameter_name) group "
+                 + "as a JSON blob in parameters_val_json. Required fields are declared in schema_of_json.")
     @Default.String("parameter_store")
     String getParamStoreTable();
     void setParamStoreTable(String value);

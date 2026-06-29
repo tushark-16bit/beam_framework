@@ -40,10 +40,10 @@ io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer
 
 io/config/
-    BigQuerySourceConfigRepository — reads source connector config from parameter_store (ParametersValJson).
-                                     Key: (ParameterGroupName=parentId, ParameterDataSource=subprocessName,
-                                     ParameterName=datasourceName). Validates required fields from SchemaOfJson;
-                                     parses ParametersValJson into SourceConfig. No separate source_config table.
+    BigQuerySourceConfigRepository — reads source connector config from parameter_store (parameters_val_json).
+                                     Key: (parameter_group_name=parentId, parameter_data_source=subprocessName,
+                                     parameter_name=datasourceName). Validates required fields from schema_of_json;
+                                     parses parameters_val_json into SourceConfig. No separate source_config table.
     BigQueryReportRepository       — reads all 6 report config BQ tables for REPORT_PROCESSING.
 
 io/email/

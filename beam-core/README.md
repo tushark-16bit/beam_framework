@@ -22,7 +22,7 @@ Every other module depends on this one — it defines the language the whole fra
 
 | Value | CLI flag | Source config comes from | Use case |
 |---|---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | `parameter_store` (ParametersValJson, read by `BigQuerySourceConfigRepository`) | Fetch raw data from APIs/files/BQ |
+| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | `parameter_store` (parameters_val_json, read by `BigQuerySourceConfigRepository`) | Fetch raw data from APIs/files/BQ |
 | `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | `--sourceType` CLI flag | Transform downloaded data into reports |
 
 ```bash
@@ -69,7 +69,7 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 ### Parameter BigQuery store
 ```
 --paramBqProject=my-gcp-project
---paramBqDataset=pipeline_config
+--paramBqDataset=dw
 --paramStoreTable=parameter_store
 ```
 

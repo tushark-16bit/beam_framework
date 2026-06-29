@@ -32,15 +32,15 @@ import java.util.Map;
 /**
  * Fetches source configuration from the {@code parameter_store} BigQuery table.
  *
- * <p>Source configs are stored as JSON in {@code ParametersValJson}, keyed by
- * ({@code ParameterGroupName=parentId}, {@code ParameterDataSource=subprocessName},
- * {@code ParameterName=datasourceName}). Required fields are declared in {@code SchemaOfJson}.
+ * <p>Source configs are stored as JSON in {@code parameters_val_json}, keyed by
+ * ({@code parameter_group_name=parentId}, {@code parameter_data_source=subprocessName},
+ * {@code parameter_name=datasourceName}). Required fields are declared in {@code schema_of_json}.
  *
  * <p>{@code periodId} is not part of the lookup key — source configs are period-agnostic.
  * Period-specific filtering is applied via {@code {periodStart}}/{@code {periodEnd}} token
  * substitution inside the query at runtime.
  *
- * <h2>ParametersValJson structure</h2>
+ * <h2>parameters_val_json structure</h2>
  * <pre>
  * {
  *   "source_type":              "BQ" | "API" | "FILE",
@@ -78,7 +78,7 @@ import java.util.Map;
  * }
  * </pre>
  *
- * <h2>SchemaOfJson structure</h2>
+ * <h2>schema_of_json structure</h2>
  * <pre>
  * {
  *   "source_type": {"required": true, "type": "string"},
@@ -122,9 +122,9 @@ public final class BigQuerySourceConfigRepository {
     public List<String> getMissingParameters(String parentId, String datasource,
                                               String subprocess, String periodId) {
         String sql = "SELECT COUNT(*) AS cnt FROM " + storeTable
-            + " WHERE ParameterGroupName = @parentId"
-            + "   AND ParameterDataSource = @subprocess"
-            + "   AND ParameterName = @datasource";
+            + " WHERE parameter_group_name = @parentId"
+            + "   AND parameter_data_source = @subprocess"
+            + "   AND parameter_name = @datasource";
 
         try {
             for (FieldValueList row : bigquery.query(
@@ -153,10 +153,10 @@ public final class BigQuerySourceConfigRepository {
      */
     public List<SourceConfig> fetchSourceConfigs(String parentId, String datasource,
                                                    String subprocess, String periodId) {
-        String sql = "SELECT ParametersValJson, SchemaOfJson FROM " + storeTable
-            + " WHERE ParameterGroupName = @parentId"
-            + "   AND ParameterDataSource = @subprocess"
-            + "   AND ParameterName = @datasource"
+        String sql = "SELECT parameters_val_json, schema_of_json FROM " + storeTable
+            + " WHERE parameter_group_name = @parentId"
+            + "   AND parameter_data_source = @subprocess"
+            + "   AND parameter_name = @datasource"
             + " LIMIT 1";
 
         try {
@@ -186,7 +186,7 @@ public final class BigQuerySourceConfigRepository {
         String sourceTypeStr = params.get("source_type");
         if (sourceTypeStr == null || sourceTypeStr.isBlank()) {
             throw new IllegalStateException(
-                "source_type is missing in ParametersValJson for "
+                "source_type is missing in parameters_val_json for "
                 + parentId + "/" + subprocess + "/" + datasource);
         }
 
@@ -278,8 +278,8 @@ public final class BigQuerySourceConfigRepository {
 
     private void validateRequiredFields(FieldValueList row, Map<String, String> params,
                                          String parentId, String datasource, String subprocess) {
-        String schemaJson = row.get("SchemaOfJson").isNull()
-                            ? null : row.get("SchemaOfJson").getStringValue();
+        String schemaJson = row.get("schema_of_json").isNull()
+                            ? null : row.get("schema_of_json").getStringValue();
         if (schemaJson == null || schemaJson.isBlank()) return;
 
         try {
@@ -299,13 +299,13 @@ public final class BigQuerySourceConfigRepository {
 
             if (!missing.isEmpty()) {
                 throw new IllegalStateException(
-                    "Required source config fields missing in ParametersValJson for "
+                    "Required source config fields missing in parameters_val_json for "
                     + parentId + "/" + subprocess + "/" + datasource + ": " + missing);
             }
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
-            LOG.warn("Failed to parse SchemaOfJson for source config {}/{}/{}: {}",
+            LOG.warn("Failed to parse schema_of_json for source config {}/{}/{}: {}",
                      parentId, subprocess, datasource, e.getMessage());
         }
     }
@@ -314,10 +314,10 @@ public final class BigQuerySourceConfigRepository {
 
     private Map<String, String> parseValJson(FieldValueList row, String parentId,
                                               String datasource, String subprocess) {
-        String valJson = row.get("ParametersValJson").isNull()
-                         ? null : row.get("ParametersValJson").getStringValue();
+        String valJson = row.get("parameters_val_json").isNull()
+                         ? null : row.get("parameters_val_json").getStringValue();
         if (valJson == null || valJson.isBlank()) {
-            LOG.warn("ParametersValJson is empty for source config {}/{}/{}", parentId, subprocess, datasource);
+            LOG.warn("parameters_val_json is empty for source config {}/{}/{}", parentId, subprocess, datasource);
             return Collections.emptyMap();
         }
         try {
@@ -329,7 +329,7 @@ public final class BigQuerySourceConfigRepository {
             return result;
         } catch (Exception e) {
             throw new IllegalStateException(
-                "Failed to parse ParametersValJson for source config "
+                "Failed to parse parameters_val_json for source config "
                 + parentId + "/" + subprocess + "/" + datasource + ": " + e.getMessage(), e);
         }
     }

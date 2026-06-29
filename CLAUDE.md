@@ -455,11 +455,11 @@ connector configs — as JSON blobs. There is no separate source_config table.
 
 | BQ Table | Contents | Key columns |
 |---|---|---|
-| `parameter_store` | All pipeline params (reports + source configs) | ParameterGroupName (--parentId), ParameterDataSource (--subprocessName / --reportSubprocess), ParameterName (--datasourceName / --reportName) |
+| `parameter_store` | All pipeline params (reports + source configs) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess), parameter_name (--datasourceName / --reportName) |
 
-`SchemaOfJson` declares required fields. `ParametersValJson` holds values as a flat JSON object.
+`schema_of_json` declares required fields. `parameters_val_json` holds values as a flat JSON object.
 
-**Source config example in ParametersValJson:**
+**Source config example in parameters_val_json:**
 ```json
 {
   "source_type":    "BQ",
@@ -492,7 +492,7 @@ List<SourceConfig> configs = repo.fetchSourceConfigs(parentId, datasourceName, s
 | Flag | Default | Purpose |
 |---|---|---|
 | `--paramBqProject` | `--project` | GCP project for all config BQ tables |
-| `--paramBqDataset` | `pipeline_config` | BQ dataset |
+| `--paramBqDataset` | `dw` | BQ dataset |
 | `--paramStoreTable` | `parameter_store` | Used by both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING |
 
 **Note**: All configuration — for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING — is fetched
@@ -540,8 +540,8 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 | Hold secrets in FrameworkOptions values | Pass Secret Manager ID, fetch value at runtime |
 | Call `BigQuerySchemaUtils`, `GcsUtils`, `BigQueryReportRepository` inside a DoFn | Call in driver JVM only |
 | Make any JDBC / SQL database connection | All config is in BigQuery — use BigQuerySourceConfigRepository or BigQueryReportRepository |
-| Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from SchemaOfJson in parameter_store |
-| Create a separate source_config table | Store source connector config in parameter_store (ParametersValJson) |
+| Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from schema_of_json in parameter_store |
+| Create a separate source_config table | Store source connector config in parameter_store (parameters_val_json) |
 | Create `TupleTag` inside `@ProcessElement` | `static final` field on the DoFn |
 | Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
 | Call `result.waitUntilFinish()` for streaming | Check source type first |
@@ -653,7 +653,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
   --paramBqProject=my-gcp-project \
-  --paramBqDataset=pipeline_config \
+  --paramBqDataset=dw \
   --checkpointBqProject=my-gcp-project \
   --checkpointBqDataset=pipeline_metadata
 
@@ -667,7 +667,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
   --paramBqProject=my-gcp-project \
-  --paramBqDataset=pipeline_config \
+  --paramBqDataset=dw \
   --emailSmtpHost=smtp.gmail.com \
   --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
 
@@ -676,7 +676,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 mvn -pl beam-runner exec:java \
   -Dexec.mainClass=com.yourco.beam.runner.example.ExampleWorkflow \
   "-Dexec.args=--project=my-gcp-project --paramBqProject=my-gcp-project \
-    --paramBqDataset=pipeline_config --reportName=daily_trades_summary \
+    --paramBqDataset=dw --reportName=daily_trades_summary \
     --reportSubprocess=eod --periodId=2024-01 \
     --periodStart=2024-01-01 --periodEnd=2024-01-31 \
     --processType=REPORT_PROCESSING --sinkType=GCS"
@@ -694,7 +694,7 @@ mvn -pl beam-runner exec:java \
 6. Secrets are never stored in `FrameworkOptions` values — only Secret Manager IDs.
 7. `BigQueryJobService`, `GcsUtils`, `BigQueryReportRepository`, `BigQuerySourceConfigRepository`, and `BigQueryParameterAdapter` are driver-JVM only — never inside DoFns.
 11. No JDBC. No SQL database connections. All config and data flow through BigQuery.
-12. No separate source_config table. All source connector config is stored in `parameter_store` as JSON in `ParametersValJson`.
+12. No separate source_config table. All source connector config is stored in `parameter_store` as JSON in `parameters_val_json`.
 8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
 9. Every code change is accompanied by a README update in the same commit.
 10. A `data_source_checkpoints` LOADING row is created before every source download or report run, and updated to COMPLETED / FAILED_BNC / FAILED after. All data rows go to `data_source_records` as JSON blobs.
