@@ -196,10 +196,12 @@ flowchart LR
 
 Report processing runs entirely in the **driver JVM** — no Dataflow job is submitted.
 All configuration is loaded from **BigQuery** (no JDBC). Two config patterns coexist:
-- **Structured** (6 BQ tables via `BigQueryReportRepository`) — used by `ReportPipelineFactory`
-- **Key-value** (`parameter_store` via `BigQueryParameterAdapter`) — used by `ExampleWorkflow` and custom runners
+- **Nested JSON** (`parameter_store` via `BigQueryReportRepository`) — used by `ReportPipelineFactory`
+- **Flat key-value** (`parameter_store` via `BigQueryParameterAdapter`) — used by `ExampleWorkflow`
 
-### 6a. ReportPipelineFactory — structured 6-table BQ config
+Both read the same `parameter_store` table; they differ only in how `parameters_val_json` is structured.
+
+### 6a. ReportPipelineFactory — parameter_store nested JSON config
 
 ```mermaid
 sequenceDiagram
@@ -225,9 +227,9 @@ sequenceDiagram
         RPF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
         Per-->>RPF: Period (per_dt, mo_no, yr_no, per_typ_cd)
         RPF->>BQRepo: fetchReportConfig(reportName, subprocess, periodId)
-        BQRepo->>CfgBQ: SELECT FROM report_config, report_datasource_ref,<br/>report_preprocessing_config, report_transformation_config,<br/>report_output_config, report_email_config
-        CfgBQ-->>BQRepo: rows
-        BQRepo-->>RPF: ReportConfig
+        BQRepo->>CfgBQ: SELECT parameters_val_json FROM parameter_store<br/>WHERE parameter_group_name=parentId AND parameter_data_source=subprocess<br/>AND parameter_name=reportName
+        CfgBQ-->>BQRepo: parameters_val_json (nested JSON blob)
+        BQRepo-->>RPF: ReportConfig (parsed from JSON)
     end
 
     RPF->>Checkpoint: createCheckpoint(srce_nm=reportName, per_id, fl_nm=reportName)
@@ -259,9 +261,10 @@ sequenceDiagram
     rect rgb(230, 255, 235)
         Note over RPF,DaRec: Phase 4 — Build alias registry
         loop each ReportDatasourceRef
-            RPF->>BQRepo: fetchDatasourceDaId(datasourceName, periodId)
-            BQRepo->>DaRec: SELECT da_id FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED'
-            DaRec-->>BQRepo: da_id
+            RPF->>Checkpoint: fetchLatestCompletedDaId(datasourceName, periodId)
+            Checkpoint->>DaRec: SELECT da_id FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED' ORDER BY lst_updt_ts DESC LIMIT 1
+            DaRec-->>Checkpoint: da_id
+            Checkpoint-->>RPF: da_id
             RPF->>RPF: aliasRegistry.put(alias, "SELECT row_da_json_tx FROM DaRec WHERE da_id=X")
         end
     end
@@ -530,10 +533,13 @@ classDiagram
 ## 10. BigQuery Config Tables — Entity Relationship
 
 All configuration lives in BigQuery (`--paramBqProject.--paramBqDataset`). No JDBC.
-Two layouts coexist in the same dataset:
+A single `parameter_store` table holds all configuration for both pipeline types:
 
-- **Structured layout** (6 tables) — queried by `BigQueryReportRepository` for `ReportPipelineFactory`
-- **Key-value layout** (2 tables) — queried by `BigQueryParameterAdapter` for `ExampleWorkflow` and custom runners
+- **Source configs** (DATA_SOURCE_DOWNLOAD) — flat JSON in `parameters_val_json`, read by `BigQuerySourceConfigRepository`
+- **Report configs** (REPORT_PROCESSING) — nested JSON blob in `parameters_val_json`, read by `BigQueryReportRepository`
+
+The lookup key is always `(parameter_group_name, parameter_data_source, parameter_name)`.
+`periodId` is never a lookup key — configs are period-agnostic.
 
 ```mermaid
 erDiagram
@@ -557,77 +563,24 @@ erDiagram
         TIMESTAMP lst_updt_ts
     }
 
-    report_config {
-        STRING report_name PK
-        STRING report_subprocess PK
-        STRING period_id PK
-        BOOL override_key
-    }
+    parameter_store ||--|| MSTR_Per : "per_id referenced at runtime"
+```
 
-    report_datasource_ref {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        STRING datasource_name PK
-        STRING datasource_subprocess PK
-        STRING transform_alias
-        BOOL is_required
-    }
+### parameters_val_json: source config (flat JSON)
+```json
+{"source_type": "BQ", "bq_query": "SELECT ...", "min_row_count": "1", ...}
+```
 
-    report_preprocessing_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        INT64 step_order PK
-        STRING step_type
-        STRING bq_query
-        STRING bq_output_table
-        STRING query_params_json
-        STRING api_endpoint
-        STRING api_params_json
-    }
-
-    report_transformation_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        INT64 step_order PK
-        STRING input_alias
-        STRING output_alias
-        STRING query_template
-        STRING output_bq_table
-        STRING query_params_json
-    }
-
-    report_output_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        INT64 output_order PK
-        STRING input_alias
-        STRING output_format
-        STRING gcs_path
-        STRING file_prefix
-        STRING file_suffix
-        BOOL include_header
-    }
-
-    report_email_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        STRING to_list
-        STRING cc_list
-        STRING subject_template
-        STRING body_template
-    }
-
-    report_config ||--o{ report_datasource_ref : "has"
-    report_config ||--o{ report_preprocessing_config : "has"
-    report_config ||--o{ report_transformation_config : "has"
-    report_config ||--o{ report_output_config : "has"
-    report_config ||--o| report_email_config : "has"
-    report_datasource_ref }o--|| parameter_store : "references source of"
+### parameters_val_json: report config (nested JSON)
+```json
+{
+  "override_key": false,
+  "datasources":  [{"datasource_name": "trades", "transform_alias": "raw_trades", "is_required": true, ...}],
+  "preprocessing": [],
+  "transforms":   [{"step_order": 1, "input_alias": "raw_trades", "output_alias": "summary", "query_template": "...", ...}],
+  "outputs":      [{"output_order": 1, "input_alias": "summary", "sink_type": "GCS", "output_format": "CSV", ...}],
+  "email":        {"to_list": ["analyst@example.com"], "subject_template": "Report {periodId}", ...}
+}
 ```
 
 ---
@@ -786,7 +739,7 @@ DataflowStartJobOperator(
         "--smtpPasswordSecretId": "projects/p/secrets/smtp-password/versions/latest",
         "--devErrorEmail":       "reports@company.com",
         # --sinkType / --sourceType / --transformChain are NOT used here;
-        # all output routing comes from report_output_config.sink_type (GCS | BQ | API)
+        # all output routing comes from parameter_store outputs[].sink_type (GCS | BQ | API)
     }
 )
 ```

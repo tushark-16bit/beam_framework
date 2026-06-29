@@ -182,37 +182,60 @@ VALUES (
   'TRADING', CURRENT_TIMESTAMP(), 'setup_script'
 );
 
--- report_output_config — one row per output step.
--- sink_type drives where the result goes after the transform completes.
--- Example A: GCS output (default)
-INSERT INTO `my-gcp-project.dw.report_output_config`
-  (report_name, report_subprocess, period_id, output_order, input_alias,
-   sink_type, output_format, gcs_path, file_prefix, file_suffix, include_header)
+-- Report config for REPORT_PROCESSING (ReportPipelineFactory) — stored in parameter_store as nested JSON.
+-- Key: parameter_group_name=parentId / parameter_data_source=reportSubprocess / parameter_name=reportName.
+-- parameters_val_json holds the full report config: datasources, transforms, outputs, and email.
+-- periodId is NOT a lookup key — configs are period-agnostic.
+INSERT INTO `my-gcp-project.dw.parameter_store`
+  (parameter_name, parameter_group_name, parameter_data_source,
+   schema_of_json, parameters_val_json, edit_grp_nm, last_updt_ts, lst_update_user_id)
 VALUES (
-  'daily_trades_summary', 'eod', '202401', 1, 'transform_result',
-  'GCS', 'CSV', 'gs://my-bucket/reports/daily_trades/', '', '', true
-);
-
--- Example B: BQ output — copies result to a downstream analytics dataset
-INSERT INTO `my-gcp-project.dw.report_output_config`
-  (report_name, report_subprocess, period_id, output_order, input_alias,
-   sink_type, bq_sink_table)
-VALUES (
-  'daily_trades_summary', 'eod', '202401', 2, 'transform_result',
-  'BQ', 'my-analytics-project.shared_reports.daily_trades_summary'
-);
-
--- Example C: API output — POSTs result rows as JSON to an external service
-INSERT INTO `my-gcp-project.dw.report_output_config`
-  (report_name, report_subprocess, period_id, output_order, input_alias,
-   sink_type, api_endpoint, api_method, api_auth_secret_id, api_headers_json)
-VALUES (
-  'daily_trades_summary', 'eod', '202401', 3, 'transform_result',
-  'API',
-  'https://api.downstream.example.com/v1/reports/trades',
-  'POST',
-  'projects/my-gcp-project/secrets/downstream-api-key/versions/latest',
-  '{"X-Report-Source": "pipeline-framework"}'
+  'daily_trades_summary',   -- ← --reportName
+  'TRADING',                -- ← --parentId
+  'eod',                    -- ← --reportSubprocess
+  JSON '{"override_key": {"required": false, "type": "boolean"}}',
+  JSON '{
+    "override_key": false,
+    "datasources": [
+      {
+        "datasource_name":       "trades",
+        "datasource_subprocess": "eod",
+        "transform_alias":       "raw_trades",
+        "is_required":           true
+      }
+    ],
+    "preprocessing": [],
+    "transforms": [
+      {
+        "step_order":      1,
+        "step_name":       "aggregate_by_currency",
+        "input_alias":     "raw_trades",
+        "output_alias":    "summary",
+        "query_template":  "SELECT JSON_VALUE(row_da_json_tx, ''$.currency'') AS currency, SUM(CAST(JSON_VALUE(row_da_json_tx, ''$.amount'') AS FLOAT64)) AS total_amount, COUNT(*) AS trade_count FROM {raw_trades} GROUP BY currency ORDER BY total_amount DESC",
+        "output_bq_table": "my-gcp-project.reports.daily_trades_summary",
+        "query_params_json": {}
+      }
+    ],
+    "outputs": [
+      {
+        "output_order":   1,
+        "input_alias":    "summary",
+        "sink_type":      "GCS",
+        "output_format":  "CSV",
+        "gcs_path":       "gs://my-bucket/reports/daily_trades/",
+        "file_prefix":    "",
+        "file_suffix":    ".csv",
+        "include_header": true
+      }
+    ],
+    "email": {
+      "to_list": ["analyst@example.com"],
+      "cc_list": [],
+      "subject_template": "Daily Trades Report {periodId}",
+      "body_template":    "Please find the daily trades summary attached for period {periodId}."
+    }
+  }',
+  'TRADING', CURRENT_TIMESTAMP(), 'setup_script'
 );
 ```
 
@@ -235,12 +258,16 @@ WHERE parameter_group_name  = 'TRADING'
   AND parameter_data_source = 'eod'
   AND parameter_name        = 'daily_trades_summary';
 
--- Check output config rows
-SELECT output_order, input_alias, sink_type,
-       gcs_path, bq_sink_table, api_endpoint
-FROM `my-gcp-project.dw.report_output_config`
-WHERE report_name = 'daily_trades_summary'
-ORDER BY output_order;
+-- Inspect nested JSON sections inside the report's parameter_store row
+SELECT
+  JSON_QUERY(parameters_val_json, '$.datasources')  AS datasources,
+  JSON_QUERY(parameters_val_json, '$.transforms')   AS transforms,
+  JSON_QUERY(parameters_val_json, '$.outputs')      AS outputs,
+  JSON_QUERY(parameters_val_json, '$.email')        AS email
+FROM `my-gcp-project.dw.parameter_store`
+WHERE parameter_group_name  = 'TRADING'
+  AND parameter_data_source = 'eod'
+  AND parameter_name        = 'daily_trades_summary';
 ```
 
 ---
@@ -310,7 +337,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 | Step | Action | DaRefer state |
 |------|--------|---------------|
 | 1 | Look up `MSTR_Per` for PerId=`202401` → resolve PerDt, MoNo, YrNo | — |
-| 2 | Load `ReportConfig` from `report_config` + related tables | — |
+| 2 | Load `ReportConfig` from `parameter_store` (nested JSON in `parameters_val_json`) | — |
 | 3 | `createCheckpoint('daily_trades_summary', '202401', ...)` → inserts DaRefer row | → **LOADING** |
 | 4 | Check all required datasources have `sta_cd = COMPLETED` in DaRefer for this per_id | — |
 | 5 | Build alias registry: datasource alias → `(SELECT row_da_json_tx FROM DaRec WHERE da_id = X)` | — |

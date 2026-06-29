@@ -44,7 +44,10 @@ io/config/
                                      Key: (parameter_group_name=parentId, parameter_data_source=subprocessName,
                                      parameter_name=datasourceName). Validates required fields from schema_of_json;
                                      parses parameters_val_json into SourceConfig. No separate source_config table.
-    BigQueryReportRepository       — reads all 6 report config BQ tables for REPORT_PROCESSING.
+    BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING.
+                                     Key: (parameter_group_name=parentId, parameter_data_source=reportSubprocess,
+                                     parameter_name=reportName). Parses parameters_val_json into ReportConfig.
+                                     Includes datasources, preprocessing, transforms, outputs, and email arrays.
 
 io/email/
     ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>)

@@ -148,6 +148,31 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
         return Optional.empty();
     }
 
+    @Override
+    public long fetchLatestCompletedDaId(String srceNm, String perId) {
+        String sql = "SELECT da_id FROM " + table
+            + " WHERE srce_nm = @srceNm AND per_id = @perId AND sta_cd = 'COMPLETED'"
+            + " ORDER BY lst_updt_ts DESC LIMIT 1";
+
+        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .addNamedParameter("srceNm", QueryParameterValue.string(srceNm))
+            .addNamedParameter("perId",  QueryParameterValue.string(perId))
+            .setUseLegacySql(false)
+            .build();
+
+        try {
+            for (FieldValueList row : bigquery.query(config).iterateAll()) {
+                return row.get("da_id").getLongValue();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("DaRefer fetchLatestCompletedDaId query interrupted", e);
+        }
+        throw new IllegalArgumentException(
+            "No COMPLETED DaRefer row found for srce_nm=" + srceNm
+            + " per_id=" + perId + " — ensure DATA_SOURCE_DOWNLOAD ran successfully first");
+    }
+
     // ── Sequence helpers ──────────────────────────────────────────────────────
 
     private long nextDaId() {

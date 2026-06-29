@@ -113,7 +113,7 @@ public final class ReportPipelineFactory {
             checkDatasourceAvailability(config, options, checkpointAdapter);
 
             // ── 5. Build alias registry ───────────────────────────────────────
-            Map<String, String> aliasRegistry = buildAliasRegistry(config, options);
+            Map<String, String> aliasRegistry = buildAliasRegistry(config, options, checkpointAdapter);
 
             // ── 6. Transformation chain ───────────────────────────────────────
             if (config.hasTransforms()) {
@@ -200,9 +200,9 @@ public final class ReportPipelineFactory {
     }
 
     private Map<String, String> buildAliasRegistry(ReportConfig config,
-                                                    FrameworkOptions options) {
+                                                    FrameworkOptions options,
+                                                    DataSourceCheckpointAdapter checkpointAdapter) {
         Map<String, String> registry = new LinkedHashMap<>();
-        BigQueryReportRepository bqRepo = new BigQueryReportRepository(options);
         String project = options.getCheckpointBqProject() != null
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
@@ -215,8 +215,8 @@ public final class ReportPipelineFactory {
             // extract individual columns: JSON_VALUE({alias}.row_da_json_tx, '$.fieldName').
             long daDatId;
             try {
-                daDatId = bqRepo.fetchDatasourceDaId(
-                    ref.datasourceName, config.periodId, options);
+                daDatId = checkpointAdapter.fetchLatestCompletedDaId(
+                    ref.datasourceName, config.periodId);
             } catch (IllegalArgumentException e) {
                 if (ref.required) {
                     throw e;  // required datasource must be present — re-throw
@@ -229,7 +229,7 @@ public final class ReportPipelineFactory {
             String subquery = "(SELECT row_da_json_tx FROM `" + recordTable
                             + "` WHERE da_id = " + daDatId + ")";
             registry.put(ref.transformAlias, subquery);
-            LOG.info("Alias '{}' → DaRec subquery (DaId={})", ref.transformAlias, daDatId);
+            LOG.info("Alias '{}' → DaRec subquery (da_id={})", ref.transformAlias, daDatId);
         }
         return registry;
     }

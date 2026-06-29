@@ -25,10 +25,12 @@ import java.util.List;
  *   <li>DaRefer updated to {@code StaCd=COMPLETED} (or {@code FAILED} on error)</li>
  * </ol>
  *
- * <h2>DB tables that feed this object</h2>
- * {@code report_config}, {@code report_datasource_ref},
- * {@code report_preprocessing_config}, {@code report_transformation_config},
- * {@code report_output_config}, {@code report_email_config}
+ * <h2>Source</h2>
+ * Assembled from a single {@code parameter_store} row whose {@code parameters_val_json}
+ * contains a nested JSON blob with keys: {@code override_key}, {@code datasources},
+ * {@code preprocessing}, {@code transforms}, {@code outputs}, {@code email}.
+ * Lookup key: (parameter_group_name=parentId, parameter_data_source=reportSubprocess,
+ * parameter_name=reportName).
  */
 public final class ReportConfig implements Serializable {
 

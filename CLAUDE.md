@@ -61,7 +61,7 @@ triggered by Apache Airflow. It supports two process types:
 - **REPORT_PROCESSING** — reads downloaded data, applies a chained BigQuery transformation
   sequence, exports results to GCS files, and sends email with attachments. When `--reportName`
   is set, runs entirely in the driver JVM (no Dataflow job). All report configuration
-  (6 report config tables + key-value parameter store) is fetched from **BigQuery** — no JDBC.
+  (stored as a nested JSON blob in `parameter_store`) is fetched from **BigQuery** — no JDBC.
   Falls back to a generic source → transform chain → sink Beam pipeline when `--reportName` is blank.
 
 ---
@@ -101,7 +101,7 @@ Read in this order for a complete mental model:
 5.  beam-runner/.../runner/DataSourcePipelineFactory  — DATA_SOURCE_DOWNLOAD orchestration
 6.  beam-runner/.../runner/ReportPipelineFactory      — REPORT_PROCESSING orchestration (BQ-based)
 7.  beam-io/.../io/params/BigQueryParameterAdapter    — key-value BQ param store interface + impl
-8.  beam-io/.../io/config/BigQueryReportRepository    — report config tables fetched from BQ
+8.  beam-io/.../io/config/BigQueryReportRepository    — report config fetched from parameter_store nested JSON
 9.  beam-core/.../transform/BeamTransform.java        — SPI interface; the extension contract
 10. beam-runner/.../runner/PipelineFactory.java       — legacy REPORT_PROCESSING (transform chain)
 11. beam-io/.../io/config/BigQuerySourceConfigRepository — source config rows fetched from BQ (DATA_SOURCE_DOWNLOAD)
@@ -153,7 +153,7 @@ model/ValidationConfig.java           Post-fetch validation: header check, row c
 model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
 
 -- REPORT_PROCESSING models --
-model/ReportConfig.java               Full report config assembled from 6 DB tables.
+model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob.
 model/ReportDatasourceRef.java        Required DS for a report + transform alias.
 model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
 model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
@@ -180,7 +180,7 @@ sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
 sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
 sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs (all sources).
 
-checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest().
+checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId().
 checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id).
 
 records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field).
@@ -195,9 +195,9 @@ params/BigQueryParameterAdapter.java     Interface: fetchRequiredKeys(), fetchPa
 params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@key). Reads --paramBqProject/Dataset/StoreTable/RequiredTable.
                                          fetchRequiredParameters() = look up index → fetch values → validate all present.
 
-config/BigQueryReportRepository.java       Queries all 6 report config BQ tables using named params.
-                                           fetchReportConfig() and fetchDatasourceDataSourceId() (checkpoint lookup).
-config/BigQuerySourceConfigRepository.java Queries source_config BQ table for DATA_SOURCE_DOWNLOAD.
+config/BigQueryReportRepository.java       Queries parameter_store for report config nested JSON.
+                                           fetchReportConfig() parses datasources/preprocessing/transforms/outputs/email.
+config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOURCE_DOWNLOAD source configs.
                                            fetchSourceConfigs(), getMissingParameters(). Row → SourceConfig mapping.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
@@ -323,8 +323,9 @@ Sources are **never merged**. Each `SourceConfig` is an independent Beam DAG bra
 ### Add a new report transformation step type
 
 The report transformation chain uses raw BQ SQL — no new Java code needed.
-Add a row to `report_transformation_config` with a new `query_template` referencing any alias
-in the registry. Custom tokens go in `query_params_json`.
+Add a new object to the `transforms` array in the `parameter_store` `parameters_val_json` for
+the report, with `query_template` referencing any alias in the registry. Custom tokens go in
+`query_params_json`.
 
 ### Add a new BeamTransform (pluggable, SPI-registered)
 
@@ -342,7 +343,9 @@ in the registry. Custom tokens go in `query_params_json`.
 
 ### Add a new report type
 
-1. Insert rows in the 6 report DB tables (see DDL in `README.md`)
+1. Insert one row in `parameter_store` with `parameter_name=reportName`, `parameter_data_source=reportSubprocess`,
+   `parameter_group_name=parentId`, and the full nested JSON config in `parameters_val_json`
+   (keys: `override_key`, `datasources`, `preprocessing`, `transforms`, `outputs`, `email`)
 2. No Java code changes needed unless a new preprocessing step type is required
 3. For new preprocessing types, add a `case` in `ReportPipelineFactory.runPreprocessing()`
 
@@ -387,11 +390,11 @@ Triggered when `--reportName` is set. Runs entirely in driver JVM — **no Beam 
 Main.runReportProcessing(options)
 │
 └─ ReportPipelineFactory.execute(options)
-    ├─ BigQueryReportRepository.fetchReportConfig()    BQ query all 6 report config tables
-    │                                                  (report_config, report_datasource_ref,
-    │                                                   report_preprocessing_config,
-    │                                                   report_transformation_config,
-    │                                                   report_output_config, report_email_config)
+    ├─ BigQueryReportRepository.fetchReportConfig()    SELECT parameters_val_json FROM parameter_store
+    │                                                  WHERE parameter_group_name=parentId
+    │                                                    AND parameter_data_source=reportSubprocess
+    │                                                    AND parameter_name=reportName
+    │                                                  → parse nested JSON → ReportConfig
     ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint(reportName, periodId, reportName)
     │   → da_id (LOADING row in DaRefer)
     │
@@ -404,7 +407,7 @@ Main.runReportProcessing(options)
     │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srceNm, perId) → must be true
     │
     ├─ Phase 3: Build alias registry
-    │   └─ BigQueryReportRepository.fetchDatasourceDaId() × N
+    │   └─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId() × N
     │       → alias → record-table subquery (SELECT row_da_json_tx ... WHERE da_id=X)
     │
     ├─ Phase 4: Transformation chain
@@ -433,33 +436,17 @@ Main.runReportProcessing(options)
 ## 10. BigQuery parameter store — how config is fetched
 
 All pipeline configuration lives in BigQuery, in the dataset specified by
-`--paramBqProject` + `--paramBqDataset`. There are two conceptual layers:
-
-### Layer A — Structured report config (6 tables, queried by BigQueryReportRepository)
-
-These mirror the old JDBC tables, now stored in BQ:
+`--paramBqProject` + `--paramBqDataset`. A single `parameter_store` table holds all
+configuration — both DATA_SOURCE_DOWNLOAD source configs and REPORT_PROCESSING report configs.
 
 | BQ Table | Contents | Key columns |
 |---|---|---|
-| `report_config` | One row per report variant | report_name, report_subprocess, period_id, override_key |
-| `report_datasource_ref` | Which datasources a report needs | datasource_name, transform_alias, is_required |
-| `report_preprocessing_config` | Pre-run BQ queries / API enrichment | step_order, bq_query, query_params_json |
-| `report_transformation_config` | Chain of BQ transform queries | step_order, query_template, input_alias, output_alias |
-| `report_output_config` | File output specs | output_format (CSV/JSON), gcs_path, file_prefix, file_suffix |
-| `report_email_config` | Email recipients + templates | to_list, cc_list, subject_template, body_template |
+| `parameter_store` | All pipeline params (source configs + report configs) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess), parameter_name (--datasourceName / --reportName) |
 
-### Layer B — Generic key-value parameter store (queried by BigQueryParameterAdapter and BigQuerySourceConfigRepository)
+`schema_of_json` declares required top-level fields. `parameters_val_json` holds the config JSON.
 
-A single `parameter_store` table holds all configuration — report params **and** source
-connector configs — as JSON blobs. There is no separate source_config table.
+### Source configs (DATA_SOURCE_DOWNLOAD) — flat JSON in parameters_val_json
 
-| BQ Table | Contents | Key columns |
-|---|---|---|
-| `parameter_store` | All pipeline params (reports + source configs) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess), parameter_name (--datasourceName / --reportName) |
-
-`schema_of_json` declares required fields. `parameters_val_json` holds values as a flat JSON object.
-
-**Source config example in parameters_val_json:**
 ```json
 {
   "source_type":    "BQ",
@@ -472,13 +459,33 @@ connector configs — as JSON blobs. There is no separate source_config table.
 }
 ```
 
-`periodId` is not part of the `parameter_store` lookup key — source configs are period-agnostic.
-Period-specific data filtering is applied via `{periodStart}` / `{periodEnd}` tokens inside `bq_query`.
+### Report configs (REPORT_PROCESSING) — nested JSON in parameters_val_json
 
-**Typical call sequence (report params):**
+```json
+{
+  "override_key": false,
+  "datasources":  [{"datasource_name": "trades", "datasource_subprocess": "eod",
+                    "transform_alias": "raw_trades", "is_required": true}],
+  "preprocessing": [],
+  "transforms":   [{"step_order": 1, "step_name": "aggregate", "input_alias": "raw_trades",
+                    "output_alias": "summary",
+                    "query_template": "SELECT ... FROM {raw_trades}",
+                    "output_bq_table": "project.dataset.table", "query_params_json": {}}],
+  "outputs":      [{"output_order": 1, "input_alias": "summary", "sink_type": "GCS",
+                    "output_format": "CSV", "gcs_path": "gs://bucket/reports/",
+                    "file_prefix": "", "file_suffix": ".csv", "include_header": true}],
+  "email":        {"to_list": ["analyst@example.com"], "cc_list": [],
+                   "subject_template": "Report {periodId}", "body_template": "Attached."}
+}
+```
+
+`periodId` is not part of the lookup key for either config type — configs are period-agnostic.
+Period tokens (`{periodStart}`, `{periodEnd}`) are resolved at runtime by `QueryParameterResolver`.
+
+**Typical call sequence (report config):**
 ```java
-BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
-Map<String, String> params = adapter.fetchRequiredParameters(parentId, subprocess, reportName);
+BigQueryReportRepository repo = new BigQueryReportRepository(options);
+ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
 ```
 
 **Typical call sequence (source config):**
@@ -496,8 +503,8 @@ List<SourceConfig> configs = repo.fetchSourceConfigs(parentId, datasourceName, s
 | `--paramStoreTable` | `parameter_store` | Used by both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING |
 
 **Note**: All configuration — for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING — is fetched
-from **BigQuery** via `BigQuerySourceConfigRepository` (reads `parameter_store`) or
-`BigQueryReportRepository`. No JDBC. No separate source_config table.
+from **BigQuery** via `BigQuerySourceConfigRepository` (source configs, flat JSON) or
+`BigQueryReportRepository` (report configs, nested JSON). Both read `parameter_store`. No JDBC.
 
 ---
 

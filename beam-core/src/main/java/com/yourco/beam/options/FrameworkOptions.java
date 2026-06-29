@@ -107,9 +107,9 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // generic PipelineFactory. Leave blank to use the legacy transform-chain mode.
     // =========================================================================
 
-    @Description("Report name as registered in the report_config DB table. "
+    @Description("Report name as registered in parameter_store (parameter_name column). "
                  + "When set together with --processType=REPORT_PROCESSING, "
-                 + "the DB-configured ReportPipelineFactory is used. "
+                 + "ReportPipelineFactory fetches the full report config from parameter_store. "
                  + "Example: daily_trades_report, monthly_pnl_summary")
     @Default.String("")
     String getReportName();
@@ -139,11 +139,12 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // All pipeline configuration is stored in BigQuery and fetched at startup.
     //
     // Tables in this dataset:
-    //   parameter_store  — all pipeline params keyed by (parameter_group_name, parameter_data_source, parameter_name)
-    //                      Used by both DATA_SOURCE_DOWNLOAD (source configs in parameters_val_json)
-    //                      and REPORT_PROCESSING (report params). schema_of_json declares required fields.
-    //   MSTR_Per         — period master (PerId → PerDt, MoNo, YrNo, PerTypeCd); pre-populated externally
-    //   report_config + related — six tables that drive ReportPipelineFactory
+    //   parameter_store  — ALL pipeline params keyed by (parameter_group_name, parameter_data_source, parameter_name)
+    //                      Both DATA_SOURCE_DOWNLOAD (source configs) and REPORT_PROCESSING (report configs)
+    //                      store their configurations here as JSON blobs in parameters_val_json.
+    //                      Source configs use a flat JSON map; report configs use a nested JSON structure
+    //                      with keys: override_key, datasources, preprocessing, transforms, outputs, email.
+    //   MSTR_Per         — period master (per_id → per_dt, mo_no, yr_no, per_typ_cd); pre-populated externally
     //
     // Table names are configurable so the same binary works in dev/staging/prod.
     // =========================================================================

@@ -55,4 +55,14 @@ public interface DataSourceCheckpointAdapter {
      * Returns the most recent DaRefer row for (srce_nm, per_id), if any.
      */
     Optional<DataSourceCheckpoint> getLatest(String srceNm, String perId);
+
+    /**
+     * Returns the {@code da_id} of the most recent COMPLETED DaRefer row for a datasource.
+     *
+     * <p>Used by REPORT_PROCESSING to build the DaRec subquery:
+     * {@code SELECT row_da_json_tx FROM DaRec WHERE da_id = X}.
+     *
+     * @throws IllegalArgumentException if no COMPLETED row exists for (srce_nm, per_id)
+     */
+    long fetchLatestCompletedDaId(String srceNm, String perId);
 }
