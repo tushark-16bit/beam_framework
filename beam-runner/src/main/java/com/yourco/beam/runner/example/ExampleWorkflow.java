@@ -17,8 +17,8 @@ import java.util.Map;
  * <h2>What this example does</h2>
  * <ol>
  *   <li><b>Fetch and validate parameters</b> — reads a single row from {@code parameter_store}
- *       by ({@code ParameterGroupName}, {@code ParameterDataSource}, {@code ParameterName}).
- *       Parses {@code SchemaOfJson} to discover required fields; parses {@code ParametersValJson}
+ *       by ({@code parameter_group_name}, {@code parameter_data_source}, {@code parameter_name}).
+ *       Parses {@code schema_of_json} to discover required fields; parses {@code parameters_val_json}
  *       for the actual values; throws if any required field is missing.</li>
  *   <li><b>Run the transform</b> — executes a BigQuery query (from the params) using
  *       {@link BigQueryJobService}, materialising the result into a BQ table.</li>
@@ -28,17 +28,17 @@ import java.util.Map;
  *
  * <h2>parameter_store row for this example</h2>
  * <pre>
- * ParameterGroupName  = "TRADING"          ← --parentId (business group)
- * ParameterDataSource = "eod"             ← --reportSubprocess (child)
- * ParameterName       = "daily_trades_summary"  ← --reportName (name)
- * SchemaOfJson        = {
+ * parameter_group_name  = "TRADING"          ← --parentId (business group)
+ * parameter_data_source = "eod"             ← --reportSubprocess (child)
+ * parameter_name       = "daily_trades_summary"  ← --reportName (name)
+ * schema_of_json      = {
  *   "source_bq_table":       {"required": true,  "type": "string"},
  *   "transform_query":       {"required": true,  "type": "string"},
  *   "transform_output_table":{"required": true,  "type": "string"},
  *   "output_gcs_path":       {"required": true,  "type": "string"},
  *   "output_file_name":      {"required": true,  "type": "string"}
  * }
- * ParametersValJson   = {
+ * parameters_val_json = {
  *   "source_bq_table":        "my-project.raw_data.trades",
  *   "transform_query":        "SELECT trade_date, SUM(amount) AS total FROM {source_bq_table} ...",
  *   "transform_output_table": "my-project.reports.daily_trades_summary",
@@ -54,7 +54,7 @@ import java.util.Map;
  *   -Dexec.args="
  *     --project=my-gcp-project
  *     --paramBqProject=my-gcp-project
- *     --paramBqDataset=pipeline_config
+ *     --paramBqDataset=dw
  *     --paramStoreTable=parameter_store
  *     --reportName=daily_trades_summary
  *     --reportSubprocess=eod
@@ -81,9 +81,9 @@ public final class ExampleWorkflow {
     }
 
     public void run(FrameworkOptions options) {
-        String parentId    = options.getParentId();          // → ParameterGroupName column
-        String reportName  = options.getReportName();       // → ParameterName column
-        String subprocess  = options.getReportSubprocess(); // → ParameterDataSource column
+        String parentId    = options.getParentId();          // → parameter_group_name column
+        String reportName  = options.getReportName();       // → parameter_name column
+        String subprocess  = options.getReportSubprocess(); // → parameter_data_source column
         String periodId    = options.getPeriodId();
         String periodStart = options.getPeriodStart();
         String periodEnd   = options.getPeriodEnd();
@@ -95,9 +95,9 @@ public final class ExampleWorkflow {
         // ── Step 1: Fetch and validate parameters from BigQuery ───────────────
         //
         // fetchRequiredParameters() in one BQ round-trip:
-        //   1. SELECT the row by (ParameterGroupName=parentId, ParameterDataSource=subprocess, ParameterName=reportName)
-        //   2. Parse SchemaOfJson to find fields with "required": true
-        //   3. Parse ParametersValJson into Map<String, String>
+        //   1. SELECT the row by (parameter_group_name=parentId, parameter_data_source=subprocess, parameter_name=reportName)
+        //   2. Parse schema_of_json to find fields with "required": true
+        //   3. Parse parameters_val_json into Map<String, String>
         //   4. Validate all required fields are present — throws if any are missing
 
         BigQueryParameterAdapter paramAdapter = new BigQueryParameterAdapterImpl(options);
@@ -109,7 +109,7 @@ public final class ExampleWorkflow {
 
         // ── Step 2: Extract specific params ──────────────────────────────────
         //
-        // These keys are declared as required in SchemaOfJson — if any were null,
+        // These keys are declared as required in schema_of_json — if any were null,
         // fetchRequiredParameters() would have already thrown above.
 
         String sourceBqTable       = require(params, "source_bq_table");
@@ -120,7 +120,7 @@ public final class ExampleWorkflow {
 
         // ── Step 3: Resolve period tokens in the query ────────────────────────
         //
-        // Tokens in ParametersValJson values are replaced at runtime.
+        // Tokens in parameters_val_json values are replaced at runtime.
         // The query may reference {source_bq_table} which is another param value.
 
         String today = LocalDate.now().toString();

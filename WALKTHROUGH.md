@@ -208,7 +208,7 @@ sequenceDiagram
     participant RPF as ReportPipelineFactory
     participant Per as BigQuery<br/>(MSTR_Per)
     participant BQRepo as BigQueryReportRepository
-    participant CfgBQ as BigQuery<br/>(pipeline_config)
+    participant CfgBQ as BigQuery<br/>(dw)
     participant Checkpoint as BigQueryDataSourceCheckpointAdapter<br/>(DaRefer)
     participant BQJob as BigQueryJobService
     participant DataBQ as BigQuery<br/>(data / report tables)
@@ -322,7 +322,7 @@ sequenceDiagram
     autonumber
     participant EW as ExampleWorkflow
     participant Adapter as BigQueryParameterAdapterImpl
-    participant CfgBQ as BigQuery<br/>(pipeline_config dataset)
+    participant CfgBQ as BigQuery<br/>(dw dataset)
     participant BQJob as BigQueryJobService
     participant DataBQ as BigQuery<br/>(data / report tables)
     participant GCS as Cloud Storage
@@ -331,14 +331,14 @@ sequenceDiagram
 
     rect rgb(230, 240, 255)
         Note over Adapter,CfgBQ: Step 1 — Fetch the parameter_store row (single BQ query)
-        Adapter->>CfgBQ: SELECT ParametersValJson, SchemaOfJson<br/>FROM parameter_store<br/>WHERE ParameterGroupName=@groupName<br/>AND ParameterDataSource=@dataSource<br/>AND ParameterName=@paramName LIMIT 1
+        Adapter->>CfgBQ: SELECT parameters_val_json, schema_of_json<br/>FROM parameter_store<br/>WHERE parameter_group_name=@groupName<br/>AND parameter_data_source=@dataSource<br/>AND parameter_name=@paramName LIMIT 1
         CfgBQ-->>Adapter: one row
     end
 
     rect rgb(230, 255, 235)
         Note over Adapter,Adapter: Step 2 — Parse and validate in driver JVM
-        Adapter->>Adapter: parse SchemaOfJson → find fields where "required"=true<br/>[source_bq_table, transform_query, transform_output_table,<br/>output_gcs_path, output_file_name]
-        Adapter->>Adapter: parse ParametersValJson →<br/>{source_bq_table: "proj.raw.trades",<br/>transform_query: "SELECT ...",<br/>transform_output_table: "proj.reports.summary",<br/>output_gcs_path: "gs://bucket/reports/",<br/>output_file_name: "report_{periodId}.csv"}
+        Adapter->>Adapter: parse schema_of_json → find fields where "required"=true<br/>[source_bq_table, transform_query, transform_output_table,<br/>output_gcs_path, output_file_name]
+        Adapter->>Adapter: parse parameters_val_json →<br/>{source_bq_table: "proj.raw.trades",<br/>transform_query: "SELECT ...",<br/>transform_output_table: "proj.reports.summary",<br/>output_gcs_path: "gs://bucket/reports/",<br/>output_file_name: "report_{periodId}.csv"}
         Adapter->>Adapter: validate all required fields non-null (throws if any missing)
         Adapter-->>EW: Map<String, String> params
     end
@@ -538,14 +538,14 @@ Two layouts coexist in the same dataset:
 ```mermaid
 erDiagram
     parameter_store {
-        STRING ParameterName PK
-        STRING ParameterGroupName PK
-        STRING ParameterDataSource PK
-        STRING SchemaOfJson
-        STRING ParametersValJson
-        STRING EditGrpNm
-        TIMESTAMP LastUpdtTs
-        STRING LstUpdateUserId
+        STRING parameter_name PK
+        STRING parameter_group_name PK
+        STRING parameter_data_source PK
+        STRING schema_of_json
+        STRING parameters_val_json
+        STRING edit_grp_nm
+        TIMESTAMP last_updt_ts
+        STRING lst_update_user_id
     }
 
     MSTR_Per {
@@ -555,21 +555,6 @@ erDiagram
         STRING YrNo
         STRING PerTypeCd
         TIMESTAMP LstUpdtTs
-    }
-
-    source_config {
-        STRING parent_id PK
-        STRING subprocess_name PK
-        STRING datasource_name PK
-        STRING period_id PK
-        STRING source_type
-        STRING bq_query
-        STRING query_params_json
-        STRING source_transforms_json
-        INT64 min_row_count
-        INT64 max_row_count
-        STRING required_headers_json
-        STRING bnc_rules_json
     }
 
     report_config {
@@ -642,7 +627,7 @@ erDiagram
     report_config ||--o{ report_transformation_config : "has"
     report_config ||--o{ report_output_config : "has"
     report_config ||--o| report_email_config : "has"
-    report_datasource_ref }o--|| source_config : "references source of"
+    report_datasource_ref }o--|| parameter_store : "references source of"
 ```
 
 ---
@@ -762,7 +747,7 @@ DataflowStartJobOperator(
         "--periodEnd":           "2024-01-31",
         "--runDate":             "{{ ds }}",
         "--paramBqProject":      "my-gcp-project",
-        "--paramBqDataset":      "pipeline_config",
+        "--paramBqDataset":      "dw",
         "--checkpointBqProject": "my-gcp-project",
         "--checkpointBqDataset": "pipeline_metadata",
         "--daReferTable":        "DaRefer",
@@ -782,7 +767,7 @@ DataflowStartJobOperator(
     jar="gs://bucket/jars/beam-runner-bundled.jar",
     options={
         "--processType":         "REPORT_PROCESSING",
-        "--parentId":            "TRADING",      # → ParameterGroupName in parameter_store
+        "--parentId":            "TRADING",      # → parameter_group_name in parameter_store
         "--reportName":          "daily_trades_summary",
         "--reportSubprocess":    "eod",
         "--periodId":            "202401",        # MONTHLY YYYYMM — must exist in MSTR_Per
@@ -790,7 +775,7 @@ DataflowStartJobOperator(
         "--periodEnd":           "2024-01-31",
         "--runDate":             "{{ ds }}",
         "--paramBqProject":      "my-gcp-project",
-        "--paramBqDataset":      "pipeline_config",
+        "--paramBqDataset":      "dw",
         "--checkpointBqProject": "my-gcp-project",
         "--checkpointBqDataset": "pipeline_metadata",
         "--daReferTable":        "DaRefer",

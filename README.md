@@ -316,7 +316,7 @@ substitutions:
 
 | `--processType` | What runs | Source config from |
 |---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer` | BQ `source_config` table (keyed by `parent_id`, `subprocess_name`, `datasource_name`, `period_id`) |
+| `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer` | BQ `parameter_store` table (keyed by `parameter_group_name`, `parameter_data_source`, `parameter_name`) |
 | `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, runs BQ transform chain, routes output to GCS/BQ/API, writes `COM_CmnRptDtl`, sends email | BQ `report_config` + 5 related tables |
 | `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
 
@@ -325,9 +325,9 @@ first `DATA_SOURCE_DOWNLOAD`, then `REPORT_PROCESSING` once all sources are `COM
 
 ## DATA_SOURCE_DOWNLOAD — per-source independent pipelines
 
-Sources are **never merged**. Each source in `source_config` produces its own independent
+Sources are **never merged**. Each source in `parameter_store` produces its own independent
 Beam branch: read → transform chain → rows written as JSON blobs to `DaRec` (keyed by `DaId` from `DaRefer`).
-Adding a new datasource requires only a BQ row in `source_config` — no code change.
+Adding a new datasource requires only a BQ row in `parameter_store` — no code change.
 
 ### Supported source types
 
@@ -343,11 +343,11 @@ Pass `--periodStart=2024-01-01` and `--periodEnd=2024-01-31` as pipeline options
 injected into the `bq_query` template at runtime via `QueryParameterResolver`:
 
 ```sql
--- In source_config.bq_query:
+-- In parameter_store.parameters_val_json bq_query value:
 SELECT * FROM trades WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'
 ```
 
-Additional named params go in `source_config.query_params_json`:
+Additional named params go in the `parameters_val_json` `query_params_json` field:
 ```json
 {"startDate": "{periodStart}", "exchange": "NYSE"}
 ```
@@ -423,7 +423,7 @@ See `EXAMPLE.md` for full DDL. Summary:
 -- report_email_config: SMTP recipients and message templates
 
 -- report_output_config: one row per output — sink_type drives where the result goes
-CREATE TABLE IF NOT EXISTS `my-project.pipeline_config.report_output_config` (
+CREATE TABLE IF NOT EXISTS `my-project.dw.report_output_config` (
   report_name        STRING NOT NULL,
   report_subprocess  STRING NOT NULL,
   period_id          STRING NOT NULL,
@@ -467,7 +467,7 @@ They resolve to `` `project.dataset.table` `` BQ standard SQL references at runt
 ```python
 options={
     "--processType":          "REPORT_PROCESSING",
-    "--parentId":             "TRADING",          # → ParameterGroupName in parameter_store
+    "--parentId":             "TRADING",          # → parameter_group_name in parameter_store
     "--reportName":           "daily_trades_summary",
     "--reportSubprocess":     "eod",
     "--periodId":             "202401",           # MONTHLY format YYYYMM (must exist in MSTR_Per)
@@ -475,7 +475,7 @@ options={
     "--periodEnd":            "2024-01-31",
     "--runDate":              "{{ ds }}",
     "--paramBqProject":       "my-gcp-project",
-    "--paramBqDataset":       "pipeline_config",
+    "--paramBqDataset":       "dw",
     "--checkpointBqDataset":  "pipeline_metadata",
     "--daReferTable":         "DaRefer",
     "--daRecTable":           "DaRec",

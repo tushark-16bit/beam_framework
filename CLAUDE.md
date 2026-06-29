@@ -430,9 +430,9 @@ Main.runReportProcessing(options)
 
 ---
 
-## 10. BigQuery parameter store — how config is fetched for REPORT_PROCESSING
+## 10. BigQuery parameter store — how config is fetched
 
-All REPORT_PROCESSING configuration lives in BigQuery, in the dataset specified by
+All pipeline configuration lives in BigQuery, in the dataset specified by
 `--paramBqProject` + `--paramBqDataset`. There are two conceptual layers:
 
 ### Layer A — Structured report config (6 tables, queried by BigQueryReportRepository)
@@ -448,37 +448,56 @@ These mirror the old JDBC tables, now stored in BQ:
 | `report_output_config` | File output specs | output_format (CSV/JSON), gcs_path, file_prefix, file_suffix |
 | `report_email_config` | Email recipients + templates | to_list, cc_list, subject_template, body_template |
 
-### Layer B — Generic key-value parameter store (2 tables, queried by BigQueryParameterAdapter)
+### Layer B — Generic key-value parameter store (queried by BigQueryParameterAdapter and BigQuerySourceConfigRepository)
 
-Used by `ExampleWorkflow` and any custom report code that prefers flat key-value config
-over the structured 6-table schema:
+A single `parameter_store` table holds all configuration — report params **and** source
+connector configs — as JSON blobs. There is no separate source_config table.
 
 | BQ Table | Contents | Key columns |
 |---|---|---|
-| `parameter_store` | One row per param per period | process_name, subprocess_name, period_id, param_key, param_value |
-| `required_parameters_index` | Which keys each process needs | process_name, subprocess_name, param_key, is_required |
+| `parameter_store` | All pipeline params (reports + source configs) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess), parameter_name (--datasourceName / --reportName) |
 
-**Typical call sequence:**
-```java
-BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
-// 1. Look up required keys from required_parameters_index
-// 2. Fetch values from parameter_store
-// 3. Validate all required keys present → throws IllegalStateException if missing
-Map<String, String> params = adapter.fetchRequiredParameters(reportName, subprocess, periodId);
+`schema_of_json` declares required fields. `parameters_val_json` holds values as a flat JSON object.
+
+**Source config example in parameters_val_json:**
+```json
+{
+  "source_type":    "BQ",
+  "bq_project_id":  "my-project",
+  "bq_dataset":     "raw_data",
+  "bq_table":       "trades",
+  "bq_query":       "SELECT * FROM ... WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'",
+  "min_row_count":  "1",
+  "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]"
+}
 ```
 
-### New CLI flags (replace --paramDb* JDBC flags for REPORT_PROCESSING)
+`periodId` is not part of the `parameter_store` lookup key — source configs are period-agnostic.
+Period-specific data filtering is applied via `{periodStart}` / `{periodEnd}` tokens inside `bq_query`.
+
+**Typical call sequence (report params):**
+```java
+BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
+Map<String, String> params = adapter.fetchRequiredParameters(parentId, subprocess, reportName);
+```
+
+**Typical call sequence (source config):**
+```java
+BigQuerySourceConfigRepository repo = new BigQuerySourceConfigRepository(options);
+List<SourceConfig> configs = repo.fetchSourceConfigs(parentId, datasourceName, subprocess, periodId);
+```
+
+### CLI flags for the parameter store
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--paramBqProject` | `--project` | GCP project for all config BQ tables |
-| `--paramBqDataset` | `pipeline_config` | BQ dataset |
-| `--paramStoreTable` | `parameter_store` | Key-value store table |
-| `--paramRequiredTable` | `required_parameters_index` | Required-params index table |
-| `--paramSourceConfigTable` | `source_config` | Source config table (for alias registry) |
+| `--paramBqDataset` | `dw` | BQ dataset |
+| `--paramStoreTable` | `parameter_store` | Used by both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING |
 
 **Note**: All configuration — for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING — is fetched
-from **BigQuery** via `BigQuerySourceConfigRepository` or `BigQueryReportRepository`. No JDBC.
+from **BigQuery** via `BigQuerySourceConfigRepository` (reads `parameter_store`) or
+`BigQueryReportRepository`. No JDBC. No separate source_config table.
 
 ---
 
@@ -521,7 +540,8 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 | Hold secrets in FrameworkOptions values | Pass Secret Manager ID, fetch value at runtime |
 | Call `BigQuerySchemaUtils`, `GcsUtils`, `BigQueryReportRepository` inside a DoFn | Call in driver JVM only |
 | Make any JDBC / SQL database connection | All config is in BigQuery — use BigQuerySourceConfigRepository or BigQueryReportRepository |
-| Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from required_parameters_index |
+| Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from schema_of_json in parameter_store |
+| Create a separate source_config table | Store source connector config in parameter_store (parameters_val_json) |
 | Create `TupleTag` inside `@ProcessElement` | `static final` field on the DoFn |
 | Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
 | Call `result.waitUntilFinish()` for streaming | Check source type first |
@@ -622,18 +642,20 @@ All rows from one run share the same `dataSourceId` — shard-safe.
 # Build fat JAR from project root
 mvn package -pl beam-runner -am -DskipTests
 
-# Run DATA_SOURCE_DOWNLOAD locally (DirectRunner) — still uses JDBC for source config
+# Run DATA_SOURCE_DOWNLOAD locally (DirectRunner) — source config read from parameter_store
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --runner=DirectRunner \
   --processType=DATA_SOURCE_DOWNLOAD \
+  --parentId=TRADING \
   --datasourceName=trades \
-  --periodId=2024-01 \
+  --subprocessName=eod \
+  --periodId=202401 \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
-  --paramDbUrl=jdbc:postgresql://localhost:5432/params \
-  --paramDbUser=user \
-  --checkpointBqDataset=pipeline_metadata \
-  --processStatusBqDataset=pipeline_metadata
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=dw \
+  --checkpointBqProject=my-gcp-project \
+  --checkpointBqDataset=pipeline_metadata
 
 # Run REPORT_PROCESSING (BQ-configured) — no JDBC required
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
@@ -645,7 +667,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
   --paramBqProject=my-gcp-project \
-  --paramBqDataset=pipeline_config \
+  --paramBqDataset=dw \
   --emailSmtpHost=smtp.gmail.com \
   --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
 
@@ -654,7 +676,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 mvn -pl beam-runner exec:java \
   -Dexec.mainClass=com.yourco.beam.runner.example.ExampleWorkflow \
   "-Dexec.args=--project=my-gcp-project --paramBqProject=my-gcp-project \
-    --paramBqDataset=pipeline_config --reportName=daily_trades_summary \
+    --paramBqDataset=dw --reportName=daily_trades_summary \
     --reportSubprocess=eod --periodId=2024-01 \
     --periodStart=2024-01-01 --periodEnd=2024-01-31 \
     --processType=REPORT_PROCESSING --sinkType=GCS"
@@ -672,6 +694,7 @@ mvn -pl beam-runner exec:java \
 6. Secrets are never stored in `FrameworkOptions` values — only Secret Manager IDs.
 7. `BigQueryJobService`, `GcsUtils`, `BigQueryReportRepository`, `BigQuerySourceConfigRepository`, and `BigQueryParameterAdapter` are driver-JVM only — never inside DoFns.
 11. No JDBC. No SQL database connections. All config and data flow through BigQuery.
+12. No separate source_config table. All source connector config is stored in `parameter_store` as JSON in `parameters_val_json`.
 8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
 9. Every code change is accompanied by a README update in the same commit.
 10. A `data_source_checkpoints` LOADING row is created before every source download or report run, and updated to COMPLETED / FAILED_BNC / FAILED after. All data rows go to `data_source_records` as JSON blobs.

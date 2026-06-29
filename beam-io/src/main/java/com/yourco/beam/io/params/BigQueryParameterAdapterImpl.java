@@ -21,9 +21,9 @@ import java.util.Map;
  * BQ-client implementation of {@link BigQueryParameterAdapter}.
  *
  * <p>Looks up a single row from {@code parameter_store} by
- * ({@code ParameterGroupName}, {@code ParameterDataSource}, {@code ParameterName}),
- * parses {@code ParametersValJson} into a {@code Map<String, String>}, and uses
- * {@code SchemaOfJson} to identify which fields are required.
+ * ({@code parameter_group_name}, {@code parameter_data_source}, {@code parameter_name}),
+ * parses {@code parameters_val_json} into a {@code Map<String, String>}, and uses
+ * {@code schema_of_json} to identify which fields are required.
  *
  * <p>All queries use named parameters ({@code @name}) to prevent SQL injection.
  */
@@ -64,7 +64,7 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
                 required.add(entry.getKey());
             }
         });
-        LOG.info("SchemaOfJson declares {} required field(s) for {}/{}/{}",
+        LOG.info("schema_of_json declares {} required field(s) for {}/{}/{}",
                  required.size(), parameterGroupName, parameterDataSource, parameterName);
         return required;
     }
@@ -87,9 +87,9 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
         FieldValueList row = fetchRow(parameterGroupName, parameterDataSource, parameterName);
         if (row == null) {
             throw new IllegalStateException(
-                "No parameter_store row found for ParameterGroupName=" + parameterGroupName
-                + ", ParameterDataSource=" + parameterDataSource
-                + ", ParameterName=" + parameterName);
+                "No parameter_store row found for parameter_group_name=" + parameterGroupName
+                + ", parameter_data_source=" + parameterDataSource
+                + ", parameter_name=" + parameterName);
         }
 
         Map<String, String> params = parseValJson(row, parameterGroupName, parameterDataSource, parameterName);
@@ -103,7 +103,7 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
         }
         if (!missing.isEmpty()) {
             throw new IllegalStateException(
-                "Required parameters missing from ParametersValJson for "
+                "Required parameters missing from parameters_val_json for "
                 + parameterGroupName + "/" + parameterDataSource + "/" + parameterName
                 + ": " + missing);
         }
@@ -116,10 +116,10 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
     // ── BQ fetch ──────────────────────────────────────────────────────────────
 
     private FieldValueList fetchRow(String groupName, String dataSource, String paramName) {
-        String sql = "SELECT ParametersValJson, SchemaOfJson FROM " + storeTable
-            + " WHERE ParameterGroupName = @groupName"
-            + "   AND ParameterDataSource = @dataSource"
-            + "   AND ParameterName = @paramName"
+        String sql = "SELECT parameters_val_json, schema_of_json FROM " + storeTable
+            + " WHERE parameter_group_name = @groupName"
+            + "   AND parameter_data_source = @dataSource"
+            + "   AND parameter_name = @paramName"
             + " LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
@@ -144,10 +144,10 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
 
     private Map<String, String> parseValJson(FieldValueList row, String groupName,
                                              String dataSource, String paramName) {
-        String valJson = row.get("ParametersValJson").isNull()
-                         ? null : row.get("ParametersValJson").getStringValue();
+        String valJson = row.get("parameters_val_json").isNull()
+                         ? null : row.get("parameters_val_json").getStringValue();
         if (valJson == null || valJson.isBlank()) {
-            LOG.warn("ParametersValJson is empty for {}/{}/{}", groupName, dataSource, paramName);
+            LOG.warn("parameters_val_json is empty for {}/{}/{}", groupName, dataSource, paramName);
             return Collections.emptyMap();
         }
         try {
@@ -158,15 +158,15 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
                 result.put(e.getKey(), e.getValue().isNull() ? null : e.getValue().asText()));
             return result;
         } catch (Exception e) {
-            LOG.error("Failed to parse ParametersValJson for {}/{}/{}: {}",
+            LOG.error("Failed to parse parameters_val_json for {}/{}/{}: {}",
                       groupName, dataSource, paramName, e.getMessage());
             return Collections.emptyMap();
         }
     }
 
     private List<String> parseRequiredKeysFromSchema(FieldValueList row) {
-        String schemaJson = row.get("SchemaOfJson").isNull()
-                            ? null : row.get("SchemaOfJson").getStringValue();
+        String schemaJson = row.get("schema_of_json").isNull()
+                            ? null : row.get("schema_of_json").getStringValue();
         if (schemaJson == null || schemaJson.isBlank()) return Collections.emptyList();
         try {
             JsonNode schema = JSON.readTree(schemaJson);
@@ -179,7 +179,7 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
             });
             return required;
         } catch (Exception e) {
-            LOG.error("Failed to parse SchemaOfJson: {}", e.getMessage());
+            LOG.error("Failed to parse schema_of_json: {}", e.getMessage());
             return Collections.emptyList();
         }
     }
@@ -187,13 +187,13 @@ public final class BigQueryParameterAdapterImpl implements BigQueryParameterAdap
     private JsonNode fetchSchemaNode(String groupName, String dataSource, String paramName) {
         FieldValueList row = fetchRow(groupName, dataSource, paramName);
         if (row == null) return null;
-        String schemaJson = row.get("SchemaOfJson").isNull()
-                            ? null : row.get("SchemaOfJson").getStringValue();
+        String schemaJson = row.get("schema_of_json").isNull()
+                            ? null : row.get("schema_of_json").getStringValue();
         if (schemaJson == null || schemaJson.isBlank()) return null;
         try {
             return JSON.readTree(schemaJson);
         } catch (Exception e) {
-            LOG.error("Failed to parse SchemaOfJson: {}", e.getMessage());
+            LOG.error("Failed to parse schema_of_json: {}", e.getMessage());
             return null;
         }
     }
