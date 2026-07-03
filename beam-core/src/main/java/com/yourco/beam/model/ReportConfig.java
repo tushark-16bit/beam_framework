@@ -38,7 +38,7 @@ public final class ReportConfig implements Serializable {
 
     public final String reportName;
     public final String reportSubprocess;
-    public final String periodId;
+    public final int    periodId;
     /**
      * When true, run even if a {@code COMPLETED} status row already exists for this
      * report + period. Acts like {@code --overrideDownload} but for reports.
@@ -52,7 +52,7 @@ public final class ReportConfig implements Serializable {
     /** Null if no email is configured for this report. */
     public final ReportEmailConfig emailConfig;
 
-    public ReportConfig(String reportName, String reportSubprocess, String periodId,
+    public ReportConfig(String reportName, String reportSubprocess, int periodId,
                         boolean overrideKey,
                         List<ReportDatasourceRef>    datasources,
                         List<ReportPreprocessingStep> preprocessingSteps,

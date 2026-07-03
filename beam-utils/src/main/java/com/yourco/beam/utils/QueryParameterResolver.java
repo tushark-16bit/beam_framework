@@ -73,7 +73,7 @@ public final class QueryParameterResolver {
         return s
             .replace("{periodStart}", nvl(options.getPeriodStart()))
             .replace("{periodEnd}",   nvl(options.getPeriodEnd()))
-            .replace("{periodId}",    nvl(options.getPeriodId()))
+            .replace("{periodId}",    String.valueOf(options.getPeriodId()))
             .replace("{runDate}",     runDate);
     }
 

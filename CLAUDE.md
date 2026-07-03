@@ -137,7 +137,7 @@ retry/RetryingDoFn.java               Generic retry + DLQ routing via TupleTag.
 
 model/FailedRecord.java               DLQ envelope. @DefaultCoder(SerializableCoder.class).
 model/Schemas.java                    RAW_JSON schema constant.
-model/DataSourceCheckpoint.java       Checkpoint row: daId, srceNm, vsnNo, perId, flNm, balAndCntlSmryTx, staCd. BQ cols: da_id, srce_nm, vsn_no, per_id, fl_nm, bal_and_cntl_smry_tx, sta_cd.
+model/DataSourceCheckpoint.java       Checkpoint row: daId, srceNm, vsnNo, perId (int), flNm, balAndCntlSmryTx, staCd. BQ cols: da_id INT64, srce_nm, vsn_no, per_id INT64, fl_nm, bal_and_cntl_smry_tx, sta_cd. Timestamps: DATETIME (LocalDateTime).
 model/DataSourceRecord.java           Record row: recId (UUID), daId, rowDaJsonTx (JSON blob), loadDt. BQ cols: rec_id, da_id, row_da_json_tx, load_dt.
 
 -- DATA_SOURCE_DOWNLOAD models --
@@ -153,12 +153,16 @@ model/ValidationConfig.java           Post-fetch validation: header check, row c
 model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
 
 -- REPORT_PROCESSING models --
-model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob.
+model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int.
 model/ReportDatasourceRef.java        Required DS for a report + transform alias.
 model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
 model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
 model/ReportOutputConfig.java         File output: CSV/JSON, GCS path, prefix, suffix.
 model/ReportEmailConfig.java          Email: to, cc, subject/body templates with tokens.
+model/ReportCheckpoint.java           RptRefer row: rptId, rptNm, perId (int), rptDs, staCd, creatTs, lstUpdtTs. sta_cd: LOADING → COMPLETED / FAILED.
+model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtTs. Links a report run to a data source da_id.
+model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDaJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
+model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
 ```
 
 ### beam-io — connectors and I/O adapters
@@ -180,8 +184,10 @@ sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
 sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
 sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs (all sources).
 
-checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId().
-checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id).
+checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
+checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME.
+checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_PROCESSING tables: RptRefer, RptDaMap, RptStageDa, RptOutput.
+checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
 
 records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field).
 records/BigQueryDataSourceRecordAdapter.java  BQ query using JSON_VALUE(row_da_json_tx, '$.field') for BnC sums.
@@ -394,9 +400,9 @@ Main.runReportProcessing(options)
     │                                                  WHERE parameter_group_name=parentId
     │                                                    AND parameter_data_source=reportSubprocess
     │                                                    AND parameter_name=reportName
-    │                                                  → parse nested JSON → ReportConfig
-    ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint(reportName, periodId, reportName)
-    │   → da_id (LOADING row in DaRefer)
+    │                                                  → parse nested JSON → ReportConfig (periodId: int)
+    ├─ BigQueryReportCheckpointAdapter.createCheckpoint(reportName, periodId, reportName)
+    │   → rpt_id (LOADING row in RptRefer)
     │
     ├─ Phase 1: Preprocessing (optional)
     │   └─ for each ReportPreprocessingStep (by step_order):
@@ -406,9 +412,12 @@ Main.runReportProcessing(options)
     │   └─ for each required ReportDatasourceRef:
     │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srceNm, perId) → must be true
     │
-    ├─ Phase 3: Build alias registry
-    │   └─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId() × N
-    │       → alias → record-table subquery (SELECT row_da_json_tx ... WHERE da_id=X)
+    ├─ Phase 3: Build alias registry (stage datasource rows)
+    │   └─ for each ReportDatasourceRef:
+    │       ├─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId(srceNm, perId) → da_id
+    │       ├─ BigQueryReportCheckpointAdapter.addDaMapping(rptId, daId)   → map_id (RptDaMap row)
+    │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → copies DaRec rows to RptStageDa
+    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT stage_da_json_tx FROM RptStageDa WHERE map_id=X)
     │
     ├─ Phase 4: Transformation chain
     │   └─ for each ReportTransformStep (by step_order):
@@ -422,13 +431,17 @@ Main.runReportProcessing(options)
     │       ├─ BigQueryJobService.exportToCsv() or exportToJson()
     │       └─ record ExportedFile(gcsUri, fileName, contentType)
     │
-    ├─ Phase 6: Email (optional)
+    ├─ Phase 6: Write RptOutput rows + clear staged data
+    │   ├─ BigQueryReportCheckpointAdapter.writeOutput(rptId, outptCd, outputDs, ...) per output
+    │   └─ BigQueryReportCheckpointAdapter.clearStagedData(rptId)  → DELETE FROM RptStageDa WHERE map_id IN (...)
+    │
+    ├─ Phase 7: Email (optional)
     │   ├─ GcsUtils.readBytes(gcsUri) for each exported file
     │   ├─ resolve subject/body templates ({reportName}, {periodId}, etc.)
     │   └─ SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
     │
-    └─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED, null)
-       or updateStatus(daId, FAILED, null) if any phase threw
+    └─ BigQueryReportCheckpointAdapter.updateStatus(rptId, COMPLETED)
+       or updateStatus(rptId, FAILED) if any phase threw
 ```
 
 ---
@@ -560,12 +573,15 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 
 ## 13. DataSourceCheckpointAdapter — lifecycle contract
 
-One row per run in `DaRefer`. Both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` use this table.
+One row per run in `DaRefer`. Used by `DATA_SOURCE_DOWNLOAD` for source run lifecycle.
+`REPORT_PROCESSING` reads DaRefer (via `isCompleted()` and `fetchLatestCompletedDaId()`) to
+check datasource availability, but writes its own checkpoint to `RptRefer` via `ReportCheckpointAdapter`.
+`perId` is always `int`.
 
 ```
-// Before pipeline.run() / report.execute():
+// Before pipeline.run():
 long dsId = adapter.createCheckpoint(srceNm, perId, flNm)
-    — inserts LOADING row
+    — inserts LOADING row (perId: int → per_id INT64 in BQ)
     — da_id = SELECT MAX(da_id)+1 FROM DaRefer  (BQ sequence)
     — vsn_no = SELECT MAX(vsn_no)+1 WHERE srce_nm=X AND per_id=Y  (per-source version)
     — returns da_id for use in all record rows and final updateStatus()
@@ -634,12 +650,19 @@ inject it into `ReportPipelineFactory` via constructor.
 
 | Concept | Table | Written by | Read by |
 |---|---|---|---|
-| "Start/end of a source or report run" | `DaRefer` | `DataSourcePipelineFactory`, `ReportPipelineFactory` | `DataSourcePipelineFactory` (skip logic), `ReportPipelineFactory` (DS availability check) |
-| "Loaded rows from any source/report" | `DaRec` | `DataSourceRecordSinkTransform` (Beam workers) | `BigQueryDataSourceRecordAdapter` (validation), report transform chain |
+| "Start/end of a DATA_SOURCE_DOWNLOAD run" | `DaRefer` | `DataSourcePipelineFactory` | `DataSourcePipelineFactory` (skip logic), `ReportPipelineFactory` (DS availability check + da_id lookup) |
+| "Loaded rows from any source" | `DaRec` | `DataSourceRecordSinkTransform` (Beam workers) | `BigQueryDataSourceRecordAdapter` (BnC validation), `ReportCheckpointAdapter` (staging into RptStageDa) |
+| "Start/end of a REPORT_PROCESSING run" | `RptRefer` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | — |
+| "Report run → datasource mapping" | `RptDaMap` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | `ReportCheckpointAdapter.clearStagedData()` |
+| "Staged datasource rows for current report" | `RptStageDa` | `ReportCheckpointAdapter.stageFromDaRec()` | Transform chain (as subquery alias) |
+| "One row per output step of a report" | `RptOutput` | `ReportPipelineFactory` via `ReportCheckpointAdapter.writeOutput()` | — |
 
-Checkpoint lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED`.
-All rows from one run share the same `da_id` — shard-safe.
-`vsn_no` increments each time `(srce_nm, per_id)` is re-run.
+DATA_SOURCE_DOWNLOAD lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED`.
+REPORT_PROCESSING lifecycle: `LOADING → COMPLETED / FAILED`.
+All rows from one DATA_SOURCE_DOWNLOAD run share the same `da_id` — shard-safe.
+`vsn_no` in DaRefer increments each time `(srce_nm, per_id)` is re-run.
+`vsn_no` in RptOutput increments each time `(rpt_id, outpt_cd)` produces another version.
+`perId` is stored as `INT64` in all tables (Java `int`).
 
 ---
 

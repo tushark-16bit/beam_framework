@@ -79,13 +79,15 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getDatasourceName();
     void setDatasourceName(String value);
 
-    @Description("Period identifier for this run. Must exist in the MSTR_Per table. "
+    @Description("Period identifier for this run as an integer. Must exist in the MSTR_Per table. "
                  + "Encoding — MONTHLY: YYYYMM (e.g. 202401), "
                  + "DAILY: YYYYMMDD (e.g. 20240115), "
                  + "QUARTERLY: YYYYMMDDQQ (e.g. 2024011501). "
-                 + "Required for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING.")
-    String getPeriodId();
-    void setPeriodId(String value);
+                 + "Required for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING. "
+                 + "Stored as INT64 in DaRefer.per_id and RptRefer.per_id.")
+    @Default.Integer(0)
+    int getPeriodId();
+    void setPeriodId(int value);
 
     @Description("Subprocess identifier for data sources that have multiple distinct sub-feeds "
                  + "within the same datasource and period. "
@@ -173,46 +175,85 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
 
 
     // =========================================================================
-    // RUNTIME TABLE STORAGE (DaRefer, DaRec, COM_CmnRptDtl)
-    // Run lifecycle state is persisted to BigQuery by both process types:
-    //   DaRefer  — one row per run; LOADING → COMPLETED / FAILED_BNC / FAILED
-    //   DaRec    — all source rows as JSON blobs (DATA_SOURCE_DOWNLOAD writes here)
-    //   COM_CmnRptDtl — one row per output file written (REPORT_PROCESSING writes here)
-    // All three tables must be created manually — the framework only reads and writes them.
+    // RUNTIME TABLE STORAGE
+    // Run lifecycle state is persisted to BigQuery. All DATETIME columns (no timezone).
+    //
+    // DATA_SOURCE_DOWNLOAD tables:
+    //   DaRefer  — one row per source run; LOADING → COMPLETED / FAILED_BNC / FAILED
+    //   DaRec    — all source rows as JSON blobs (Beam workers write here)
+    //
+    // REPORT_PROCESSING tables:
+    //   RptRefer   — one row per report run; LOADING → COMPLETED / FAILED
+    //   RptDaMap   — maps each report run to the DaRefer.da_id(s) it consumed
+    //   RptStageDa — transient staging; DaRec rows copied here before transforms, deleted after
+    //   RptOutput  — one row per output step produced by the report
+    //
+    // All tables must be created manually — the framework only reads and writes them.
     // =========================================================================
 
-    @Description("GCP project for the checkpoint BigQuery table. "
+    @Description("GCP project for the checkpoint BigQuery tables. "
                  + "Defaults to the --project flag if not set.")
     String getCheckpointBqProject();
     void setCheckpointBqProject(String value);
 
-    @Description("BigQuery dataset for the checkpoint table.")
+    @Description("BigQuery dataset for all runtime tracking tables.")
     @Default.String("pipeline_metadata")
     String getCheckpointBqDataset();
     void setCheckpointBqDataset(String value);
 
     @Description("BigQuery table name for the DaRefer reference/checkpoint table. "
-                 + "Schema: da_id INT64, srce_nm STRING, vsn_no INT64, per_id STRING, "
+                 + "Schema: da_id INT64, srce_nm STRING, vsn_no INT64, per_id INT64, "
                  + "fl_nm STRING, bal_and_cntl_smry_tx STRING, sta_cd STRING, "
-                 + "created_ts TIMESTAMP, lst_updt_ts TIMESTAMP. "
-                 + "One row per pipeline run. sta_cd: LOADING → COMPLETED / FAILED_BNC / FAILED.")
+                 + "created_ts DATETIME, lst_updt_ts DATETIME. "
+                 + "One row per DATA_SOURCE_DOWNLOAD run. sta_cd: LOADING → COMPLETED / FAILED_BNC / FAILED.")
     @Default.String("DaRefer")
     String getDaReferTable();
     void setDaReferTable(String value);
 
     @Description("BigQuery table name for the DaRec record table. "
                  + "Schema: rec_id STRING, da_id INT64, row_da_json_tx STRING, "
-                 + "load_dt DATE, lst_updt_ts TIMESTAMP. Partitioned by load_dt. "
+                 + "load_dt DATE, lst_updt_ts DATETIME. Partitioned by load_dt. "
                  + "All source rows stored as JSON blobs, keyed by da_id.")
     @Default.String("DaRec")
     String getDaRecTable();
     void setDaRecTable(String value);
 
+    @Description("BigQuery table name for the RptRefer report checkpoint table. "
+                 + "Schema: rpt_id INT64, rpt_nm STRING, per_id INT64, rpt_ds STRING, "
+                 + "sta_cd STRING, creat_ts DATETIME, lst_updt_ts DATETIME. "
+                 + "One row per REPORT_PROCESSING run. sta_cd: LOADING → COMPLETED / FAILED.")
+    @Default.String("RptRefer")
+    String getRptReferTable();
+    void setRptReferTable(String value);
+
+    @Description("BigQuery table name for the RptDaMap datasource-mapping table. "
+                 + "Schema: map_id INT64, rpt_id INT64, da_id INT64, lst_updt_ts DATETIME. "
+                 + "Links each REPORT_PROCESSING run to the DaRefer.da_id(s) it consumed.")
+    @Default.String("RptDaMap")
+    String getRptDaMapTable();
+    void setRptDaMapTable(String value);
+
+    @Description("BigQuery table name for the RptStageDa staging table. "
+                 + "Schema: stage_id INT64, map_id INT64, stage_da_json_tx STRING, "
+                 + "query_config_tx STRING, load_dt DATE, lst_updt_ts DATETIME. "
+                 + "Transient: rows are inserted before the transform chain and deleted after.")
+    @Default.String("RptStageDa")
+    String getRptStageDaTable();
+    void setRptStageDaTable(String value);
+
+    @Description("BigQuery table name for the RptOutput output-tracking table. "
+                 + "Schema: outpt_cd STRING, rpt_dt DATETIME, vsn_no INT64, output_ds STRING, "
+                 + "line_refer_cd STRING, sched_tx STRING, bal_am FLOAT64, "
+                 + "rpt_type_cd STRING, rpt_id INT64, lst_updt_ts DATETIME. "
+                 + "One row per output step per REPORT_PROCESSING run.")
+    @Default.String("RptOutput")
+    String getRptOutputTable();
+    void setRptOutputTable(String value);
+
     @Description("BigQuery table name for the COM_CmnRptDtl common report detail table. "
-                 + "Schema: srce_sys_nm STRING, fl_nm STRING, srce_fl_create_ts TIMESTAMP, "
-                 + "fl_da_json_tx STRING, rec_ct INT64, creat_ts TIMESTAMP, create_user_id STRING, "
-                 + "lst_updt_ts TIMESTAMP, lst_updt_user_id STRING. "
-                 + "REPORT_PROCESSING writes final output rows here after each transform run.")
+                 + "Schema: srce_sys_nm STRING, fl_nm STRING, srce_fl_create_ts DATETIME, "
+                 + "fl_da_json_tx STRING, rec_ct INT64, creat_ts DATETIME, create_user_id STRING, "
+                 + "lst_updt_ts DATETIME, lst_updt_user_id STRING.")
     @Default.String("COM_CmnRptDtl")
     String getCmnRptDtlTable();
     void setCmnRptDtlTable(String value);

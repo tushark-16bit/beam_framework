@@ -120,7 +120,7 @@ public final class BigQuerySourceConfigRepository {
      * source configs are period-agnostic in {@code parameter_store}.
      */
     public List<String> getMissingParameters(String parentId, String datasource,
-                                              String subprocess, String periodId) {
+                                              String subprocess, int periodId) {
         String sql = "SELECT COUNT(*) AS cnt FROM " + storeTable
             + " WHERE parameter_group_name = @parentId"
             + "   AND parameter_data_source = @subprocess"
@@ -152,7 +152,7 @@ public final class BigQuerySourceConfigRepository {
      * checkpoint keying but is not used to filter the {@code parameter_store} row.
      */
     public List<SourceConfig> fetchSourceConfigs(String parentId, String datasource,
-                                                   String subprocess, String periodId) {
+                                                   String subprocess, int periodId) {
         String sql = "SELECT parameters_val_json, schema_of_json FROM " + storeTable
             + " WHERE parameter_group_name = @parentId"
             + "   AND parameter_data_source = @subprocess"
@@ -182,7 +182,7 @@ public final class BigQuerySourceConfigRepository {
     // ── Row mapping ───────────────────────────────────────────────────────────
 
     private SourceConfig mapToSourceConfig(Map<String, String> params, String parentId,
-                                            String datasource, String subprocess, String periodId) {
+                                            String datasource, String subprocess, int periodId) {
         String sourceTypeStr = params.get("source_type");
         if (sourceTypeStr == null || sourceTypeStr.isBlank()) {
             throw new IllegalStateException(

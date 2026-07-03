@@ -34,7 +34,7 @@ public interface DataSourceCheckpointAdapter {
      * @param flNm   source location — BQ table ref, file path, or API endpoint
      * @return the new {@code da_id} to pass to all DaRec rows and the final status update
      */
-    long createCheckpoint(String srceNm, String perId, String flNm);
+    long createCheckpoint(String srceNm, int perId, String flNm);
 
     /**
      * Updates the sta_cd (and optionally bal_and_cntl_smry_tx) of an existing DaRefer row.
@@ -49,20 +49,20 @@ public interface DataSourceCheckpointAdapter {
      * Returns true if DaRefer has a COMPLETED row for (srce_nm, per_id) —
      * used to skip already-finished sources.
      */
-    boolean isCompleted(String srceNm, String perId);
+    boolean isCompleted(String srceNm, int perId);
 
     /**
      * Returns the most recent DaRefer row for (srce_nm, per_id), if any.
      */
-    Optional<DataSourceCheckpoint> getLatest(String srceNm, String perId);
+    Optional<DataSourceCheckpoint> getLatest(String srceNm, int perId);
 
     /**
      * Returns the {@code da_id} of the most recent COMPLETED DaRefer row for a datasource.
      *
-     * <p>Used by REPORT_PROCESSING to build the DaRec subquery:
-     * {@code SELECT row_da_json_tx FROM DaRec WHERE da_id = X}.
+     * <p>Used by REPORT_PROCESSING alias-registry building to resolve which DaRec rows
+     * to stage into {@code RptStageDa} for this report run.
      *
      * @throws IllegalArgumentException if no COMPLETED row exists for (srce_nm, per_id)
      */
-    long fetchLatestCompletedDaId(String srceNm, String perId);
+    long fetchLatestCompletedDaId(String srceNm, int perId);
 }

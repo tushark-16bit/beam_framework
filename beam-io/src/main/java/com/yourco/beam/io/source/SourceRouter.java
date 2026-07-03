@@ -64,7 +64,8 @@ public final class SourceRouter {
         return switch (config.sourceType) {
             case API  -> pipeline.apply("Source-" + label, new ApiSourceTransform(config));
             case FILE -> pipeline.apply("Source-" + label,
-                             new FileSourceTransform(config, options.getPeriodId(), runDate));
+                             new FileSourceTransform(config,
+                                 String.valueOf(options.getPeriodId()), runDate));
             case BQ   -> pipeline.apply("Source-" + label, new BigQuerySourceTransform(options));
             case GCS  -> pipeline.apply("Source-" + label, new GcsSourceTransform(options));
             case PUBSUB -> throw new IllegalArgumentException(

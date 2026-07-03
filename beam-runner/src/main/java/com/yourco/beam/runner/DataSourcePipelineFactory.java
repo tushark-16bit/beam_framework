@@ -286,13 +286,13 @@ public final class DataSourcePipelineFactory {
 
     private void validateRequiredParameters(BigQuerySourceConfigRepository repo, FrameworkOptions options) {
         String datasource = options.getDatasourceName();
-        String period     = options.getPeriodId();
+        int    period     = options.getPeriodId();
         String subprocess = options.getSubprocessName();
 
         if (datasource == null || datasource.isBlank()) {
             throw new PipelineConfigurationException("--datasourceName is required for DATA_SOURCE_DOWNLOAD");
         }
-        if (period == null || period.isBlank()) {
+        if (period <= 0) {
             throw new PipelineConfigurationException("--periodId is required for DATA_SOURCE_DOWNLOAD");
         }
 

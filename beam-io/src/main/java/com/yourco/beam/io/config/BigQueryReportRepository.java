@@ -105,7 +105,7 @@ public final class BigQueryReportRepository {
      * @throws IllegalArgumentException if no matching {@code parameter_store} row exists
      */
     public ReportConfig fetchReportConfig(String reportName, String reportSubprocess,
-                                          String periodId) {
+                                          int periodId) {
         LOG.info("Fetching report config from parameter_store: parent={} report={} subprocess={}",
                  parentId, reportName, reportSubprocess);
 
@@ -146,7 +146,7 @@ public final class BigQueryReportRepository {
     // ── JSON parsing ──────────────────────────────────────────────────────────
 
     private ReportConfig parseReportConfig(String json, String reportName,
-                                            String reportSubprocess, String periodId) {
+                                            String reportSubprocess, int periodId) {
         try {
             JsonNode root = JSON.readTree(json);
 

@@ -30,7 +30,7 @@ public final class SourceConfig implements Serializable {
 
     public final String parentId;        // top-level business group (parent_id in source_config)
     public final String datasourceName;
-    public final String periodId;
+    public final int    periodId;
     public final String subprocessName;
     public final SourceType sourceType;
 
@@ -78,21 +78,21 @@ public final class SourceConfig implements Serializable {
 
     // ── Factory helpers (convenience wrappers around Builder) ─────────────────
 
-    public static SourceConfig forApi(String datasourceName, String periodId,
+    public static SourceConfig forApi(String datasourceName, int periodId,
                                       String subprocessName, ApiSourceConfig apiConfig) {
         return builder().datasourceName(datasourceName).periodId(periodId)
                         .subprocessName(subprocessName).sourceType(SourceType.API)
                         .apiConfig(apiConfig).build();
     }
 
-    public static SourceConfig forFile(String datasourceName, String periodId,
+    public static SourceConfig forFile(String datasourceName, int periodId,
                                        String subprocessName, FileSourceConfig fileConfig) {
         return builder().datasourceName(datasourceName).periodId(periodId)
                         .subprocessName(subprocessName).sourceType(SourceType.FILE)
                         .fileConfig(fileConfig).build();
     }
 
-    public static SourceConfig forBq(String datasourceName, String periodId,
+    public static SourceConfig forBq(String datasourceName, int periodId,
                                      String subprocessName, BqFetchConfig bqFetchConfig) {
         return builder().datasourceName(datasourceName).periodId(periodId)
                         .subprocessName(subprocessName).sourceType(SourceType.BQ)
@@ -104,7 +104,8 @@ public final class SourceConfig implements Serializable {
     // ── Builder ───────────────────────────────────────────────────────────────
 
     public static final class Builder {
-        private String parentId, datasourceName, periodId, subprocessName;
+        private String parentId, datasourceName, subprocessName;
+        private int    periodId;
         private SourceType sourceType;
         private ApiSourceConfig apiConfig;
         private FileSourceConfig fileConfig;
@@ -115,7 +116,7 @@ public final class SourceConfig implements Serializable {
 
         public Builder parentId(String v)                         { parentId = v;           return this; }
         public Builder datasourceName(String v)                   { datasourceName = v;     return this; }
-        public Builder periodId(String v)                         { periodId = v;           return this; }
+        public Builder periodId(int v)                            { periodId = v;           return this; }
         public Builder subprocessName(String v)                   { subprocessName = v;     return this; }
         public Builder sourceType(SourceType v)                   { sourceType = v;         return this; }
         public Builder apiConfig(ApiSourceConfig v)               { apiConfig = v;          return this; }

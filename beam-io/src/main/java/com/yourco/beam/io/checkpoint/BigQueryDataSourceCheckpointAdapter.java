@@ -10,9 +10,9 @@ import com.yourco.beam.options.FrameworkOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 /**
  * BigQuery implementation of {@link DataSourceCheckpointAdapter}.
@@ -27,6 +27,8 @@ import java.util.concurrent.TimeUnit;
 public final class BigQueryDataSourceCheckpointAdapter implements DataSourceCheckpointAdapter {
 
     private static final Logger LOG = LoggerFactory.getLogger(BigQueryDataSourceCheckpointAdapter.class);
+    private static final DateTimeFormatter BQ_DATETIME =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
 
     private final BigQuery bigquery;
     private final String   table;   // fully-qualified: `project.dataset.table`
@@ -46,10 +48,10 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
     }
 
     @Override
-    public long createCheckpoint(String srceNm, String perId, String flNm) {
+    public long createCheckpoint(String srceNm, int perId, String flNm) {
         long daId  = nextDaId();
         long vsnNo = nextVsnNo(srceNm, perId);
-        long nowMicros = TimeUnit.MILLISECONDS.toMicros(Instant.now().toEpochMilli());
+        String now = LocalDateTime.now().format(BQ_DATETIME);
 
         String sql = "INSERT INTO " + table
             + " (da_id, srce_nm, vsn_no, per_id, fl_nm, bal_and_cntl_smry_tx, sta_cd, created_ts, lst_updt_ts)"
@@ -59,10 +61,10 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             .addNamedParameter("daId",   QueryParameterValue.int64(daId))
             .addNamedParameter("srceNm", QueryParameterValue.string(srceNm))
             .addNamedParameter("vsnNo",  QueryParameterValue.int64(vsnNo))
-            .addNamedParameter("perId",  QueryParameterValue.string(perId))
+            .addNamedParameter("perId",  QueryParameterValue.int64(perId))
             .addNamedParameter("flNm",   QueryParameterValue.string(flNm != null ? flNm : ""))
             .addNamedParameter("staCd",  QueryParameterValue.string(DataSourceCheckpoint.STA_LOADING))
-            .addNamedParameter("now",    QueryParameterValue.timestamp(nowMicros))
+            .addNamedParameter("now",    QueryParameterValue.dateTime(now))
             .setUseLegacySql(false)
             .build();
 
@@ -74,7 +76,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
 
     @Override
     public void updateStatus(long daId, String staCd, String balAndCntlSmryTx) {
-        long nowMicros = TimeUnit.MILLISECONDS.toMicros(Instant.now().toEpochMilli());
+        String now = LocalDateTime.now().format(BQ_DATETIME);
         String sql = "UPDATE " + table
             + " SET sta_cd = @staCd, bal_and_cntl_smry_tx = @bnc, lst_updt_ts = @now"
             + " WHERE da_id = @daId";
@@ -84,7 +86,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
             .addNamedParameter("bnc",   balAndCntlSmryTx != null
                                         ? QueryParameterValue.string(balAndCntlSmryTx)
                                         : QueryParameterValue.string(""))
-            .addNamedParameter("now",   QueryParameterValue.timestamp(nowMicros))
+            .addNamedParameter("now",   QueryParameterValue.dateTime(now))
             .addNamedParameter("daId",  QueryParameterValue.int64(daId))
             .setUseLegacySql(false)
             .build();
@@ -94,7 +96,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
     }
 
     @Override
-    public boolean isCompleted(String srceNm, String perId) {
+    public boolean isCompleted(String srceNm, int perId) {
         // Filter on sta_cd first so a newer LOADING/FAILED row cannot shadow an older COMPLETED row.
         String sql = "SELECT da_id FROM " + table
             + " WHERE srce_nm = @srceNm AND per_id = @perId AND sta_cd = @completed"
@@ -102,7 +104,7 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("srceNm",    QueryParameterValue.string(srceNm))
-            .addNamedParameter("perId",     QueryParameterValue.string(perId))
+            .addNamedParameter("perId",     QueryParameterValue.int64(perId))
             .addNamedParameter("completed", QueryParameterValue.string(DataSourceCheckpoint.STA_COMPLETED))
             .setUseLegacySql(false)
             .build();
@@ -116,29 +118,30 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
     }
 
     @Override
-    public Optional<DataSourceCheckpoint> getLatest(String srceNm, String perId) {
+    public Optional<DataSourceCheckpoint> getLatest(String srceNm, int perId) {
         String sql = "SELECT * FROM " + table
             + " WHERE srce_nm = @srceNm AND per_id = @perId"
             + " ORDER BY lst_updt_ts DESC LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("srceNm", QueryParameterValue.string(srceNm))
-            .addNamedParameter("perId",  QueryParameterValue.string(perId))
+            .addNamedParameter("perId",  QueryParameterValue.int64(perId))
             .setUseLegacySql(false)
             .build();
 
         try {
             for (FieldValueList row : bigquery.query(config).iterateAll()) {
+                var pId = row.get("per_id");
                 return Optional.of(new DataSourceCheckpoint(
                     row.get("da_id").getLongValue(),
                     row.get("srce_nm").getStringValue(),
                     row.get("vsn_no").getLongValue(),
-                    strOrNull(row, "per_id"),
+                    pId.isNull() ? 0 : (int) pId.getLongValue(),
                     strOrNull(row, "fl_nm"),
                     strOrNull(row, "bal_and_cntl_smry_tx"),
                     row.get("sta_cd").getStringValue(),
-                    Instant.parse(row.get("created_ts").getStringValue()),
-                    Instant.parse(row.get("lst_updt_ts").getStringValue())
+                    LocalDateTime.parse(row.get("created_ts").getStringValue(), BQ_DATETIME),
+                    LocalDateTime.parse(row.get("lst_updt_ts").getStringValue(), BQ_DATETIME)
                 ));
             }
         } catch (InterruptedException e) {
@@ -149,14 +152,14 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
     }
 
     @Override
-    public long fetchLatestCompletedDaId(String srceNm, String perId) {
+    public long fetchLatestCompletedDaId(String srceNm, int perId) {
         String sql = "SELECT da_id FROM " + table
             + " WHERE srce_nm = @srceNm AND per_id = @perId AND sta_cd = 'COMPLETED'"
             + " ORDER BY lst_updt_ts DESC LIMIT 1";
 
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("srceNm", QueryParameterValue.string(srceNm))
-            .addNamedParameter("perId",  QueryParameterValue.string(perId))
+            .addNamedParameter("perId",  QueryParameterValue.int64(perId))
             .setUseLegacySql(false)
             .build();
 
@@ -180,12 +183,12 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
         return queryLong(sql, "next_id");
     }
 
-    private long nextVsnNo(String srceNm, String perId) {
+    private long nextVsnNo(String srceNm, int perId) {
         String sql = "SELECT IFNULL(MAX(vsn_no), 0) + 1 AS next_vsn FROM " + table
             + " WHERE srce_nm = @srceNm AND per_id = @perId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("srceNm", QueryParameterValue.string(srceNm))
-            .addNamedParameter("perId",  QueryParameterValue.string(perId))
+            .addNamedParameter("perId",  QueryParameterValue.int64(perId))
             .setUseLegacySql(false)
             .build();
         try {

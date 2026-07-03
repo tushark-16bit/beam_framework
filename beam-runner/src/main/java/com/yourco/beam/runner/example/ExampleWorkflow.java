@@ -84,7 +84,7 @@ public final class ExampleWorkflow {
         String parentId    = options.getParentId();          // → parameter_group_name column
         String reportName  = options.getReportName();       // → parameter_name column
         String subprocess  = options.getReportSubprocess(); // → parameter_data_source column
-        String periodId    = options.getPeriodId();
+        int    periodId    = options.getPeriodId();
         String periodStart = options.getPeriodStart();
         String periodEnd   = options.getPeriodEnd();
 
@@ -128,11 +128,11 @@ public final class ExampleWorkflow {
             .replace("{source_bq_table}",   sourceBqTable)
             .replace("{periodStart}",        periodStart  != null ? periodStart : "")
             .replace("{periodEnd}",          periodEnd    != null ? periodEnd   : "")
-            .replace("{periodId}",           periodId     != null ? periodId    : "")
+            .replace("{periodId}",           String.valueOf(periodId))
             .replace("{runDate}",            today);
 
         String resolvedFileName = outputFileName
-            .replace("{periodId}", periodId != null ? periodId : "")
+            .replace("{periodId}", String.valueOf(periodId))
             .replace("{runDate}",  today);
 
         LOG.info("Resolved query → target table: {}", transformOutputTable);
