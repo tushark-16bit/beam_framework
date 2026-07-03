@@ -317,7 +317,7 @@ substitutions:
 | `--processType` | What runs | Source config from |
 |---|---|---|
 | `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer` | BQ `parameter_store` table (keyed by `parameter_group_name`, `parameter_data_source`, `parameter_name`) |
-| `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, runs BQ transform chain, routes output to GCS/BQ/API, writes `COM_CmnRptDtl`, sends email | BQ `report_config` + 5 related tables |
+| `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, stages data into `RptStageDa`, runs BQ transform chain, writes `RptOutput`, sends email | BQ `parameter_store` (nested JSON config) |
 | `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
 
 The two process types are designed to be scheduled as **separate, sequential Airflow DAGs**:
@@ -394,55 +394,73 @@ When `--reportName` is set alongside `--processType=REPORT_PROCESSING`, the
 ### Execution flow
 
 ```
- 1. Resolve MSTR_Per for --periodId            (validate period exists)
- 2. Fetch ReportConfig from BQ                 (report_config + 5 related tables)
- 3. Insert DaRefer row sta_cd=LOADING
- 4. Run preprocessing steps                    (BQ jobs — BQ_QUERY or API_ENRICHMENT)
- 5. Check datasource availability              (all required DSes must have DaRefer sta_cd=COMPLETED)
- 6. Build alias registry                       (alias → SELECT row_da_json_tx FROM DaRec WHERE da_id=X)
- 7. Run transformation chain                   (BQ jobs; each step materialises to a BQ table)
- 8. Route each output via ReportOutputSinkRouter:
-      GCS  → BQ extract job → CSV or JSON file
-      BQ   → SELECT * INTO destination table (WRITE_TRUNCATE)
-      API  → POST JSON array to external endpoint (auth via Secret Manager)
- 9. Insert COM_CmnRptDtl row per output        (all sink types)
-10. Send email                                 (GCS outputs as attachments; if configured)
-11. Update DaRefer sta_cd → COMPLETED / FAILED
+ 1. Fetch ReportConfig from BQ                 (parameter_store nested JSON)
+ 2. Insert RptRefer row sta_cd=LOADING         → rpt_id
+ 3. Run preprocessing steps                    (BQ jobs — BQ_QUERY)
+ 4. Check datasource availability              (all required DSes must have DaRefer sta_cd=COMPLETED)
+ 5. Add RptDaMap rows                          (rpt_id → da_id from DaRefer, one per datasource)
+ 6. Stage data into RptStageDa                 (copy rows from DaRec per map_id)
+ 7. Build alias registry                       (alias → staged-data subquery or BQ table ref)
+ 8. Run transformation chain                   (BQ jobs; each step materialises to a BQ table)
+ 9. Export outputs to GCS / BQ
+10. Insert RptOutput row per output; clear RptStageDa rows
+11. Send email                                 (GCS outputs as attachments; if configured)
+12. Update RptRefer sta_cd → COMPLETED / FAILED
 ```
 
-### BQ config tables required
+### BQ tracking tables
 
-All report config tables live in the BQ dataset specified by `--paramBqProject` and `--paramBqDataset`.
-See `EXAMPLE.md` for full DDL. Summary:
+All report tracking tables live in the BQ dataset specified by `--checkpointBqProject` and `--checkpointBqDataset`. Table names are CLI-configurable (defaults shown).
+
+| Table | CLI flag (default) | Purpose |
+|---|---|---|
+| `RptRefer` | `--rptReferTable` | Report run lifecycle: one row per run, `sta_cd` = LOADING → COMPLETED / FAILED |
+| `RptDaMap` | `--rptDaMapTable` | Maps each report run (`rpt_id`) to the datasource runs it consumed (`da_id` from `DaRefer`) |
+| `RptStageDa` | `--rptStageDaTable` | Transient staging area: rows copied from `DaRec` before transforms; deleted after export |
+| `RptOutput` | `--rptOutputTable` | One row per output step: output code, report date, version, balance amount, type |
 
 ```sql
--- report_config: one row per (report_name, report_subprocess, period_id)
--- report_datasource_ref: which DaRec datasources are needed and under what alias
--- report_preprocessing_config: optional BQ/API enrichment before transforms
--- report_transformation_config: ordered BQ jobs; each materialises to a BQ table
--- report_email_config: SMTP recipients and message templates
+-- RptRefer: report run checkpoint
+CREATE TABLE RptRefer (
+  rpt_id       INT64    NOT NULL,   -- MAX(rpt_id)+1 sequence
+  rpt_nm       STRING   NOT NULL,   -- report name
+  per_id       INT64    NOT NULL,   -- period id (integer, e.g. 202401)
+  rpt_ds       STRING,              -- report description
+  sta_cd       STRING   NOT NULL,   -- LOADING | COMPLETED | FAILED
+  creat_ts     DATETIME NOT NULL,
+  lst_updt_ts  DATETIME NOT NULL
+);
 
--- report_output_config: one row per output — sink_type drives where the result goes
-CREATE TABLE IF NOT EXISTS `my-project.dw.report_output_config` (
-  report_name        STRING NOT NULL,
-  report_subprocess  STRING NOT NULL,
-  period_id          STRING NOT NULL,
-  output_order       INT64  NOT NULL,
-  input_alias        STRING NOT NULL,   -- alias whose BQ table to export
-  sink_type          STRING,            -- GCS (default) | BQ | API
-  -- GCS sink
-  output_format      STRING,            -- CSV | JSON
-  gcs_path           STRING,            -- gs://bucket/reports/
-  file_prefix        STRING,
-  file_suffix        STRING,
-  include_header     BOOL,
-  -- BQ sink
-  bq_sink_table      STRING,            -- project.dataset.table to WRITE_TRUNCATE into
-  -- API sink
-  api_endpoint       STRING,            -- target URL
-  api_method         STRING,            -- POST | PUT (default POST)
-  api_auth_secret_id STRING,            -- Secret Manager ID for Bearer token
-  api_headers_json   STRING             -- {"X-Custom-Header": "value"}
+-- RptDaMap: links a report run to datasource da_ids
+CREATE TABLE RptDaMap (
+  map_id       INT64    NOT NULL,   -- MAX(map_id)+1 sequence
+  rpt_id       INT64    NOT NULL,   -- FK → RptRefer.rpt_id
+  da_id        INT64    NOT NULL,   -- FK → DaRefer.da_id
+  lst_updt_ts  DATETIME NOT NULL
+);
+
+-- RptStageDa: transient staged rows (deleted after export)
+CREATE TABLE RptStageDa (
+  stage_id          INT64    NOT NULL,
+  map_id            INT64    NOT NULL,   -- FK → RptDaMap.map_id
+  stage_da_json_tx  STRING   NOT NULL,   -- row JSON blob
+  query_config_tx   STRING,
+  load_dt           DATE     NOT NULL,
+  lst_updt_ts       DATETIME NOT NULL
+);
+
+-- RptOutput: one row per output per run
+CREATE TABLE RptOutput (
+  outpt_cd      STRING   NOT NULL,
+  rpt_dt        DATETIME NOT NULL,
+  vsn_no        INT64    NOT NULL,   -- increments per (rpt_id, outpt_cd) on reruns
+  output_ds     STRING,
+  line_refer_cd STRING,
+  sched_tx      STRING,
+  bal_am        FLOAT64,
+  rpt_type_cd   STRING,
+  rpt_id        INT64    NOT NULL,   -- FK → RptRefer.rpt_id
+  lst_updt_ts   DATETIME NOT NULL
 );
 ```
 
@@ -470,17 +488,21 @@ options={
     "--parentId":             "TRADING",          # → parameter_group_name in parameter_store
     "--reportName":           "daily_trades_summary",
     "--reportSubprocess":     "eod",
-    "--periodId":             "202401",           # MONTHLY format YYYYMM (must exist in MSTR_Per)
+    "--periodId":             "202401",           # integer, e.g. YYYYMM or YYYYMMDD
     "--periodStart":          "2024-01-01",
     "--periodEnd":            "2024-01-31",
     "--runDate":              "{{ ds }}",
     "--paramBqProject":       "my-gcp-project",
     "--paramBqDataset":       "dw",
+    "--checkpointBqProject":  "my-gcp-project",
     "--checkpointBqDataset":  "pipeline_metadata",
     "--daReferTable":         "DaRefer",
     "--daRecTable":           "DaRec",
-    "--cmnRptDtlTable":       "COM_CmnRptDtl",
-    # --sinkType is NOT required — output routing comes from report_output_config.sink_type
+    "--rptReferTable":        "RptRefer",
+    "--rptDaMapTable":        "RptDaMap",
+    "--rptStageDaTable":      "RptStageDa",
+    "--rptOutputTable":       "RptOutput",
+    # --sinkType is NOT required — output routing comes from report output config
 }
 ```
 

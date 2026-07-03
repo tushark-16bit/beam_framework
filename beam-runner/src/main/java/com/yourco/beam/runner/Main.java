@@ -35,14 +35,17 @@ import org.slf4j.LoggerFactory;
  * <h2>REPORT_PROCESSING lifecycle (DB-configured)</h2>
  * <pre>
  *   ReportPipelineFactory.execute() — runs entirely in the driver JVM (no Beam workers):
- *        ├─ Resolve MSTR_Per, load ReportConfig from BQ
- *        ├─ Insert DaRefer row sta_cd=LOADING
+ *        ├─ Load ReportConfig from BQ (parameter_store)
+ *        ├─ Insert RptRefer row sta_cd=LOADING → returns rpt_id
+ *        ├─ Run preprocessing steps              (BQ_QUERY jobs)
  *        ├─ Check all required datasources have DaRefer sta_cd=COMPLETED
- *        ├─ Run transform chain (BQ jobs, each materialised to a temp table)
- *        ├─ Route each output → GCS / BQ / API via ReportOutputSinkRouter
- *        ├─ Insert COM_CmnRptDtl row per output
+ *        ├─ Add RptDaMap rows (rpt_id → da_id per datasource)
+ *        ├─ Stage rows into RptStageDa (copied from DaRec per map_id)
+ *        ├─ Run transform chain (BQ jobs, each materialised to a BQ table)
+ *        ├─ Export outputs to GCS/BQ
+ *        ├─ Insert RptOutput row per output; clear RptStageDa rows
  *        ├─ Send email (GCS outputs as attachments, if configured)
- *        └─ UPDATE DaRefer sta_cd → COMPLETED / FAILED
+ *        └─ UPDATE RptRefer sta_cd → COMPLETED / FAILED
  * </pre>
  */
 public final class Main {

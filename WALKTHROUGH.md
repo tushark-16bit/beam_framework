@@ -208,32 +208,28 @@ sequenceDiagram
     autonumber
     participant Main
     participant RPF as ReportPipelineFactory
-    participant Per as BigQuery<br/>(MSTR_Per)
     participant BQRepo as BigQueryReportRepository
-    participant CfgBQ as BigQuery<br/>(dw)
-    participant Checkpoint as BigQueryDataSourceCheckpointAdapter<br/>(DaRefer)
+    participant CfgBQ as BigQuery<br/>(parameter_store)
+    participant RptAdapter as BigQueryReportCheckpointAdapter<br/>(RptRefer / RptDaMap / RptStageDa / RptOutput)
+    participant DsAdapter as BigQueryDataSourceCheckpointAdapter<br/>(DaRefer)
     participant BQJob as BigQueryJobService
     participant DataBQ as BigQuery<br/>(data / report tables)
     participant DaRec as BigQuery<br/>(DaRec)
-    participant CmnRpt as BigQueryCommonReportDetailAdapter<br/>(COM_CmnRptDtl)
-    participant Router as ReportOutputSinkRouter
     participant GCS as Cloud Storage
     participant SMTP as SMTP Server
 
     Main->>RPF: execute(options)
 
     rect rgb(230, 240, 255)
-        Note over RPF,Per: Phase 1 — Period + config load
-        RPF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
-        Per-->>RPF: Period (per_dt, mo_no, yr_no, per_typ_cd)
+        Note over RPF,CfgBQ: Phase 1 — Config load
         RPF->>BQRepo: fetchReportConfig(reportName, subprocess, periodId)
         BQRepo->>CfgBQ: SELECT parameters_val_json FROM parameter_store<br/>WHERE parameter_group_name=parentId AND parameter_data_source=subprocess<br/>AND parameter_name=reportName
         CfgBQ-->>BQRepo: parameters_val_json (nested JSON blob)
         BQRepo-->>RPF: ReportConfig (parsed from JSON)
     end
 
-    RPF->>Checkpoint: createCheckpoint(srce_nm=reportName, per_id, fl_nm=reportName)
-    Checkpoint-->>RPF: da_id (LOADING row inserted into DaRefer)
+    RPF->>RptAdapter: createCheckpoint(rptNm=reportName, perId, rptDs=reportName)
+    RptAdapter-->>RPF: rpt_id (LOADING row inserted into RptRefer)
 
     rect rgb(255, 245, 220)
         Note over RPF,DataBQ: Phase 2 — Preprocessing (optional)
@@ -246,33 +242,35 @@ sequenceDiagram
     end
 
     rect rgb(255, 235, 235)
-        Note over RPF,Checkpoint: Phase 3 — Datasource availability check
+        Note over RPF,DsAdapter: Phase 3 — Datasource availability check
         loop each required ReportDatasourceRef
-            RPF->>Checkpoint: isCompleted(srce_nm=datasourceName, per_id)
-            Checkpoint->>DaRec: SELECT da_id FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED'
-            DaRec-->>Checkpoint: da_id or empty
+            RPF->>DsAdapter: isCompleted(srce_nm=datasourceName, per_id)
+            DsAdapter->>DataBQ: SELECT sta_cd FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED'
+            DataBQ-->>DsAdapter: row or empty
             alt no COMPLETED row
-                RPF->>Checkpoint: updateStatus(da_id, FAILED, null)
+                RPF->>RptAdapter: updateStatus(rpt_id, FAILED)
                 RPF-->>Main: throws RuntimeException
             end
         end
     end
 
     rect rgb(230, 255, 235)
-        Note over RPF,DaRec: Phase 4 — Build alias registry
+        Note over RPF,DaRec: Phase 4 — Map datasources + stage data
         loop each ReportDatasourceRef
-            RPF->>Checkpoint: fetchLatestCompletedDaId(datasourceName, periodId)
-            Checkpoint->>DaRec: SELECT da_id FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED' ORDER BY lst_updt_ts DESC LIMIT 1
-            DaRec-->>Checkpoint: da_id
-            Checkpoint-->>RPF: da_id
-            RPF->>RPF: aliasRegistry.put(alias, "SELECT row_da_json_tx FROM DaRec WHERE da_id=X")
+            RPF->>DsAdapter: fetchLatestCompletedDaId(datasourceName, periodId)
+            DsAdapter-->>RPF: da_id
+            RPF->>RptAdapter: addDaMapping(rpt_id, da_id)
+            RptAdapter-->>RPF: map_id (row inserted into RptDaMap)
+            RPF->>RptAdapter: stageFromDaRec(map_id, da_id)
+            RptAdapter->>DaRec: INSERT INTO RptStageDa SELECT ... FROM DaRec WHERE da_id=?
+            RPF->>RPF: aliasRegistry.put(alias, stagedDataSubquery(map_id))
         end
     end
 
     rect rgb(240, 230, 255)
         Note over RPF,DataBQ: Phase 5 — Transformation chain
         loop each ReportTransformStep (by step_order)
-            RPF->>RPF: resolveAliasTokens({alias} → DaRec subquery or prior output table)
+            RPF->>RPF: resolveAliasTokens({alias} → RptStageDa subquery or prior output table)
             RPF->>BQJob: runQueryToTable(resolvedSQL, step.outputBqTable)
             BQJob->>DataBQ: CREATE QueryJob → materialise to outputBqTable
             RPF->>RPF: aliasRegistry.put(step.outputAlias, step.outputBqTable)
@@ -280,30 +278,33 @@ sequenceDiagram
     end
 
     rect rgb(255, 250, 220)
-        Note over RPF,GCS: Phase 6 — Output sink routing (per ReportOutputConfig)
+        Note over RPF,GCS: Phase 6 — Export outputs
         loop each ReportOutputConfig (by output_order)
             RPF->>RPF: aliasRegistry.get(inputAlias) → sourceTable
-            RPF->>Router: route(outputConfig, sourceTable, config, options)
-            alt sinkType = GCS
-                Router->>BQJob: exportToCsv / exportToJson(sourceTable, gcsUri)
-                BQJob->>GCS: write file
-                Router-->>RPF: OutputResult(GCS, gcsUri, fileName, hasAttachment=true)
-            else sinkType = BQ
-                Router->>BQJob: copyTable(sourceTable, bqSinkTable)
-                Router-->>RPF: OutputResult(BQ, bqSinkTable, hasAttachment=false)
-            else sinkType = API
-                Router->>DataBQ: SELECT TO_JSON_STRING(t) FROM sourceTable
-                Router->>Router: POST JSON array (auth from Secret Manager)
-                Router-->>RPF: OutputResult(API, endpoint, rowCount, hasAttachment=false)
+            alt outputFormat = CSV
+                RPF->>BQJob: exportToCsv(sourceTable, gcsUri, includeHeader)
+                BQJob->>GCS: write CSV file
+            else outputFormat = JSON
+                RPF->>BQJob: exportToJson(sourceTable, gcsUri)
+                BQJob->>GCS: write JSON file
             end
-            RPF->>CmnRpt: insertDetail(srce_sys_nm=reportName, fl_nm, rec_ct, userId)
         end
     end
 
+    rect rgb(255, 235, 210)
+        Note over RPF,RptAdapter: Phase 7 — Write RptOutput + clear staged data
+        loop each ReportOutputConfig
+            RPF->>RptAdapter: writeOutput(rpt_id, outptCd, outputDs, lineReferCd, schedTx, balAm, rptTypeCd)
+            RptAdapter->>DataBQ: INSERT INTO RptOutput (vsn_no = MAX(vsn_no)+1)
+        end
+        RPF->>RptAdapter: clearStagedData(rpt_id)
+        RptAdapter->>DataBQ: DELETE FROM RptStageDa WHERE map_id IN (SELECT map_id FROM RptDaMap WHERE rpt_id=?)
+    end
+
     rect rgb(220, 245, 255)
-        Note over RPF,SMTP: Phase 7 — Email (GCS outputs only, optional)
+        Note over RPF,SMTP: Phase 8 — Email (GCS outputs only, optional)
         opt hasEmail
-            loop each OutputResult where hasAttachment=true
+            loop each exported GCS file
                 RPF->>GCS: GcsUtils.readBytes(gcsUri)
                 GCS-->>RPF: byte[]
             end
@@ -311,7 +312,7 @@ sequenceDiagram
         end
     end
 
-    RPF->>Checkpoint: updateStatus(da_id, COMPLETED, null) or (FAILED, null)
+    RPF->>RptAdapter: updateStatus(rpt_id, COMPLETED) or updateStatus(rpt_id, FAILED)
 ```
 
 ### 6b. ExampleWorkflow — key-value BigQueryParameterAdapter pattern
@@ -394,27 +395,27 @@ flowchart TD
 
 ---
 
-## 8. DaRefer State Machine
+## 8. Checkpoint State Machines
 
-Both `DATA_SOURCE_DOWNLOAD` (per source) and `REPORT_PROCESSING` write to `DaRefer`.
-Each run creates one row (`sta_cd=LOADING`), then updates it to a terminal state.
+### DaRefer — DATA_SOURCE_DOWNLOAD
+
+`DATA_SOURCE_DOWNLOAD` writes one `DaRefer` row per source per run.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> LOADING : createCheckpoint() before pipeline.run() / report.execute()
+    [*] --> LOADING : createCheckpoint() before pipeline.run()
 
-    LOADING --> COMPLETED : DATA_SOURCE_DOWNLOAD: pipeline DONE + row-count and BnC checks passed\nREPORT_PROCESSING: all outputs routed and COM_CmnRptDtl written
+    LOADING --> COMPLETED : pipeline DONE + row-count and BnC checks passed
 
-    LOADING --> FAILED_BNC : DATA_SOURCE_DOWNLOAD only:\npipeline DONE but row count outside min/max\nor BnC SUM exceeds tolerance %
+    LOADING --> FAILED_BNC : pipeline DONE but row count outside min/max\nor BnC SUM exceeds tolerance %
 
-    LOADING --> FAILED : pipeline threw exception\nor required datasource has no COMPLETED DaRefer row\nor any ReportPipelineFactory phase threw
+    LOADING --> FAILED : pipeline threw exception
 
     COMPLETED --> [*]
     FAILED_BNC --> [*]
     FAILED --> [*]
 
     note right of LOADING
-        createCheckpoint() inserts into DaRefer.
         da_id = MAX(da_id)+1 across all DaRefer rows.
         vsn_no = MAX(vsn_no)+1 per (srce_nm, per_id).
         All DaRec rows for this run share the same da_id.
@@ -427,6 +428,29 @@ stateDiagram-v2
     end note
 ```
 
+### RptRefer — REPORT_PROCESSING
+
+`REPORT_PROCESSING` writes one `RptRefer` row per report run.
+
+```mermaid
+stateDiagram-v2
+    [*] --> LOADING : createCheckpoint() before execute()
+
+    LOADING --> COMPLETED : all phases complete (transforms + exports + email)
+
+    LOADING --> FAILED : any phase threw (datasource unavailable, BQ job error, etc.)
+
+    COMPLETED --> [*]
+    FAILED --> [*]
+
+    note right of LOADING
+        rpt_id = MAX(rpt_id)+1 across all RptRefer rows.
+        RptDaMap rows added after LOADING (one per datasource).
+        RptStageDa rows populated from DaRec; cleared after export.
+        RptOutput rows written per output step.
+    end note
+```
+
 ---
 
 ## 9. Key Model Relationships
@@ -435,7 +459,7 @@ stateDiagram-v2
 classDiagram
     class SourceConfig {
         +String datasourceName
-        +String periodId
+        +int periodId
         +String subprocessName
         +SourceType sourceType
         +ApiSourceConfig apiConfig
@@ -588,7 +612,7 @@ erDiagram
 ## 11. BigQuery Tables — Runtime State
 
 These tables are written at runtime (in `--checkpointBqDataset`, default `pipeline_metadata`).
-Both process types use `DaRefer`. `DATA_SOURCE_DOWNLOAD` writes `DaRec`. `REPORT_PROCESSING` writes `COM_CmnRptDtl`.
+`DATA_SOURCE_DOWNLOAD` uses `DaRefer` + `DaRec`. `REPORT_PROCESSING` uses `DaRefer` (read-only, availability check) + `RptRefer` / `RptDaMap` / `RptStageDa` / `RptOutput`.
 
 ```mermaid
 erDiagram
@@ -596,12 +620,12 @@ erDiagram
         INT64 da_id PK
         STRING srce_nm
         INT64 vsn_no
-        STRING per_id
+        INT64 per_id
         STRING fl_nm
         STRING bal_and_cntl_smry_tx
         STRING sta_cd
-        TIMESTAMP created_ts
-        TIMESTAMP lst_updt_ts
+        DATETIME created_ts
+        DATETIME lst_updt_ts
     }
 
     DaRec {
@@ -609,39 +633,67 @@ erDiagram
         INT64 da_id FK
         STRING row_da_json_tx
         DATE load_dt
-        TIMESTAMP lst_updt_ts
+        DATETIME lst_updt_ts
     }
 
-    COM_CmnRptDtl {
-        STRING srce_sys_nm
-        STRING fl_nm
-        TIMESTAMP srce_fl_create_ts
-        STRING fl_da_json_tx
-        INT64 rec_ct
-        TIMESTAMP creat_ts
-        STRING create_user_id
-        TIMESTAMP lst_updt_ts
-        STRING lst_updt_user_id
+    RptRefer {
+        INT64 rpt_id PK
+        STRING rpt_nm
+        INT64 per_id
+        STRING rpt_ds
+        STRING sta_cd
+        DATETIME creat_ts
+        DATETIME lst_updt_ts
+    }
+
+    RptDaMap {
+        INT64 map_id PK
+        INT64 rpt_id FK
+        INT64 da_id FK
+        DATETIME lst_updt_ts
+    }
+
+    RptStageDa {
+        INT64 stage_id PK
+        INT64 map_id FK
+        STRING stage_da_json_tx
+        STRING query_config_tx
+        DATE load_dt
+        DATETIME lst_updt_ts
+    }
+
+    RptOutput {
+        STRING outpt_cd
+        DATETIME rpt_dt
+        INT64 vsn_no
+        STRING output_ds
+        STRING line_refer_cd
+        STRING sched_tx
+        FLOAT64 bal_am
+        STRING rpt_type_cd
+        INT64 rpt_id FK
+        DATETIME lst_updt_ts
     }
 
     DaRefer ||--o{ DaRec : "da_id (DATA_SOURCE_DOWNLOAD rows)"
-    DaRefer ||--o{ COM_CmnRptDtl : "srce_nm = srce_sys_nm (REPORT_PROCESSING outputs)"
+    RptRefer ||--o{ RptDaMap : "rpt_id"
+    RptDaMap ||--o{ RptStageDa : "map_id"
+    RptRefer ||--o{ RptOutput : "rpt_id"
+    DaRefer ||--o{ RptDaMap : "da_id (read from DaRefer by REPORT_PROCESSING)"
 ```
 
-`sta_cd` values: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`.
+**DaRefer** — `sta_cd` values: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`. Written by `DATA_SOURCE_DOWNLOAD` only; read by `REPORT_PROCESSING` to check datasource availability.
 
-For `DATA_SOURCE_DOWNLOAD`: `srce_nm` = datasource name, `fl_nm` = BQ table ref / file path / API endpoint.
-For `REPORT_PROCESSING`: `srce_nm` = report name, `fl_nm` = report name.
-
-`vsn_no` increments each time the same `(srce_nm, per_id)` is re-run (e.g. after `--overrideDownload=true`).
+`vsn_no` increments each time the same `(srce_nm, per_id)` is re-run.
 
 `bal_and_cntl_smry_tx` (BnC summary JSON, DATA_SOURCE_DOWNLOAD only):
 ```json
 { "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
 ```
 
-`COM_CmnRptDtl` — one row per output step, written by `REPORT_PROCESSING` for all sink types (GCS, BQ, API).
-`fl_nm` = GCS file name, destination BQ table, or API endpoint. `rec_ct` = row count written to that sink.
+**RptRefer** — `sta_cd` values: `LOADING` | `COMPLETED` | `FAILED`. Written and updated by `REPORT_PROCESSING` only.
+
+**RptStageDa** — transient. Rows are inserted from `DaRec` before the transform chain runs and deleted after all outputs are exported. They exist only for the duration of one report execution.
 
 ---
 
@@ -695,7 +747,7 @@ DataflowStartJobOperator(
         "--parentId":            "TRADING",      # → parent_id in source_config
         "--datasourceName":      "trades",
         "--subprocessName":      "eod",
-        "--periodId":            "202401",        # MONTHLY YYYYMM — must exist in MSTR_Per
+        "--periodId":            "202401",        # integer period id, e.g. YYYYMM or YYYYMMDD
         "--periodStart":         "2024-01-01",
         "--periodEnd":           "2024-01-31",
         "--runDate":             "{{ ds }}",
@@ -723,7 +775,7 @@ DataflowStartJobOperator(
         "--parentId":            "TRADING",      # → parameter_group_name in parameter_store
         "--reportName":          "daily_trades_summary",
         "--reportSubprocess":    "eod",
-        "--periodId":            "202401",        # MONTHLY YYYYMM — must exist in MSTR_Per
+        "--periodId":            "202401",        # integer period id, e.g. YYYYMM or YYYYMMDD
         "--periodStart":         "2024-01-01",
         "--periodEnd":           "2024-01-31",
         "--runDate":             "{{ ds }}",
@@ -733,7 +785,10 @@ DataflowStartJobOperator(
         "--checkpointBqDataset": "pipeline_metadata",
         "--daReferTable":        "DaRefer",
         "--daRecTable":          "DaRec",
-        "--cmnRptDtlTable":      "COM_CmnRptDtl",
+        "--rptReferTable":       "RptRefer",
+        "--rptDaMapTable":       "RptDaMap",
+        "--rptStageDaTable":     "RptStageDa",
+        "--rptOutputTable":      "RptOutput",
         "--emailSmtpHost":       "smtp.gmail.com",
         "--emailSmtpPort":       "587",
         "--smtpPasswordSecretId": "projects/p/secrets/smtp-password/versions/latest",
