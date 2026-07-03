@@ -14,6 +14,12 @@
     <artifactId>beam-runner</artifactId>
     <name>Beam Runner — Pipeline Entry Point</name>
 
+    <properties>
+        <!-- beam-runner is a Dataflow deployment artifact, not an importable library.
+             The fat JAR goes to GCS via CI. Nothing from this module is published to Artifactory. -->
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.yourco.beam</groupId>
@@ -68,6 +74,10 @@
                         <phase>package</phase>
                         <goals><goal>shade</goal></goals>
                         <configuration>
+                            <!-- Prevents dependency-reduced-pom.xml from being written.
+                                 Without this, Artifactory (if deploy is ever re-enabled) would
+                                 store a POM with stripped dependencies, breaking consumers. -->
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>com.yourco.beam.runner.Main</mainClass>
