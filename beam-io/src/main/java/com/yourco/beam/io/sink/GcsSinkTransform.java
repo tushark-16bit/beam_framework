@@ -1,7 +1,6 @@
 package com.yourco.beam.io.sink;
 
 import com.yourco.beam.io.util.JsonUtils;
-import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -29,11 +28,9 @@ public final class GcsSinkTransform extends PTransform<PCollection<Row>, PDone> 
 
     private final String outputPath;
 
-    public GcsSinkTransform(FrameworkOptions options) {
-        Objects.requireNonNull(options, "options must not be null");
-        this.outputPath = Objects.requireNonNull(
-                options.getGcsSinkPath(),
-                "sinkType=GCS requires --gcsSinkPath, e.g. gs://bucket/output/");
+    public GcsSinkTransform(String outputPath) {
+        this.outputPath = Objects.requireNonNull(outputPath,
+                "sinkType=GCS requires gcs_sink_path in parameter_store");
     }
 
     @Override

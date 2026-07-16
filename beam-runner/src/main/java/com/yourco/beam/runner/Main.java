@@ -1,7 +1,6 @@
 package com.yourco.beam.runner;
 
 import com.yourco.beam.options.FrameworkOptions;
-import com.yourco.beam.options.SourceType;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -132,30 +131,19 @@ public final class Main {
             return;
         }
 
-        LOG.info("REPORT_PROCESSING (legacy transform-chain) | source={} | chain={} | sink={}",
-                 options.getSourceType(), options.getTransformChain(), options.getSinkType());
+        LOG.info("REPORT_PROCESSING (legacy transform-chain)");
 
-        Pipeline pipeline = new PipelineFactory().assemble(options);
+        PipelineFactory factory = new PipelineFactory();
+        Pipeline pipeline = factory.assemble(options);
 
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
         PipelineResult result = pipeline.run();
 
-        if (isBatchSource(options.getSourceType())) {
+        if (!factory.isStreamingSource()) {
             result.waitUntilFinish();
             LOG.info("Pipeline finished with state: {}", result.getState());
         } else {
             LOG.info("Streaming pipeline submitted. Job running indefinitely until cancelled.");
         }
-    }
-
-    // ── Helper ───────────────────────────────────────────────────────────────
-
-    /** Returns {@code true} for bounded sources; false for streaming. */
-    private static boolean isBatchSource(SourceType sourceType) {
-        if (sourceType == null) return true;
-        return switch (sourceType) {
-            case GCS, BQ, API, FILE -> true;
-            case PUBSUB              -> false;
-        };
     }
 }

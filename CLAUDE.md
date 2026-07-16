@@ -163,6 +163,7 @@ model/ReportCheckpoint.java           RptRefer row: rptId, rptNm, perId (int), r
 model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtTs. Links a report run to a data source da_id.
 model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDaJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
 model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
+model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces 21 FrameworkOptions flags. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, getCalendarName, smtp settings, etc.) + generic get(key)/get(key, default) escape hatch.
 ```
 
 ### beam-io — connectors and I/O adapters
@@ -688,6 +689,8 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --checkpointBqDataset=pipeline_metadata
 
 # Run REPORT_PROCESSING (BQ-configured) — no JDBC required
+# NOTE: --emailSmtpHost and --smtpPasswordSecretId are no longer CLI flags.
+#       Add them as rows in parameter_store (keys: email_smtp_host, smtp_password_secret_id).
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --runner=DirectRunner \
   --processType=REPORT_PROCESSING \
@@ -697,9 +700,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
   --paramBqProject=my-gcp-project \
-  --paramBqDataset=dw \
-  --emailSmtpHost=smtp.gmail.com \
-  --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
+  --paramBqDataset=dw
 
 # Run ExampleWorkflow (BQ params → BQ transform → GCS CSV)
 # See EXAMPLE.md for required BQ table setup
@@ -709,7 +710,7 @@ mvn -pl beam-runner exec:java \
     --paramBqDataset=dw --reportName=daily_trades_summary \
     --reportSubprocess=eod --periodId=2024-01 \
     --periodStart=2024-01-01 --periodEnd=2024-01-31 \
-    --processType=REPORT_PROCESSING --sinkType=GCS"
+    --processType=REPORT_PROCESSING"
 ```
 
 ---

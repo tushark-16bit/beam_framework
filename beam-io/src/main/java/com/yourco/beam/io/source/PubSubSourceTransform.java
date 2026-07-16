@@ -1,7 +1,6 @@
 package com.yourco.beam.io.source;
 
 import com.yourco.beam.model.Schemas;
-import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.transforms.MapElements;
@@ -13,7 +12,6 @@ import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Objects;
 
 /**
  * Reads messages from a Pub/Sub subscription and wraps each payload as a
@@ -32,9 +30,8 @@ public final class PubSubSourceTransform extends PTransform<PBegin, PCollection<
 
     private final String subscription;
 
-    public PubSubSourceTransform(FrameworkOptions options) {
-        Objects.requireNonNull(options, "options must not be null");
-        this.subscription = options.getPubSubSubscription();
+    public PubSubSourceTransform(String subscription) {
+        this.subscription = subscription;
         validateOptions();
     }
 

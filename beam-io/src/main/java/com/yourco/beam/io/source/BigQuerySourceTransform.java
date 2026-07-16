@@ -1,6 +1,5 @@
 package com.yourco.beam.io.source;
 
-import com.yourco.beam.options.FrameworkOptions;
 import com.google.api.services.bigquery.model.TableRow;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.schemas.Schema;
@@ -11,8 +10,6 @@ import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
-
-import java.util.Objects;
 
 /**
  * Reads from a BigQuery table or SQL query and produces a {@code PCollection<Row>}.
@@ -41,10 +38,9 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     private final String bqTable;
     private final String bqQuery;
 
-    public BigQuerySourceTransform(FrameworkOptions options) {
-        Objects.requireNonNull(options, "options must not be null");
-        this.bqTable = options.getBqSourceTable();
-        this.bqQuery = options.getBqSourceQuery();
+    public BigQuerySourceTransform(String bqTable, String bqQuery) {
+        this.bqTable = bqTable;
+        this.bqQuery = bqQuery;
         validateOptions();
     }
 

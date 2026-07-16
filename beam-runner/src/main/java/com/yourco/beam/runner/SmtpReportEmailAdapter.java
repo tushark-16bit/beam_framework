@@ -2,7 +2,6 @@ package com.yourco.beam.runner;
 
 import com.yourco.beam.io.email.EmailAttachment;
 import com.yourco.beam.io.email.ReportEmailAdapter;
-import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.utils.SecretManagerUtils;
 import jakarta.activation.DataHandler;
 import jakarta.mail.Message;
@@ -37,15 +36,18 @@ final class SmtpReportEmailAdapter implements ReportEmailAdapter {
     private final Session  session;
     private final String   fromAddress;
 
-    SmtpReportEmailAdapter(FrameworkOptions options) {
-        String smtpHost     = options.getEmailSmtpHost();
-        int    smtpPort     = options.getEmailSmtpPort();
-        String secretId     = options.getSmtpPasswordSecretId();
-        String from         = options.getDevErrorEmail();
-        this.fromAddress    = (from != null && !from.isBlank()) ? from : options.getBusinessEmail();
+    /**
+     * @param smtpHost             SMTP relay hostname (e.g. smtp.gmail.com)
+     * @param smtpPort             SMTP port (typically 587)
+     * @param smtpPasswordSecretId Secret Manager resource name for the SMTP password
+     * @param fromAddress          Sender address used for From: and SMTP auth
+     */
+    SmtpReportEmailAdapter(String smtpHost, int smtpPort,
+                           String smtpPasswordSecretId, String fromAddress) {
+        this.fromAddress = fromAddress;
 
-        String password = (secretId != null && !secretId.isBlank())
-                ? SecretManagerUtils.fetchSecret(secretId)
+        String password = (smtpPasswordSecretId != null && !smtpPasswordSecretId.isBlank())
+                ? SecretManagerUtils.fetchSecret(smtpPasswordSecretId)
                 : "";
 
         Properties props = new Properties();

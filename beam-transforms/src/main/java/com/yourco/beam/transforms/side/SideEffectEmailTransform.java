@@ -1,6 +1,5 @@
 package com.yourco.beam.transforms.side;
 
-import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.utils.SecretManagerUtils;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
@@ -56,13 +55,18 @@ public final class SideEffectEmailTransform extends PTransform<PCollection<Row>,
     private final String smtpPasswordSecretId;
     private final String fromAddress;
 
-    public SideEffectEmailTransform(FrameworkOptions options) {
-        this.smtpHost             = options.getEmailSmtpHost();
-        this.smtpPort             = options.getEmailSmtpPort();
-        this.smtpPasswordSecretId = options.getSmtpPasswordSecretId();
-        // Use the dev email as the "from" address; falls back to businessEmail
-        String from = options.getDevErrorEmail();
-        this.fromAddress = (from != null && !from.isBlank()) ? from : options.getBusinessEmail();
+    /**
+     * @param smtpHost             SMTP relay hostname (e.g. smtp.gmail.com)
+     * @param smtpPort             SMTP port (typically 587)
+     * @param smtpPasswordSecretId Secret Manager resource name for the SMTP password
+     * @param fromAddress          Sender address used for From: and SMTP auth
+     */
+    public SideEffectEmailTransform(String smtpHost, int smtpPort,
+                                    String smtpPasswordSecretId, String fromAddress) {
+        this.smtpHost             = smtpHost;
+        this.smtpPort             = smtpPort;
+        this.smtpPasswordSecretId = smtpPasswordSecretId;
+        this.fromAddress          = fromAddress;
     }
 
     @Override
