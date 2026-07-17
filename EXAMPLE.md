@@ -187,7 +187,16 @@ VALUES (
     "bq_table":       "trades",
     "bq_query":       "SELECT trade_id, currency, amount, trade_date, desk FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\"",
     "min_row_count":  "1",
-    "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000,\"tolerancePct\":0.01}]"
+    "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000,\"tolerancePct\":0.01}]",
+
+    "failure_email_to":      "ops-team@example.com,data-owner@example.com",
+    "failure_email_cc":      "manager@example.com",
+    "failure_email_subject": "FAILED: {datasourceName} download for period {periodId}",
+    "failure_email_body":    "Data source download has failed.\n\nDatasource : {datasourceName}\nPeriod     : {periodId}\nStatus     : {staCd}\n\nError:\n{errorMessage}\n\nBnC Summary:\n{bncSummary}",
+    "email_smtp_host":       "smtp.gmail.com",
+    "email_smtp_port":       "587",
+    "smtp_password_secret_id": "projects/my-gcp-project/secrets/smtp-password/versions/latest",
+    "from_address":          "pipeline-alerts@example.com"
   }',
   'TRADING', CURRENT_DATETIME(), 'setup_script'
 );
@@ -448,8 +457,23 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 | 7 | `waitUntilFinish()` | — |
 | 8 | `COUNT(*) FROM DaRec WHERE da_id = X` + BnC SUM checks | — |
 | 9a | All checks pass → `updateStatus(COMPLETED, bncJson)` | → **COMPLETED** |
-| 9b | BnC mismatch → `updateStatus(FAILED_BNC, bncJson)` | → **FAILED_BNC** |
-| 9c | Infrastructure error → `updateStatus(FAILED, errorJson)` | → **FAILED** |
+| 9b | BnC mismatch → `updateStatus(FAILED_BNC, bncJson)` → send failure email if `failure_email_to` configured | → **FAILED_BNC** |
+| 9c | Infrastructure error → `updateStatus(FAILED, errorJson)` → send failure email if configured | → **FAILED** |
+
+### Failure email fields in `parameters_val_json` (optional — omit to disable)
+
+| Key | Example value | Notes |
+|-----|--------------|-------|
+| `failure_email_to` | `"ops@example.com,owner@example.com"` | Comma-separated. Required to enable email. |
+| `failure_email_cc` | `"manager@example.com"` | Optional. |
+| `failure_email_subject` | `"FAILED: {datasourceName} download for period {periodId}"` | Default used if absent. |
+| `failure_email_body` | `"Status: {staCd}\nError: {errorMessage}\n\nBnC:\n{bncSummary}"` | Default used if absent. |
+| `email_smtp_host` | `"smtp.gmail.com"` | Default `smtp.gmail.com`. |
+| `email_smtp_port` | `"587"` | Default `587`. |
+| `smtp_password_secret_id` | `"projects/my-project/secrets/smtp-pw/versions/latest"` | Secret Manager resource name. |
+| `from_address` | `"pipeline-alerts@example.com"` | Required to enable email. |
+
+Available body/subject tokens: `{datasourceName}`, `{periodId}`, `{staCd}`, `{errorMessage}`, `{bncSummary}`.
 
 ---
 
