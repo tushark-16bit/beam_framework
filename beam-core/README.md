@@ -14,6 +14,7 @@ Every other module depends on this one — it defines the language the whole fra
 | `retry` | `RetryPolicy`, `ExponentialRetryPolicy`, `FixedRetryPolicy`, `RetryingDoFn` | Retry logic and dead-letter routing |
 | `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig` | Shared data types — DATA_SOURCE_DOWNLOAD |
 | `model` | `DataSourceCheckpoint`, `DataSourceRecord`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint/record models, per-source transform and validation config |
+| `model` | `SourceFailureEmailConfig` | Optional failure-notification email config carried on `SourceConfig`; populated from `failure_email_*` keys in `parameters_val_json` |
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
 | `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces 21 CLI flags (source, sink, transforms, retry, calendar, email). Typed getters + generic `get(key)` for extensibility. |

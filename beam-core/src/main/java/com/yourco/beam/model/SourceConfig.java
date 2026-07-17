@@ -60,20 +60,27 @@ public final class SourceConfig implements Serializable {
      */
     public final ValidationConfig validationConfig;
 
+    /**
+     * Optional failure-notification email config.
+     * Null when {@code failure_email_to} is absent from {@code parameters_val_json}.
+     */
+    public final SourceFailureEmailConfig failureEmailConfig;
+
     private SourceConfig(Builder b) {
-        this.parentId         = b.parentId;
-        this.datasourceName   = b.datasourceName;
-        this.periodId         = b.periodId;
-        this.subprocessName   = b.subprocessName;
-        this.sourceType       = b.sourceType;
-        this.apiConfig        = b.apiConfig;
-        this.fileConfig       = b.fileConfig;
-        this.bqFetchConfig    = b.bqFetchConfig;
-        this.queryConfig      = b.queryConfig != null ? b.queryConfig : QueryConfig.empty();
-        this.sourceTransforms = b.sourceTransforms != null
-                                ? Collections.unmodifiableList(b.sourceTransforms)
-                                : Collections.emptyList();
-        this.validationConfig = b.validationConfig != null ? b.validationConfig : ValidationConfig.none();
+        this.parentId           = b.parentId;
+        this.datasourceName     = b.datasourceName;
+        this.periodId           = b.periodId;
+        this.subprocessName     = b.subprocessName;
+        this.sourceType         = b.sourceType;
+        this.apiConfig          = b.apiConfig;
+        this.fileConfig         = b.fileConfig;
+        this.bqFetchConfig      = b.bqFetchConfig;
+        this.queryConfig        = b.queryConfig != null ? b.queryConfig : QueryConfig.empty();
+        this.sourceTransforms   = b.sourceTransforms != null
+                                  ? Collections.unmodifiableList(b.sourceTransforms)
+                                  : Collections.emptyList();
+        this.validationConfig   = b.validationConfig != null ? b.validationConfig : ValidationConfig.none();
+        this.failureEmailConfig = b.failureEmailConfig;
     }
 
     // ── Factory helpers (convenience wrappers around Builder) ─────────────────
@@ -113,18 +120,20 @@ public final class SourceConfig implements Serializable {
         private QueryConfig queryConfig;
         private List<SourceTransformConfig> sourceTransforms;
         private ValidationConfig validationConfig;
+        private SourceFailureEmailConfig failureEmailConfig;
 
-        public Builder parentId(String v)                         { parentId = v;           return this; }
-        public Builder datasourceName(String v)                   { datasourceName = v;     return this; }
-        public Builder periodId(int v)                            { periodId = v;           return this; }
-        public Builder subprocessName(String v)                   { subprocessName = v;     return this; }
-        public Builder sourceType(SourceType v)                   { sourceType = v;         return this; }
-        public Builder apiConfig(ApiSourceConfig v)               { apiConfig = v;          return this; }
-        public Builder fileConfig(FileSourceConfig v)             { fileConfig = v;         return this; }
-        public Builder bqFetchConfig(BqFetchConfig v)             { bqFetchConfig = v;      return this; }
-        public Builder queryConfig(QueryConfig v)                 { queryConfig = v;        return this; }
-        public Builder sourceTransforms(List<SourceTransformConfig> v) { sourceTransforms = v; return this; }
-        public Builder validationConfig(ValidationConfig v)       { validationConfig = v;  return this; }
+        public Builder parentId(String v)                              { parentId = v;             return this; }
+        public Builder datasourceName(String v)                        { datasourceName = v;       return this; }
+        public Builder periodId(int v)                                 { periodId = v;             return this; }
+        public Builder subprocessName(String v)                        { subprocessName = v;       return this; }
+        public Builder sourceType(SourceType v)                        { sourceType = v;           return this; }
+        public Builder apiConfig(ApiSourceConfig v)                    { apiConfig = v;            return this; }
+        public Builder fileConfig(FileSourceConfig v)                  { fileConfig = v;           return this; }
+        public Builder bqFetchConfig(BqFetchConfig v)                  { bqFetchConfig = v;        return this; }
+        public Builder queryConfig(QueryConfig v)                      { queryConfig = v;          return this; }
+        public Builder sourceTransforms(List<SourceTransformConfig> v) { sourceTransforms = v;     return this; }
+        public Builder validationConfig(ValidationConfig v)            { validationConfig = v;     return this; }
+        public Builder failureEmailConfig(SourceFailureEmailConfig v)  { failureEmailConfig = v;   return this; }
 
         public SourceConfig build() { return new SourceConfig(this); }
     }

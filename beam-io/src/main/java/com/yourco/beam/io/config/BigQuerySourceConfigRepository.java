@@ -16,6 +16,7 @@ import com.yourco.beam.model.FileSourceConfig;
 import com.yourco.beam.model.LookupConfig;
 import com.yourco.beam.model.QueryConfig;
 import com.yourco.beam.model.SourceConfig;
+import com.yourco.beam.model.SourceFailureEmailConfig;
 import com.yourco.beam.model.SourceTransformConfig;
 import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
@@ -207,7 +208,8 @@ public final class BigQuerySourceConfigRepository {
             .sourceType(sourceType)
             .queryConfig(toQueryConfig(params))
             .sourceTransforms(toSourceTransforms(params.get("source_transforms_json")))
-            .validationConfig(toValidationConfig(params));
+            .validationConfig(toValidationConfig(params))
+            .failureEmailConfig(toFailureEmailConfig(params));
 
         switch (sourceType) {
             case API  -> builder.apiConfig(toApiConfig(params));
@@ -272,6 +274,38 @@ public final class BigQuerySourceConfigRepository {
         List<String>  requiredHeaders = parseStringList(p.get("required_headers_json"));
         List<BncRule> bncRules        = parseBncRules(p.get("bnc_rules_json"));
         return new ValidationConfig(minRows, maxRows, requiredHeaders, bncRules);
+    }
+
+    private SourceFailureEmailConfig toFailureEmailConfig(Map<String, String> p) {
+        List<String> toList = splitCsv(p.get("failure_email_to"));
+        if (toList.isEmpty()) return null;
+        return new SourceFailureEmailConfig(
+            toList,
+            splitCsv(p.get("failure_email_cc")),
+            p.getOrDefault("failure_email_subject",
+                "FAILED: {datasourceName} download for period {periodId}"),
+            p.getOrDefault("failure_email_body",
+                "Data source download failed.\n\n"
+                + "Datasource : {datasourceName}\n"
+                + "Period     : {periodId}\n"
+                + "Status     : {staCd}\n\n"
+                + "Error:\n{errorMessage}\n\n"
+                + "BnC Summary:\n{bncSummary}"),
+            p.getOrDefault("email_smtp_host", "smtp.gmail.com"),
+            parseIntOrDefault(p.get("email_smtp_port"), 587),
+            p.get("smtp_password_secret_id"),
+            p.get("from_address")
+        );
+    }
+
+    private static List<String> splitCsv(String value) {
+        if (value == null || value.isBlank()) return Collections.emptyList();
+        List<String> result = new ArrayList<>();
+        for (String part : value.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) result.add(trimmed);
+        }
+        return result;
     }
 
     // ── Schema validation ─────────────────────────────────────────────────────

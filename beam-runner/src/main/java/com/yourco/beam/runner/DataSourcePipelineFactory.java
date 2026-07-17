@@ -142,6 +142,7 @@ public final class DataSourcePipelineFactory {
                                                         : "Pipeline ended in state: " + pipelineState;
                 LOG.warn("Pipeline failed for source '{}': {}", config.datasourceName, errorMsg);
                 checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
+                sendFailureEmailIfConfigured(config, DataSourceCheckpoint.STA_FAILED, errorMsg, null);
             } else {
                 try {
                     runValidationAndUpdateCheckpoint(config, dsId);
@@ -149,6 +150,7 @@ public final class DataSourcePipelineFactory {
                     LOG.error("Post-pipeline validation failed for '{}' (DaId={}): {}",
                               config.datasourceName, dsId, e.getMessage(), e);
                     checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
+                    sendFailureEmailIfConfigured(config, DataSourceCheckpoint.STA_FAILED, e.getMessage(), null);
                 }
             }
         }
@@ -206,6 +208,8 @@ public final class DataSourcePipelineFactory {
                       config.datasourceName, dsId);
             checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED,
                 "{\"error\":\"record count query failed — see pipeline logs\"}");
+            sendFailureEmailIfConfigured(config, DataSourceCheckpoint.STA_FAILED,
+                "Record count query failed — see pipeline logs", null);
             return;
         }
         LOG.info("DaRec count for '{}' (da_id={}): {}", config.datasourceName, dsId, rowCount);
@@ -257,6 +261,9 @@ public final class DataSourcePipelineFactory {
 
         String bncJson = toJson(bncSummary);
         checkpointAdapter.updateStatus(dsId, staCd, bncJson);
+        if (!DataSourceCheckpoint.STA_COMPLETED.equals(staCd)) {
+            sendFailureEmailIfConfigured(config, staCd, String.join("; ", failures), bncJson);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -322,6 +329,39 @@ public final class DataSourcePipelineFactory {
                 return !done;
             })
             .collect(Collectors.toList());
+    }
+
+    // ── Failure email ─────────────────────────────────────────────────────────
+
+    private void sendFailureEmailIfConfigured(SourceConfig config, String staCd,
+                                              String errorMessage, String bncSummary) {
+        com.yourco.beam.model.SourceFailureEmailConfig emailConfig = config.failureEmailConfig;
+        if (emailConfig == null || !emailConfig.isPresent()) return;
+        try {
+            String subject = resolveEmailTokens(emailConfig.subjectTemplate,
+                config.datasourceName, config.periodId, staCd, errorMessage, bncSummary);
+            String body = resolveEmailTokens(emailConfig.bodyTemplate,
+                config.datasourceName, config.periodId, staCd, errorMessage, bncSummary);
+            new SmtpReportEmailAdapter(
+                emailConfig.smtpHost, emailConfig.smtpPort,
+                emailConfig.smtpPasswordSecretId, emailConfig.fromAddress)
+                .send(subject, body, emailConfig.to, emailConfig.cc, java.util.List.of());
+            LOG.info("Failure email sent for '{}' (staCd={})", config.datasourceName, staCd);
+        } catch (Exception e) {
+            LOG.error("Failed to send failure email for '{}': {}", config.datasourceName, e.getMessage(), e);
+        }
+    }
+
+    private static String resolveEmailTokens(String template, String datasourceName,
+                                             int periodId, String staCd,
+                                             String errorMessage, String bncSummary) {
+        if (template == null) return "";
+        return template
+            .replace("{datasourceName}", datasourceName)
+            .replace("{periodId}",       String.valueOf(periodId))
+            .replace("{staCd}",          staCd        != null ? staCd        : "")
+            .replace("{errorMessage}",   errorMessage != null ? errorMessage : "")
+            .replace("{bncSummary}",     bncSummary   != null ? bncSummary   : "");
     }
 
     // ── Exception type ────────────────────────────────────────────────────────

@@ -151,6 +151,7 @@ model/AggregationConfig.java          SUM/COUNT/AVG/MIN/MAX per field (used by G
 model/LookupConfig.java               Lookup table config: BQ source, key fields.
 model/ValidationConfig.java           Post-fetch validation: header check, row count, BnC rules.
 model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
+model/SourceFailureEmailConfig.java   Optional failure-notification email config on SourceConfig. Populated from failure_email_* keys in parameters_val_json. isPresent() guards send.
 
 -- REPORT_PROCESSING models --
 model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int.
