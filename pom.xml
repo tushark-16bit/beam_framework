@@ -45,6 +45,7 @@
         <module>beam-utils</module>
         <module>beam-transforms</module>
         <module>beam-runner</module>
+        <module>beam-orchestrator</module>
     </modules>
 
     <properties>

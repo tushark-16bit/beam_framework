@@ -257,6 +257,34 @@ example/ExampleWorkflow.java    Self-contained end-to-end example. Shows: BigQue
                                 → exportToCsv → GCS. See EXAMPLE.md for BQ setup + run command.
 ```
 
+### beam-orchestrator — standalone orchestration JAR (no Beam dependency)
+
+Triggered by an Airflow DAG. Reads parameter_store from BigQuery, creates task records in BQ,
+and writes a manifest JSON to GCS so the DAG can fan out to individual pipeline JAR invocations.
+Zero dependency on beam-core or any sibling beam-* module — it is a fully independent JAR.
+
+```
+OrchestratorMain.java           Entry point. Wires concrete impls → Orchestrator and runs it.
+OrchestratorOptions.java        --key=value CLI parser. No Beam PipelineOptions dependency.
+Orchestrator.java               Core logic: resolve period → schedule → build tasks → save → manifest.
+
+model/ResolvedPeriod.java       Period value: periodId (int), periodStart, periodEnd, runDate, frequency.
+model/RunSpec.java              One schedulable unit: runType, parentId, name, subprocess, period, runOrder, extraParams.
+model/TaskItem.java             Persisted task: taskId (UUID), runId, RunSpec, status, createdAt, metadata.
+
+period/PeriodResolver.java      @FunctionalInterface: resolve(runDate, frequency) → ResolvedPeriod.
+period/StandardPeriodResolver.java DAILY (YYYYMMDD), MONTHLY (YYYYMM), WEEKLY (YYYYWW ISO week).
+
+schedule/RunScheduleResolver.java  @FunctionalInterface: resolve(parentId, frequency, period) → List<RunSpec>.
+schedule/BigQueryRunScheduleResolver.java Queries parameter_store; opts in via run_type/enabled/frequency/run_order fields.
+
+task/TaskRepository.java        Interface: save(List<TaskItem>).
+task/BigQueryTaskRepository.java BQ streaming insert impl. taskId as deduplication key.
+
+manifest/ManifestWriter.java    @FunctionalInterface: write(runId, parentId, frequency, runDate, tasks) → location.
+manifest/GcsManifestWriter.java Writes JSON manifest to GCS. Default path: manifests/{runId}/tasks.json.
+```
+
 ---
 
 ## 5. Architecture rules — non-negotiable
@@ -269,6 +297,7 @@ beam-transforms → beam-core, beam-utils
 beam-io → beam-core   (NOT beam-utils, NOT beam-transforms)
 beam-utils → beam-core
 beam-core → (nothing internal)
+beam-orchestrator → (nothing internal — standalone, no sibling module deps)
 ```
 
 **Violations**: if `beam-io` imports from `beam-utils`, it breaks this rule. The compiler will
