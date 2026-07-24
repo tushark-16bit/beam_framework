@@ -9,11 +9,14 @@ import com.yourco.beam.io.records.DataSourceRecordAdapter;
 import com.yourco.beam.io.sink.DataSourceRecordSinkTransform;
 import com.yourco.beam.io.source.SourceRouter;
 import com.yourco.beam.model.BncRule;
+import com.yourco.beam.model.BqFetchConfig;
 import com.yourco.beam.model.DataSourceCheckpoint;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
+import com.yourco.beam.options.SourceType;
 import com.yourco.beam.utils.DateUtils;
+import com.yourco.beam.utils.QueryParameterResolver;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.values.PCollection;
@@ -168,8 +171,9 @@ public final class DataSourcePipelineFactory {
             LOG.info("Assembling source branch: {} ({}) → DaRec (da_id={})",
                      config.datasourceName, config.sourceType, dsId);
 
+            SourceConfig resolved = resolveQueryTokens(config, options);
             PCollection<Row> sourceData = SourceRouter.routeFromConfig(
-                pipeline, config, options, runDate);
+                pipeline, resolved, options, runDate);
 
             PCollection<Row> transformed = SourceTransformChainAssembler.assemble(
                 sourceData, config, options, pipeline);
@@ -267,6 +271,37 @@ public final class DataSourcePipelineFactory {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * For BQ sources, resolves {periodStart}/{periodEnd}/{periodId}/{runDate} and custom
+     * tokens in {@code bqFetchConfig.query} before the query reaches BigQueryIO.
+     * Must run here in beam-runner (not in beam-io SourceRouter) because
+     * QueryParameterResolver is in beam-utils and beam-io cannot depend on beam-utils.
+     * Non-BQ sources are returned unchanged.
+     */
+    private static SourceConfig resolveQueryTokens(SourceConfig config, FrameworkOptions options) {
+        if (config.sourceType != SourceType.BQ
+                || config.bqFetchConfig == null
+                || !config.bqFetchConfig.hasQuery()) {
+            return config;
+        }
+        BqFetchConfig bq = config.bqFetchConfig;
+        String resolvedQuery = QueryParameterResolver.resolve(bq.query, bq.queryParams, options);
+        BqFetchConfig resolvedBq = new BqFetchConfig(
+            bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams);
+        return SourceConfig.builder()
+            .parentId(config.parentId)
+            .datasourceName(config.datasourceName)
+            .periodId(config.periodId)
+            .subprocessName(config.subprocessName)
+            .sourceType(config.sourceType)
+            .bqFetchConfig(resolvedBq)
+            .queryConfig(config.queryConfig)
+            .sourceTransforms(new java.util.ArrayList<>(config.sourceTransforms))
+            .validationConfig(config.validationConfig)
+            .failureEmailConfig(config.failureEmailConfig)
+            .build();
+    }
 
     private static String extractDsNm(SourceConfig config) {
         if (config.bqFetchConfig != null) {

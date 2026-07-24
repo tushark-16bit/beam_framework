@@ -399,8 +399,9 @@ Main.runDataSourceDownload(options)
 │   └─ for each SourceConfig:
 │       ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()  skip if COMPLETED
 │       ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id (LOADING row)
+│       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc. into bq_query
+│       │   └─ QueryParameterResolver.resolve()               must run in beam-runner (not beam-io)
 │       ├─ SourceRouter.routeFromConfig()                     API / FILE / BQ → PCollection<Row>
-│       │   └─ QueryParameterResolver.resolve()               inject {periodStart}, custom tokens
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
 │       └─ DataSourceRecordSinkTransform(da_id)               rows → JSON blobs → DaRec
 │
