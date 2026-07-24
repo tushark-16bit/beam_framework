@@ -111,39 +111,6 @@ public final class BigQuerySourceConfigRepository {
                         + "." + options.getParamStoreTable() + "`";
     }
 
-    // ── Validation ────────────────────────────────────────────────────────────
-
-    /**
-     * Returns a non-empty list if no {@code parameter_store} row exists for this
-     * (parentId, subprocess, datasource) combination.
-     *
-     * <p>{@code periodId} is accepted for API compatibility but not used in the lookup —
-     * source configs are period-agnostic in {@code parameter_store}.
-     */
-    public List<String> getMissingParameters(String parentId, String datasource,
-                                              String subprocess, int periodId) {
-        String sql = "SELECT COUNT(*) AS cnt FROM " + storeTable
-            + " WHERE parameter_group_name = @parentId"
-            + "   AND parameter_data_source = @subprocess"
-            + "   AND parameter_name = @datasource";
-
-        try {
-            for (FieldValueList row : bigquery.query(
-                    qConfig(sql, parentId, datasource, subprocess)).iterateAll()) {
-                if (row.get("cnt").getLongValue() == 0) {
-                    LOG.warn("No parameter_store row for parent={}, datasource={}, subprocess={}",
-                             parentId, datasource, subprocess);
-                    return List.of("parameter_store row missing for ("
-                        + parentId + ", " + datasource + ", " + subprocess + ")");
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ query interrupted", e);
-        }
-        return Collections.emptyList();
-    }
-
     // ── Config fetch ──────────────────────────────────────────────────────────
 
     /**

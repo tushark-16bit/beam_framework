@@ -84,9 +84,9 @@ public final class DataSourcePipelineFactory {
                  jobRunId, options.getDatasourceName(), options.getPeriodId(),
                  options.getSubprocessName());
 
-        // ── Step 1-2: BQ source config fetch and parameter validation ─────
+        // ── Step 1-2: Validate CLI args, then fetch source config from BQ ──
+        validateRequiredParameters(options);
         BigQuerySourceConfigRepository bqRepo = new BigQuerySourceConfigRepository(options);
-        validateRequiredParameters(bqRepo, options);
         List<SourceConfig> sourceConfigs = bqRepo.fetchSourceConfigs(
             options.getParentId(), options.getDatasourceName(),
             options.getSubprocessName(), options.getPeriodId());
@@ -291,28 +291,13 @@ public final class DataSourcePipelineFactory {
         }
     }
 
-    private void validateRequiredParameters(BigQuerySourceConfigRepository repo, FrameworkOptions options) {
-        String datasource = options.getDatasourceName();
-        int    period     = options.getPeriodId();
-        String subprocess = options.getSubprocessName();
-
-        if (datasource == null || datasource.isBlank()) {
+    private static void validateRequiredParameters(FrameworkOptions options) {
+        if (options.getDatasourceName() == null || options.getDatasourceName().isBlank()) {
             throw new PipelineConfigurationException("--datasourceName is required for DATA_SOURCE_DOWNLOAD");
         }
-        if (period <= 0) {
+        if (options.getPeriodId() <= 0) {
             throw new PipelineConfigurationException("--periodId is required for DATA_SOURCE_DOWNLOAD");
         }
-
-        LOG.info("Validating required parameters in BQ for datasource={}, period={}, subprocess={}",
-                 datasource, period, subprocess);
-        List<String> missing = repo.getMissingParameters(
-            options.getParentId(), datasource, subprocess, period);
-        if (!missing.isEmpty()) {
-            throw new PipelineConfigurationException(
-                "Required parameters missing from BQ — cannot start pipeline. Missing: " + missing
-                + ". Datasource=" + datasource + ", period=" + period + ", subprocess=" + subprocess);
-        }
-        LOG.info("All required parameters present.");
     }
 
     private List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs, FrameworkOptions options) {

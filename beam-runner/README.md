@@ -25,8 +25,7 @@ that reads, transforms, validates, and writes to its own output table.
 ```
 DataSourcePipelineFactory.assemble(options)
     │
-    ├─ 1. BigQuerySourceConfigRepository.getMissingParameters()  fail fast if config missing
-    ├─ 2. BigQuerySourceConfigRepository.fetchSourceConfigs()
+    ├─ 1. BigQuerySourceConfigRepository.fetchSourceConfigs()  (throws if row missing)
     │       Each SourceConfig carries: queryConfig, sourceTransforms, validationConfig
     │
     ├─ 3. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources

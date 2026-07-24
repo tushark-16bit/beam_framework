@@ -81,10 +81,8 @@ sequenceDiagram
     Main->>DSF: assemble(options)
     DSF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
     Per-->>DSF: Period (per_dt, mo_no, yr_no, per_typ_cd)
-    DSF->>BQCfg: BigQuerySourceConfigRepository.getMissingParameters(parentId, datasource, subprocess, period)
-    BQCfg-->>DSF: [] or list of missing keys (fail fast if non-empty)
     DSF->>BQCfg: BigQuerySourceConfigRepository.fetchSourceConfigs(parentId, datasource, subprocess, period)
-    BQCfg-->>DSF: List<SourceConfig>
+    BQCfg-->>DSF: List<SourceConfig>  (throws IllegalStateException if row missing)
 
     loop for each SourceConfig
         DSF->>Checkpoint: isCompleted(srce_nm, per_id)

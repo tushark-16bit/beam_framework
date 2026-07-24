@@ -206,7 +206,7 @@ params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@ke
 config/BigQueryReportRepository.java       Queries parameter_store for report config nested JSON.
                                            fetchReportConfig() parses datasources/preprocessing/transforms/outputs/email.
 config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOURCE_DOWNLOAD source configs.
-                                           fetchSourceConfigs(), getMissingParameters(). Row → SourceConfig mapping.
+                                           fetchSourceConfigs(). Row → SourceConfig mapping.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
 ```
@@ -394,8 +394,7 @@ the report, with `query_template` referencing any alias in the registry. Custom 
 Main.runDataSourceDownload(options)
 │
 ├─ DataSourcePipelineFactory.assemble(options)
-│   ├─ BigQuerySourceConfigRepository.getMissingParameters()  fail fast if config missing
-│   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load all SourceConfig rows from BQ
+│   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load SourceConfig from BQ; throws if row missing
 │   │
 │   └─ for each SourceConfig:
 │       ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()  skip if COMPLETED

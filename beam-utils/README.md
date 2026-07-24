@@ -30,15 +30,12 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `QueryParameterResolver` | Resolves `{periodStart}`, `{periodEnd}`, `{periodId}`, `{runDate}` tokens in query templates |
 
 ```java
-// Pattern for parameter DB access (always try-with-resources):
-try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
-    ParameterRepository repo = new ParameterRepository(db, options);
-    if (!repo.allRequiredParametersExist(datasource, period, subprocess)) {
-        List<String> missing = repo.getMissingParameters(datasource, period, subprocess);
-        throw new RuntimeException("Missing: " + missing);
-    }
-    List<SourceConfig> configs = repo.fetchSourceConfigs(datasource, period, subprocess);
-}
+// Pattern for fetching source config from BigQuery parameter_store:
+BigQuerySourceConfigRepository repo = new BigQuerySourceConfigRepository(options);
+// fetchSourceConfigs throws IllegalStateException if the row is missing — no separate check needed
+List<SourceConfig> configs = repo.fetchSourceConfigs(
+    options.getParentId(), options.getDatasourceName(),
+    options.getSubprocessName(), options.getPeriodId());
 ```
 
 **Required DB tables** (must be created before first run):
