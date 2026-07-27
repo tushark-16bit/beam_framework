@@ -101,6 +101,14 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     boolean getOverrideDownload();
     void setOverrideDownload(boolean value);
 
+    @Description("DaRefer da_id for the current run. "
+                 + "For Flex Templates and DirectRunner this is set automatically by DataSourcePipelineFactory. "
+                 + "For Classic Templates it MUST be passed as a Dataflow runtime parameter "
+                 + "(e.g. --daId=47) by the Airflow pre-setup task that created the LOADING row. "
+                 + "Also required for --processType=POST_DOWNLOAD_VALIDATION.")
+    org.apache.beam.sdk.options.ValueProvider<Long> getDaId();
+    void setDaId(org.apache.beam.sdk.options.ValueProvider<Long> value);
+
     // =========================================================================
     // REPORT SELECTION (REPORT_PROCESSING — DB-configured reports only)
     // When --reportName is set, ReportPipelineFactory runs instead of the

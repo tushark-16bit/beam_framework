@@ -63,8 +63,9 @@ public final class Main {
         LOG.info("Job run ID:   {}", options.getJobRunId());
 
         switch (options.getProcessType()) {
-            case DATA_SOURCE_DOWNLOAD -> runDataSourceDownload(options);
-            case REPORT_PROCESSING    -> runReportProcessing(options);
+            case DATA_SOURCE_DOWNLOAD    -> runDataSourceDownload(options);
+            case REPORT_PROCESSING       -> runReportProcessing(options);
+            case POST_DOWNLOAD_VALIDATION -> runPostDownloadValidation(options);
         }
     }
 
@@ -80,6 +81,21 @@ public final class Main {
 
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
         PipelineResult result = pipeline.run();
+
+        // Classic Template creation mode: pipeline.run() only serialised the graph to
+        // --templateLocation. No workers ran. waitUntilFinish() would throw
+        // UnsupportedOperationException ("The result of template creation cannot be used
+        // to monitor the job"). Skip it entirely — post-pipeline steps run via a separate
+        // Airflow task using --processType=POST_DOWNLOAD_VALIDATION after job completion.
+        if (isTemplateCreationMode(options)) {
+            LOG.info("Classic Template created at {}. "
+                   + "Airflow DAG must: (1) create LOADING row via pre-setup task, "
+                   + "(2) launch template with --daId=<N>, "
+                   + "(3) wait for job via DataflowJobStateSensor, "
+                   + "(4) run --processType=POST_DOWNLOAD_VALIDATION --daId=<N>.",
+                   options.getTemplateLocation());
+            return;
+        }
 
         PipelineResult.State finalState = PipelineResult.State.UNKNOWN;
         Throwable pipelineError = null;
@@ -108,6 +124,21 @@ public final class Main {
         if (pipelineError != null) {
             throw new RuntimeException("DATA_SOURCE_DOWNLOAD pipeline failed", pipelineError);
         }
+    }
+
+    // ── POST_DOWNLOAD_VALIDATION ─────────────────────────────────────────────
+
+    private static void runPostDownloadValidation(FrameworkOptions options) {
+        LOG.info("POST_DOWNLOAD_VALIDATION | datasource={} | period={} | daId={}",
+                 options.getDatasourceName(), options.getPeriodId(), options.getDaId());
+        new DataSourcePipelineFactory().runPostPipelineValidation(options);
+    }
+
+    // ── Template detection ───────────────────────────────────────────────────
+
+    private static boolean isTemplateCreationMode(FrameworkOptions options) {
+        String loc = options.getTemplateLocation();
+        return loc != null && !loc.isBlank();
     }
 
     // ── REPORT_PROCESSING ────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ import com.yourco.beam.utils.DateUtils;
 import com.yourco.beam.utils.QueryParameterResolver;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.slf4j.Logger;
@@ -94,6 +95,18 @@ public final class DataSourcePipelineFactory {
             options.getParentId(), options.getDatasourceName(),
             options.getSubprocessName(), options.getPeriodId());
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
+
+        // ── Classic Template detection ─────────────────────────────────────
+        // In Classic Template creation mode (--templateLocation set), pipeline.run() only
+        // serialises the graph — no workers run and waitUntilFinish() throws.
+        // Skip checkpoint creation and filtering; daId comes from --daId at launch time.
+        if (isTemplateCreationMode(options)) {
+            LOG.info("Classic Template creation mode: skipping checkpoint creation. "
+                   + "Airflow pre-setup task must create the LOADING row and pass --daId "
+                   + "as a runtime parameter when launching the template.");
+            processedConfigs = sourceConfigs;
+            return assemblePipelineForTemplate(options, sourceConfigs);
+        }
 
         // ── Step 3: Filter by checkpoint ──────────────────────────────────
         checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(options);
@@ -179,7 +192,37 @@ public final class DataSourcePipelineFactory {
                 sourceData, config, options, pipeline);
 
             transformed.apply("RecordSink-" + config.datasourceName,
-                              new DataSourceRecordSinkTransform(options, dsId));
+                new DataSourceRecordSinkTransform(options,
+                    ValueProvider.StaticValueProvider.of(dsId)));
+        }
+
+        return pipeline;
+    }
+
+    /**
+     * Classic Template mode: daId is a runtime ValueProvider resolved from {@code --daId}
+     * when the template is launched. The LOADING row must already exist (created by the
+     * Airflow pre-setup task). All sources share the same daId (one template = one source).
+     */
+    private Pipeline assemblePipelineForTemplate(FrameworkOptions options, List<SourceConfig> configs) {
+        Pipeline pipeline = Pipeline.create(options);
+        LocalDate runDate = DateUtils.resolveRunDate(options);
+        LOG.info("Template graph assembly: daId will be resolved from --daId at launch time");
+
+        ValueProvider<Long> daIdProvider = options.getDaId();
+
+        for (SourceConfig config : configs) {
+            LOG.info("Assembling template source branch: {} ({})", config.datasourceName, config.sourceType);
+
+            SourceConfig resolved = resolveQueryTokens(config, options);
+            PCollection<Row> sourceData = SourceRouter.routeFromConfig(
+                pipeline, resolved, options, runDate);
+
+            PCollection<Row> transformed = SourceTransformChainAssembler.assemble(
+                sourceData, config, options, pipeline);
+
+            transformed.apply("RecordSink-" + config.datasourceName,
+                new DataSourceRecordSinkTransform(options, daIdProvider));
         }
 
         return pipeline;
@@ -271,6 +314,50 @@ public final class DataSourcePipelineFactory {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Runs BnC validation and final checkpoint update for a Classic Template pipeline whose
+     * Dataflow job has already finished. Called by {@code Main} for
+     * {@code --processType=POST_DOWNLOAD_VALIDATION} after the Airflow DataflowJobStateSensor
+     * confirms the job completed.
+     *
+     * <p>Requires {@code --daId} to be set (the da_id created by the pre-setup task).
+     * Reloads source configs from BQ to get the current ValidationConfig.
+     */
+    public void runPostPipelineValidation(FrameworkOptions options) {
+        long daId = options.getDaId().get();
+        if (daId <= 0) {
+            throw new PipelineConfigurationException(
+                "--daId must be set for POST_DOWNLOAD_VALIDATION (got: " + daId + ")");
+        }
+
+        checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(options);
+        recordAdapter     = new BigQueryDataSourceRecordAdapter(options);
+
+        BigQuerySourceConfigRepository bqRepo = new BigQuerySourceConfigRepository(options);
+        List<SourceConfig> sourceConfigs = bqRepo.fetchSourceConfigs(
+            options.getParentId(), options.getDatasourceName(),
+            options.getSubprocessName(), options.getPeriodId());
+
+        LOG.info("POST_DOWNLOAD_VALIDATION | da_id={} | sources={}", daId, sourceConfigs.size());
+
+        // All sources in this run share the same daId (one template = one source group)
+        for (SourceConfig config : sourceConfigs) {
+            try {
+                runValidationAndUpdateCheckpoint(config, daId);
+            } catch (Exception e) {
+                LOG.error("Post-pipeline validation failed for '{}' (da_id={}): {}",
+                          config.datasourceName, daId, e.getMessage(), e);
+                checkpointAdapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED, null);
+                sendFailureEmailIfConfigured(config, DataSourceCheckpoint.STA_FAILED, e.getMessage(), null);
+            }
+        }
+    }
+
+    private static boolean isTemplateCreationMode(FrameworkOptions options) {
+        String loc = options.getTemplateLocation();
+        return loc != null && !loc.isBlank();
+    }
 
     /**
      * For BQ sources, resolves {periodStart}/{periodEnd}/{periodId}/{runDate} and custom

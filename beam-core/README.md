@@ -21,12 +21,13 @@ Every other module depends on this one — it defines the language the whole fra
 
 ---
 
-## ProcessType — two execution modes
+## ProcessType — execution modes
 
-| Value | CLI flag | Source config comes from | Use case |
-|---|---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | `parameter_store` (parameters_val_json, read by `BigQuerySourceConfigRepository`) | Fetch raw data from APIs/files/BQ |
-| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | `--sourceType` CLI flag | Transform downloaded data into reports |
+| Value | CLI flag | Use case |
+|---|---|---|
+| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Fetch raw data from APIs/files/BQ; creates LOADING checkpoint, runs workers, runs BnC post-pipeline |
+| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | Transform downloaded data into reports |
+| `POST_DOWNLOAD_VALIDATION` | `--processType=POST_DOWNLOAD_VALIDATION` | Run BnC validation + final checkpoint update for a Classic Template job that has already finished. Requires `--daId=<N>`. Used as a separate Airflow task after the DataflowJobStateSensor passes. |
 
 ```bash
 # Download raw trades from an external API

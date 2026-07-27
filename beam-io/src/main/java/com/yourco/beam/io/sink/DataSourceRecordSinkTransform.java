@@ -4,6 +4,7 @@ import com.google.api.services.bigquery.model.TableRow;
 import com.yourco.beam.io.util.JsonUtils;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.SerializableFunction;
@@ -41,12 +42,25 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
 
     private static final long serialVersionUID = 1L;
 
-    private final String recordTableRef; // project:dataset.table — BigQueryIO format
-    private final long   daId;
-    private final String loadDt;         // captured once — all rows in this run share the same date
-    private final String lstUpdtTs;      // captured once — avoids per-element clock calls
+    private final String             recordTableRef; // project:dataset.table — BigQueryIO format
+    private final ValueProvider<Long> daId;          // resolved at runtime for Classic Template support
+    private final String             loadDt;         // captured once — all rows in this run share the same date
+    private final String             lstUpdtTs;      // captured once — avoids per-element clock calls
 
+    /**
+     * Flex Template / DirectRunner constructor: checkpoint has already been created and
+     * {@code daId} is known. Wraps it in a StaticValueProvider so the graph stays generic.
+     */
     public DataSourceRecordSinkTransform(FrameworkOptions options, long daId) {
+        this(options, ValueProvider.StaticValueProvider.of(daId));
+    }
+
+    /**
+     * Classic Template constructor: {@code daId} is a runtime ValueProvider resolved when
+     * the template is launched with {@code --daId=<N>}. The LOADING checkpoint row must
+     * have been created by the Airflow pre-setup task before launching the template.
+     */
+    public DataSourceRecordSinkTransform(FrameworkOptions options, ValueProvider<Long> daId) {
         String project = options.getCheckpointBqProject() != null
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
@@ -62,7 +76,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         input
             .apply("Row-to-DaRecRow", MapElements
                 .into(TypeDescriptor.of(TableRow.class))
-                .via(new RowToDaRecFn(daId, loadDt, lstUpdtTs)))
+                .via(new RowToDaRecFn(daId, loadDt, lstUpdtTs)))  // daId resolved at worker startup
             .apply("WriteTo-DaRec", BigQueryIO.writeTableRows()
                 .to(recordTableRef)
                 .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
@@ -70,16 +84,16 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         return PDone.in(input.getPipeline());
     }
 
-    /** Serializable — safe for Beam worker serialization. */
+    /** Serializable — safe for Beam worker serialization. ValueProvider resolved at worker startup. */
     private static final class RowToDaRecFn implements SerializableFunction<Row, TableRow> {
 
         private static final long serialVersionUID = 1L;
 
-        private final long   daId;
+        private final ValueProvider<Long> daId;
         private final String loadDt;
         private final String lstUpdtTs;
 
-        RowToDaRecFn(long daId, String loadDt, String lstUpdtTs) {
+        RowToDaRecFn(ValueProvider<Long> daId, String loadDt, String lstUpdtTs) {
             this.daId      = daId;
             this.loadDt    = loadDt;
             this.lstUpdtTs = lstUpdtTs;
@@ -89,7 +103,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         public TableRow apply(Row row) {
             return new TableRow()
                 .set("rec_id",         UUID.randomUUID().toString())
-                .set("da_id",          daId)
+                .set("da_id",          daId.get())
                 .set("row_da_json_tx", JsonUtils.rowToJson(row))
                 .set("load_dt",        loadDt)
                 .set("lst_updt_ts",    lstUpdtTs);

@@ -121,7 +121,7 @@ Every source file, one line each.
 
 ```
 options/FrameworkOptions.java         All CLI flags. Every pipeline option. Read this first.
-options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCESSING
+options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCESSING | POST_DOWNLOAD_VALIDATION
 options/SourceType.java               Enum: GCS | BQ | PUBSUB | API | FILE
 options/SinkType.java                 Enum: GCS | BQ | PUBSUB
 options/RetryPolicyType.java          Enum: NONE | FIXED | EXPONENTIAL
@@ -184,7 +184,7 @@ sink/BigQuerySinkTransform.java       Writes PCollection<Row> to BQ. Returns Wri
 sink/GcsSinkTransform.java            Writes PCollection<Row> as newline-delimited JSON.
 sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
 sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
-sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs (all sources).
+sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs (all sources). Uses ValueProvider<Long> for daId — StaticValueProvider for Flex/Direct, runtime ValueProvider for Classic Templates.
 
 checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
 checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME.
@@ -390,6 +390,7 @@ the report, with `query_template` referencing any alias in the registry. Custom 
 
 ## 8. DATA_SOURCE_DOWNLOAD — execution path
 
+**Flex Template / DirectRunner (inline post-pipeline):**
 ```
 Main.runDataSourceDownload(options)
 │
@@ -403,7 +404,7 @@ Main.runDataSourceDownload(options)
 │       │   └─ QueryParameterResolver.resolve()               must run in beam-runner (not beam-io)
 │       ├─ SourceRouter.routeFromConfig()                     API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
-│       └─ DataSourceRecordSinkTransform(da_id)               rows → JSON blobs → DaRec
+│       └─ DataSourceRecordSinkTransform(StaticValueProvider(da_id))  rows → JSON blobs → DaRec
 │
 ├─ Pipeline assembled. No data has moved.
 ├─ pipeline.run()                                      submit to Dataflow (or DirectRunner)
@@ -415,6 +416,26 @@ Main.runDataSourceDownload(options)
         ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule
         ├─ ValidationConfig checks (row count bounds, BnC SUM via JSON_VALUE)
         └─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
+```
+
+**Classic Template (three-task Airflow DAG):**
+```
+Airflow Task 1: --processType=DATA_SOURCE_DOWNLOAD --templateLocation=gs://bucket/template
+    DataSourcePipelineFactory.assemble() detects template creation mode
+    → fetchSourceConfigs() runs (source config baked into graph)
+    → checkpoint creation SKIPPED
+    → assemblePipelineForTemplate(): daId = options.getDaId() (runtime ValueProvider)
+    → pipeline.run() serialises graph; waitUntilFinish() SKIPPED
+
+Airflow Task 2: DataflowTemplatedJobStartOperator
+    → pass --daId=<N> (N created by pre-setup script that calls createCheckpoint())
+    → DataflowJobStateSensor waits for DONE/FAILED
+
+Airflow Task 3: --processType=POST_DOWNLOAD_VALIDATION --daId=<N>
+    DataSourcePipelineFactory.runPostPipelineValidation(options)
+    → fetchSourceConfigs() reloads config for ValidationConfig
+    → countRecords(N) / sumField(N, field)
+    → updateStatus(N, COMPLETED/FAILED_BNC/FAILED, bncJson)
 ```
 
 ---

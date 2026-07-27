@@ -18,5 +18,18 @@ package com.yourco.beam.options;
  */
 public enum ProcessType {
     DATA_SOURCE_DOWNLOAD,
-    REPORT_PROCESSING
+    REPORT_PROCESSING,
+
+    /**
+     * Runs BnC validation and final checkpoint update (COMPLETED / FAILED_BNC / FAILED)
+     * for a DATA_SOURCE_DOWNLOAD run whose Dataflow job has already finished.
+     *
+     * <p>Use this as a separate Airflow task after the DataflowJobStateSensor passes,
+     * when the pipeline was launched as a Classic Template (where the driver JVM cannot
+     * block on {@code waitUntilFinish()} and therefore cannot run post-pipeline steps inline).
+     *
+     * <p>Required flags: {@code --datasourceName}, {@code --periodId},
+     * {@code --subprocessName}, {@code --daId}.
+     */
+    POST_DOWNLOAD_VALIDATION
 }
