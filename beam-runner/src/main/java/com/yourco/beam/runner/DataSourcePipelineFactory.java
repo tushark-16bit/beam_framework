@@ -15,11 +15,13 @@ import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.SourceType;
+import com.yourco.beam.utils.BigQuerySchemaUtils;
 import com.yourco.beam.utils.DateUtils;
 import com.yourco.beam.utils.QueryParameterResolver;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.options.ValueProvider;
+import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.slf4j.Logger;
@@ -185,8 +187,9 @@ public final class DataSourcePipelineFactory {
                      config.datasourceName, config.sourceType, dsId);
 
             SourceConfig resolved = resolveQueryTokens(config, options);
+            Schema bqSchema = fetchBqSchema(config);
             PCollection<Row> sourceData = SourceRouter.routeFromConfig(
-                pipeline, resolved, options, runDate);
+                pipeline, resolved, options, runDate, bqSchema);
 
             PCollection<Row> transformed = SourceTransformChainAssembler.assemble(
                 sourceData, config, options, pipeline);
@@ -215,8 +218,9 @@ public final class DataSourcePipelineFactory {
             LOG.info("Assembling template source branch: {} ({})", config.datasourceName, config.sourceType);
 
             SourceConfig resolved = resolveQueryTokens(config, options);
+            Schema bqSchema = fetchBqSchema(config);
             PCollection<Row> sourceData = SourceRouter.routeFromConfig(
-                pipeline, resolved, options, runDate);
+                pipeline, resolved, options, runDate, bqSchema);
 
             PCollection<Row> transformed = SourceTransformChainAssembler.assemble(
                 sourceData, config, options, pipeline);
@@ -388,6 +392,37 @@ public final class DataSourcePipelineFactory {
             .validationConfig(config.validationConfig)
             .failureEmailConfig(config.failureEmailConfig)
             .build();
+    }
+
+    /**
+     * Fetches the Beam Schema for a BQ table source at driver-JVM time.
+     * Returns null for non-BQ sources, query-only sources (no static table), or when the
+     * fetch fails (logs a warning and continues with the generic all-string fallback).
+     *
+     * <p>Must be called here in beam-runner because {@link BigQuerySchemaUtils} is in
+     * beam-utils and beam-io cannot depend on beam-utils.
+     */
+    private static Schema fetchBqSchema(SourceConfig config) {
+        if (config.sourceType != SourceType.BQ || config.bqFetchConfig == null) {
+            return null;
+        }
+        BqFetchConfig bq = config.bqFetchConfig;
+        // Query-only sources have no table to inspect; fall back to generic schema.
+        if (bq.table == null || bq.table.isBlank()) {
+            LOG.debug("BQ source '{}' is query-only — using generic schema fallback",
+                      config.datasourceName);
+            return null;
+        }
+        try {
+            Schema schema = BigQuerySchemaUtils.fetchBeamSchema(bq.tableRef());
+            LOG.info("Fetched typed schema ({} fields) for BQ source '{}'",
+                     schema.getFieldCount(), config.datasourceName);
+            return schema;
+        } catch (Exception e) {
+            LOG.warn("Could not fetch BQ schema for source '{}' ({}): {} — using generic fallback",
+                     config.datasourceName, bq.tableRef(), e.getMessage());
+            return null;
+        }
     }
 
     private static String extractDsNm(SourceConfig config) {

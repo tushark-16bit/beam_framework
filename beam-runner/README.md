@@ -33,9 +33,11 @@ DataSourcePipelineFactory.assemble(options)
     ├─ 4. BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId per source
     │
     ├─ 5. For each SourceConfig independently (no merge!):
-    │       a. SourceRouter.routeFromConfig()         read raw data
-    │       b. QueryParameterResolver                 inject {periodStart}/{periodEnd}
-    │       c. SourceTransformChainAssembler.assemble()
+    │       a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query
+    │       b. fetchBqSchema()                        BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
+    │              null for query-only or failed fetch (generic all-STRING fallback)
+    │       c. SourceRouter.routeFromConfig(schema)   read raw data (typed if schema non-null)
+    │       d. SourceTransformChainAssembler.assemble()
     │              ├─ LOOKUP: BQ side input → LookupEnrichTransform
     │              ├─ GROUP_BY:  GroupByTransform
     │              └─ SORT_BY:   SortByTransform (per-bundle, not global)

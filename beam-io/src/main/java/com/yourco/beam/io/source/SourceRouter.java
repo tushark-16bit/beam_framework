@@ -5,6 +5,7 @@ import com.yourco.beam.model.PipelineRunConfig;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 
@@ -58,6 +59,21 @@ public final class SourceRouter {
      */
     public static PCollection<Row> routeFromConfig(Pipeline pipeline, SourceConfig config,
                                                    FrameworkOptions options, LocalDate runDate) {
+        return routeFromConfig(pipeline, config, options, runDate, null);
+    }
+
+    /**
+     * DATA_SOURCE_DOWNLOAD mode with optional pre-fetched BQ schema.
+     *
+     * <p>{@code bqSchema} must be fetched at driver-JVM time by the caller in beam-runner
+     * (via {@code BigQuerySchemaUtils.fetchBeamSchema()}), because beam-io cannot depend on
+     * beam-utils. When non-null and {@code sourceType=BQ}, the schema is passed to
+     * {@link BigQuerySourceTransform} for typed field mapping. For non-BQ sources the
+     * parameter is ignored. Pass {@code null} to use the generic all-string fallback.
+     */
+    public static PCollection<Row> routeFromConfig(Pipeline pipeline, SourceConfig config,
+                                                   FrameworkOptions options, LocalDate runDate,
+                                                   Schema bqSchema) {
         String label = config.datasourceName + "-" + config.sourceType.name();
 
         return switch (config.sourceType) {
@@ -69,7 +85,7 @@ public final class SourceRouter {
                 BqFetchConfig bq = Objects.requireNonNull(config.bqFetchConfig,
                     "bqFetchConfig is required for sourceType=BQ in source: " + config.datasourceName);
                 yield pipeline.apply("Source-" + label,
-                    new BigQuerySourceTransform(bq.tableRef(), bq.query));
+                    new BigQuerySourceTransform(bq.tableRef(), bq.query, bqSchema));
             }
             case GCS  -> pipeline.apply("Source-" + label,
                 new GcsSourceTransform(config.fileConfig != null ? config.fileConfig.location : null));

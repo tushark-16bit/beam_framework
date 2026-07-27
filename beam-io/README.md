@@ -9,8 +9,8 @@ Also contains the `DeadLetterSinkTransform` for writing failed records.
 
 ```
 io/source/
-    SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD)
-    BigQuerySourceTransform   — reads from BQ table or SQL query
+    SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD); overload with nullable Schema param passes pre-fetched schema to BigQuerySourceTransform
+    BigQuerySourceTransform   — reads from BQ table or SQL query; typed mode uses a pre-fetched Schema (passed from beam-runner) with BigQueryUtils.toBeamRow(); generic fallback when schema is null
     GcsSourceTransform        — reads newline-delimited JSON from GCS glob
     PubSubSourceTransform     — reads from a Pub/Sub subscription (streaming)
     ApiSourceAdapter          — pure HTTP adapter: auth, pagination (PAGE_NUMBER/CURSOR/OFFSET)
@@ -103,9 +103,13 @@ All sources produce `PCollection<Row>` with a declared schema set via `setRowSch
 
 - **GCS** and **Pub/Sub** produce a single-field schema: `raw_json STRING`.
   Downstream transforms must parse this field (e.g., a `flatten-json` transform).
-- **BigQuery** currently produces a single-field `_row_json STRING` schema.
-  For column-level transforms, use `BigQuerySchemaUtils.fetchBeamSchema(tableRef)`
-  from `beam-utils` to fetch the real schema and wire it into the source.
+- **BigQuery** (typed path): when a pre-fetched `Schema` is supplied by the beam-runner
+  caller (`DataSourcePipelineFactory.fetchBqSchema()`), each `TableRow` is converted with
+  `BigQueryUtils.toBeamRow(schema, tableRow)` and the output `PCollection<Row>` carries
+  the real column names and types (INT64, DOUBLE, BOOLEAN, DATETIME, etc.).
+  Fallback: query-only sources or failed schema fetches emit a per-row all-STRING schema
+  built from the `TableRow` key set. Schema is fetched via `BigQuerySchemaUtils.fetchBeamSchema()`
+  in beam-runner (the only module that can call beam-utils).
 
 ---
 

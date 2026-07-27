@@ -2,6 +2,7 @@ package com.yourco.beam.io.source;
 
 import com.google.api.services.bigquery.model.TableRow;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -15,21 +16,24 @@ import org.apache.beam.sdk.values.TypeDescriptor;
  * Reads from a BigQuery table or SQL query and produces a {@code PCollection<Row>}.
  *
  * <h2>Schema handling</h2>
- * BigQuery table columns are mapped to a flat string-value Beam schema.
- * Each {@link TableRow} field becomes a nullable {@code STRING} column in the
- * output schema. For typed schemas (NUMERIC, TIMESTAMP, etc.), replace
- * {@link #buildSchema(TableRow)} with schema inference from the BQ table
- * metadata using {@code BigQueryUtils.fromTableSchema(tableSchema)}.
+ * Two modes:
+ * <ul>
+ *   <li><b>Typed</b> (preferred): pass a pre-fetched {@link Schema} from
+ *       {@code BigQuerySchemaUtils.fetchBeamSchema()} (called in the driver JVM by the
+ *       caller in beam-runner). Each {@link TableRow} is converted with
+ *       {@link BigQueryUtils#toBeamRow(Schema, TableRow)}, preserving native types
+ *       (INT64, DOUBLE, BOOLEAN, DATETIME, etc.).</li>
+ *   <li><b>Generic fallback</b>: pass {@code null} for schema (or use the two-arg
+ *       constructor). Each field is coerced to a nullable STRING; the column name is
+ *       the key from the {@link TableRow} map. Used for query-only sources where
+ *       no table exists to inspect, or when schema fetch fails.</li>
+ * </ul>
  *
  * <h2>Configuration</h2>
  * <ul>
  *   <li><b>Table</b>: {@code --bqSourceTable=project:dataset.table}</li>
  *   <li><b>Query</b>: {@code --bqSourceQuery=SELECT ...} (takes precedence)</li>
  * </ul>
- *
- * <h2>I6 fix</h2>
- * Extends {@link PTransform} so Beam's graph-building hooks are invoked and
- * the source appears as a labelled node in the Dataflow UI.
  */
 public final class BigQuerySourceTransform extends PTransform<PBegin, PCollection<Row>> {
 
@@ -37,10 +41,25 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
 
     private final String bqTable;
     private final String bqQuery;
+    // Nullable: when non-null, typed conversion is used; when null, generic fallback.
+    // Schema is Serializable so it can be baked into a Classic Template graph.
+    private final Schema schema;
 
+    /** Generic fallback constructor — schema derived per-element from TableRow keys. */
     public BigQuerySourceTransform(String bqTable, String bqQuery) {
+        this(bqTable, bqQuery, null);
+    }
+
+    /**
+     * Typed constructor — schema pre-fetched at driver-JVM time via
+     * {@code BigQuerySchemaUtils.fetchBeamSchema()} in beam-runner.
+     *
+     * @param schema pre-fetched Beam Schema, or {@code null} to use the generic fallback
+     */
+    public BigQuerySourceTransform(String bqTable, String bqQuery, Schema schema) {
         this.bqTable = bqTable;
         this.bqQuery = bqQuery;
+        this.schema  = schema;
         validateOptions();
     }
 
@@ -48,16 +67,20 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     public PCollection<Row> expand(PBegin input) {
         PCollection<TableRow> tableRows = input.apply("ReadFrom-BQ", buildRead());
 
-        // Convert each TableRow to a Beam Row using all-string schema derived from row fields.
-        // This is a generic approach that works without knowing the schema at pipeline-build time.
-        // For production use with typed schemas, replace with BigQueryUtils.toBeamRow(schema, tableRow).
+        if (schema != null) {
+            // Typed path: use BigQueryUtils for native type mapping (INT64, DOUBLE, BOOLEAN, etc.)
+            return tableRows
+                    .apply("TableRow-to-Row", MapElements
+                            .into(TypeDescriptor.of(Row.class))
+                            .via(new TypedTableRowToRowFn(schema)))
+                    .setRowSchema(schema);
+        }
+
+        // Generic fallback: all fields as nullable STRING, schema built from first row's keys.
         return tableRows
                 .apply("TableRow-to-Row", MapElements
                         .into(TypeDescriptor.of(Row.class))
-                        .via(new TableRowToRowFn()))
-                // Schema is set per-element inside the DoFn; set a sentinel schema here so
-                // Beam's schema-aware code paths are activated. In production, derive the real
-                // schema from BigQuery table metadata and set it here instead.
+                        .via(new GenericTableRowToRowFn()))
                 .setRowSchema(buildGenericSchema());
     }
 
@@ -71,20 +94,14 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     }
 
     /**
-     * Generic fallback schema: a single BYTES field holding the full row as a JSON string.
-     * Replace with a real schema derived from BQ table metadata for column-level transforms.
+     * Sentinel schema used by the generic fallback so Beam's schema-aware code paths are
+     * activated. Downstream transforms should use the per-row schema built by
+     * {@link GenericTableRowToRowFn} instead.
      */
     private static Schema buildGenericSchema() {
         return Schema.builder()
                 .addNullableStringField("_row_json")
                 .build();
-    }
-
-    /** Converts a {@link TableRow} to a {@link Row} by serializing the map to a JSON string. */
-    private static Schema buildSchema(TableRow tableRow) {
-        Schema.Builder builder = Schema.builder();
-        tableRow.keySet().forEach(key -> builder.addNullableStringField(key));
-        return builder.build();
     }
 
     private void validateOptions() {
@@ -96,19 +113,46 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
         }
     }
 
-    // ── Named SerializableFunction — safe for Beam serialization ─────────────
+    // ── Named SerializableFunction implementations — safe for Beam serialization ──
 
-    /** Maps a {@link TableRow} to a single-field {@link Row} holding each column as a string. */
-    private static final class TableRowToRowFn
+    /**
+     * Typed conversion: uses {@link BigQueryUtils#toBeamRow(Schema, TableRow)} to map each
+     * BQ field to its native Beam type (INT64, DOUBLE, BOOLEAN, DATETIME, etc.).
+     * Schema was pre-fetched at driver-JVM time and is stable for all rows in this PCollection.
+     */
+    private static final class TypedTableRowToRowFn
+            implements SerializableFunction<TableRow, Row> {
+
+        private static final long serialVersionUID = 1L;
+
+        private final Schema schema;
+
+        TypedTableRowToRowFn(Schema schema) {
+            this.schema = schema;
+        }
+
+        @Override
+        public Row apply(TableRow tableRow) {
+            return BigQueryUtils.toBeamRow(schema, tableRow);
+        }
+    }
+
+    /**
+     * Generic fallback: each field is coerced to a nullable STRING.
+     * The schema is built per-row from the TableRow key set.
+     * Used when no pre-fetched schema is available (query-only sources, or schema fetch failed).
+     */
+    private static final class GenericTableRowToRowFn
             implements SerializableFunction<TableRow, Row> {
 
         private static final long serialVersionUID = 1L;
 
         @Override
         public Row apply(TableRow tableRow) {
-            // Build a per-row schema from the actual fields present
-            Schema schema = buildSchema(tableRow);
-            Row.Builder builder = Row.withSchema(schema);
+            Schema.Builder schemaBuilder = Schema.builder();
+            tableRow.keySet().forEach(key -> schemaBuilder.addNullableStringField(key));
+            Schema rowSchema = schemaBuilder.build();
+            Row.Builder builder = Row.withSchema(rowSchema);
             tableRow.keySet().forEach(key -> {
                 Object value = tableRow.get(key);
                 builder.addValue(value != null ? value.toString() : null);

@@ -170,8 +170,8 @@ model/PipelineRunConfig.java          Per-datasource runtime config from paramet
 ### beam-io — connectors and I/O adapters
 
 ```
-source/SourceRouter.java              Stateless factory: routeByOptions() + routeFromConfig().
-source/BigQuerySourceTransform.java   BigQueryIO.read() with typed schema.
+source/SourceRouter.java              Stateless factory: routeByOptions() + routeFromConfig(). Overload with nullable Schema passes pre-fetched schema to BigQuerySourceTransform; schema must be fetched by caller in beam-runner.
+source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → BigQueryUtils.toBeamRow, native INT64/DOUBLE/BOOLEAN/DATETIME types) and generic fallback (null schema → per-row all-STRING schema from TableRow keys).
 source/GcsSourceTransform.java        GCS glob → newline-delimited JSON rows.
 source/PubSubSourceTransform.java     Pub/Sub subscription → streaming rows.
 source/ApiSourceAdapter.java          Pure HTTP adapter: auth, PAGE_NUMBER/CURSOR/OFFSET pagination.
@@ -246,7 +246,7 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 ```
 Main.java                       Parses CLI → routes by processType + reportName.
 PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink.
-DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches, post-pipeline validation.
+DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches, post-pipeline validation. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time and passes the Schema to SourceRouter; schema is null for query-only or failed fetches (generic fallback).
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
@@ -402,7 +402,9 @@ Main.runDataSourceDownload(options)
 │       ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id (LOADING row)
 │       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc. into bq_query
 │       │   └─ QueryParameterResolver.resolve()               must run in beam-runner (not beam-io)
-│       ├─ SourceRouter.routeFromConfig()                     API / FILE / BQ → PCollection<Row>
+│       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ table sources only: BigQuerySchemaUtils.fetchBeamSchema()
+│       │   └─ null for query-only sources or on fetch failure (falls back to generic all-STRING schema)
+│       ├─ SourceRouter.routeFromConfig(schema)               API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
 │       └─ DataSourceRecordSinkTransform(StaticValueProvider(da_id))  rows → JSON blobs → DaRec
 │
