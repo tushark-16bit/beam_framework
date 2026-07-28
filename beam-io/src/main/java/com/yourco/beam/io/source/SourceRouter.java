@@ -35,9 +35,22 @@ public final class SourceRouter {
      * Reads from the configured source and returns a {@code PCollection<Row>}.
      */
     public static PCollection<Row> route(Pipeline pipeline, PipelineRunConfig runConfig) {
+        return route(pipeline, runConfig, null);
+    }
+
+    /**
+     * REPORT_PROCESSING legacy mode with optional pre-fetched BQ schema.
+     *
+     * <p>{@code bqSchema} must be fetched at driver-JVM time by the caller in beam-runner
+     * (via {@code BigQuerySchemaUtils.fetchBeamSchema()}). When non-null and
+     * {@code sourceType=BQ}, the schema is passed to {@link BigQuerySourceTransform} for
+     * typed field mapping. For non-BQ sources the parameter is ignored.
+     * Pass {@code null} to use the generic all-string fallback.
+     */
+    public static PCollection<Row> route(Pipeline pipeline, PipelineRunConfig runConfig, Schema bqSchema) {
         return switch (runConfig.getSourceType()) {
             case GCS    -> pipeline.apply("Source-GCS",    new GcsSourceTransform(runConfig.getGcsSourcePath()));
-            case BQ     -> pipeline.apply("Source-BQ",     new BigQuerySourceTransform(runConfig.getBqSourceTable(), runConfig.getBqSourceQuery()));
+            case BQ     -> pipeline.apply("Source-BQ",     new BigQuerySourceTransform(runConfig.getBqSourceTable(), runConfig.getBqSourceQuery(), bqSchema));
             case PUBSUB -> pipeline.apply("Source-PubSub", new PubSubSourceTransform(runConfig.getPubSubSubscription()));
             case API, FILE -> throw new IllegalArgumentException(
                 "sourceType=" + runConfig.getSourceType()

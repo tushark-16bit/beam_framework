@@ -7,12 +7,15 @@ import com.yourco.beam.io.source.SourceRouter;
 import com.yourco.beam.model.FailedRecord;
 import com.yourco.beam.model.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
+import com.yourco.beam.options.SourceType;
 import com.yourco.beam.retry.ExponentialRetryPolicy;
 import com.yourco.beam.retry.FixedRetryPolicy;
 import com.yourco.beam.retry.RetryPolicy;
 import com.yourco.beam.transform.BeamTransform;
 import com.yourco.beam.transform.TransformRegistry;
+import com.yourco.beam.utils.BigQuerySchemaUtils;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
@@ -61,7 +64,8 @@ public final class PipelineFactory {
 
         // ── Step 1: Source ────────────────────────────────────────────────────
         LOG.info("Configuring source: {}", loadedRunConfig.getSourceType());
-        PCollection<Row> current = SourceRouter.route(pipeline, loadedRunConfig);
+        Schema bqSchema = fetchBqSchema(loadedRunConfig);
+        PCollection<Row> current = SourceRouter.route(pipeline, loadedRunConfig, bqSchema);
 
         // ── Step 2: Resolve transform chain ───────────────────────────────────
         String chainSpec = loadedRunConfig.getTransformChain();
@@ -106,6 +110,31 @@ public final class PipelineFactory {
         }
 
         return pipeline;
+    }
+
+    /**
+     * Fetches the Beam Schema for a BQ table source at driver-JVM time.
+     * Returns null for non-BQ sources, query-only sources, or when the fetch fails.
+     * Must live in beam-runner because BigQuerySchemaUtils is in beam-utils and
+     * beam-io cannot depend on beam-utils.
+     */
+    private static Schema fetchBqSchema(PipelineRunConfig runConfig) {
+        if (runConfig.getSourceType() != SourceType.BQ) return null;
+        String table = runConfig.getBqSourceTable();
+        if (table == null || table.isBlank()) {
+            LOG.debug("BQ source is query-only — using generic schema fallback");
+            return null;
+        }
+        try {
+            Schema schema = BigQuerySchemaUtils.fetchBeamSchema(table);
+            LOG.info("Fetched typed schema ({} fields) for BQ source '{}'",
+                     schema.getFieldCount(), table);
+            return schema;
+        } catch (Exception e) {
+            LOG.warn("Could not fetch BQ schema for '{}': {} — using generic fallback",
+                     table, e.getMessage());
+            return null;
+        }
     }
 
     /** Returns true if the configured source type is streaming (Pub/Sub). */

@@ -69,10 +69,12 @@ For global ordering, use an `ORDER BY` clause in the downstream BQ view instead 
 
 ```
 PipelineFactory.assemble(options)
-    ├─ 1. SourceRouter.route()          reads --sourceType
-    ├─ 2. TransformRegistry + chain loop
-    ├─ 3. SinkRouter.route()
-    └─ 4. Flatten DLQ → DeadLetterSinkTransform
+    ├─ 1. fetchBqSchema()               BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
+    │       null for query-only or failed fetch (generic all-STRING fallback)
+    ├─ 2. SourceRouter.route(schema)    reads --sourceType; typed if schema non-null
+    ├─ 3. TransformRegistry + chain loop
+    ├─ 4. SinkRouter.route()
+    └─ 5. Flatten DLQ → DeadLetterSinkTransform
 ```
 
 No data moves during assembly — it only describes the computation graph.

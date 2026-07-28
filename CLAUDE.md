@@ -170,7 +170,7 @@ model/PipelineRunConfig.java          Per-datasource runtime config from paramet
 ### beam-io — connectors and I/O adapters
 
 ```
-source/SourceRouter.java              Stateless factory: routeByOptions() + routeFromConfig(). Overload with nullable Schema passes pre-fetched schema to BigQuerySourceTransform; schema must be fetched by caller in beam-runner.
+source/SourceRouter.java              Stateless factory: route() (REPORT_PROCESSING) + routeFromConfig() (DATA_SOURCE_DOWNLOAD). Both have overloads with nullable Schema that pass a pre-fetched schema to BigQuerySourceTransform; schema fetched by caller in beam-runner.
 source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → BigQueryUtils.toBeamRow, native INT64/DOUBLE/BOOLEAN/DATETIME types) and generic fallback (null schema → per-row all-STRING schema from TableRow keys).
 source/GcsSourceTransform.java        GCS glob → newline-delimited JSON rows.
 source/PubSubSourceTransform.java     Pub/Sub subscription → streaming rows.
@@ -245,7 +245,7 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 
 ```
 Main.java                       Parses CLI → routes by processType + reportName.
-PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink.
+PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink. fetchBqSchema() fetches typed Schema at driver-JVM time and passes it to SourceRouter.route().
 DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches, post-pipeline validation. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time and passes the Schema to SourceRouter; schema is null for query-only or failed fetches (generic fallback).
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
