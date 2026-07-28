@@ -19,16 +19,17 @@ import org.slf4j.LoggerFactory;
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
  * <pre>
  *   1. DataSourcePipelineFactory.assemble()
- *        ├─ Resolve MSTR_Per row for --periodId
  *        ├─ Validate params in BQ (parameter_store row present)
  *        ├─ Fetch source configs (transforms, validationConfig)
  *        ├─ Skip sources already COMPLETED in DaRefer (unless --overrideDownload)
  *        ├─ Insert DaRefer row sta_cd=LOADING → returns da_id per source
- *        └─ Assemble per-source Beam branches → rows written to DaRec as row_da_json_tx JSON
+ *        └─ Assemble per-source Beam branches:
+ *               source read → transform chain → DataSourceRecordSinkTransform (streaming inserts)
+ *                                                         ↓
+ *                                             PostDownloadFinalizeTransform
+ *                                   (BnC validation + checkpoint update + email — in worker)
  *   2. pipeline.run().waitUntilFinish()
- *   3. DataSourcePipelineFactory.runPostPipelineSteps()
- *        ├─ COUNT(*) FROM DaRec WHERE da_id=X; SUM BnC fields
- *        └─ UPDATE DaRefer sta_cd → COMPLETED / FAILED_BNC / FAILED
+ *      Checkpoint (COMPLETED / FAILED_BNC / FAILED) is written by the worker as the last step.
  * </pre>
  *
  * <h2>REPORT_PROCESSING lifecycle (DB-configured)</h2>
@@ -63,9 +64,8 @@ public final class Main {
         LOG.info("Job run ID:   {}", options.getJobRunId());
 
         switch (options.getProcessType()) {
-            case DATA_SOURCE_DOWNLOAD    -> runDataSourceDownload(options);
-            case REPORT_PROCESSING       -> runReportProcessing(options);
-            case POST_DOWNLOAD_VALIDATION -> runPostDownloadValidation(options);
+            case DATA_SOURCE_DOWNLOAD -> runDataSourceDownload(options);
+            case REPORT_PROCESSING    -> runReportProcessing(options);
         }
     }
 
@@ -82,63 +82,13 @@ public final class Main {
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
         PipelineResult result = pipeline.run();
 
-        // Classic Template creation mode: pipeline.run() only serialised the graph to
-        // --templateLocation. No workers ran. waitUntilFinish() would throw
-        // UnsupportedOperationException ("The result of template creation cannot be used
-        // to monitor the job"). Skip it entirely — post-pipeline steps run via a separate
-        // Airflow task using --processType=POST_DOWNLOAD_VALIDATION after job completion.
-        if (isTemplateCreationMode(options)) {
-            LOG.info("Classic Template created at {}. "
-                   + "Airflow DAG must: (1) create LOADING row via pre-setup task, "
-                   + "(2) launch template with --daId=<N>, "
-                   + "(3) wait for job via DataflowJobStateSensor, "
-                   + "(4) run --processType=POST_DOWNLOAD_VALIDATION --daId=<N>.",
-                   options.getTemplateLocation());
-            return;
-        }
-
-        PipelineResult.State finalState = PipelineResult.State.UNKNOWN;
-        Throwable pipelineError = null;
-
         try {
             result.waitUntilFinish();
-            finalState = result.getState();
-            LOG.info("Pipeline finished with state: {}", finalState);
+            LOG.info("Pipeline finished with state: {}", result.getState());
         } catch (Exception e) {
-            pipelineError = e;
             LOG.error("Pipeline run threw exception: {}", e.getMessage(), e);
-            try {
-                finalState = result.getState();
-            } catch (Exception ignored) {}
+            throw new RuntimeException("DATA_SOURCE_DOWNLOAD pipeline failed", e);
         }
-
-        // Post-pipeline: validate output tables, write final checkpoints + status rows.
-        // This runs regardless of success/failure — the factory handles each case.
-        try {
-            factory.runPostPipelineSteps(finalState, pipelineError);
-        } catch (Exception e) {
-            // Best-effort — don't mask a pipeline failure with a status-write failure
-            LOG.error("Post-pipeline steps failed (status rows may be incomplete): {}", e.getMessage(), e);
-        }
-
-        if (pipelineError != null) {
-            throw new RuntimeException("DATA_SOURCE_DOWNLOAD pipeline failed", pipelineError);
-        }
-    }
-
-    // ── POST_DOWNLOAD_VALIDATION ─────────────────────────────────────────────
-
-    private static void runPostDownloadValidation(FrameworkOptions options) {
-        LOG.info("POST_DOWNLOAD_VALIDATION | datasource={} | period={} | daId={}",
-                 options.getDatasourceName(), options.getPeriodId(), options.getDaId());
-        new DataSourcePipelineFactory().runPostPipelineValidation(options);
-    }
-
-    // ── Template detection ───────────────────────────────────────────────────
-
-    private static boolean isTemplateCreationMode(FrameworkOptions options) {
-        String loc = options.getTemplateLocation();
-        return loc != null && !loc.isBlank();
     }
 
     // ── REPORT_PROCESSING ────────────────────────────────────────────────────

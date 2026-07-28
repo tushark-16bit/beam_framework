@@ -28,15 +28,19 @@ io/sink/
 io/checkpoint/
     DataSourceCheckpointAdapter         — interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
     BigQueryDataSourceCheckpointAdapter — BQ DML impl; MAX(da_id)+1 sequence, MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME (LocalDateTime).
+                                          Has a String-tableRef constructor for in-worker use (DoFn @Setup).
     ReportCheckpointAdapter             — interface for 4 report tables: RptRefer (createCheckpoint/updateStatus/isCompleted), RptDaMap (addDaMapping), RptStageDa (stageFromDaRec/stagedDataSubquery/clearStagedData), RptOutput (writeOutput).
     BigQueryReportCheckpointAdapter     — BQ DML impl for all 4 report tables. All timestamps DATETIME. Stage_id generated via MAX+ROW_NUMBER() OVER().
 
 io/records/
     DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field)
-    BigQueryDataSourceRecordAdapter — BQ query using JSON_VALUE(row_da_json_tx, '$.field') for BnC validation
+    BigQueryDataSourceRecordAdapter — BQ query using JSON_VALUE(row_da_json_tx, '$.field') for BnC validation.
+                                      Has a String-tableRef constructor for in-worker use (DoFn @Setup).
 
 io/sink/
-    DataSourceRecordSinkTransform   — Beam PTransform writing all rows as JSON blobs to DaRec (keyed by da_id)
+    DataSourceRecordSinkTransform   — Beam PTransform writing all rows as JSON blobs to DaRec via streaming inserts.
+                                      Returns PCollection<Long> (row count after all inserts commit) so that
+                                      PostDownloadFinalizeTransform can Wait.on() it for correct ordering.
 
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer

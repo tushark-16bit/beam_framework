@@ -37,6 +37,19 @@ public final class BigQueryDataSourceCheckpointAdapter implements DataSourceChec
         this(BigQueryOptions.getDefaultInstance().getService(), options);
     }
 
+    /**
+     * In-worker constructor: takes a pre-formatted table reference instead of
+     * {@link FrameworkOptions} (which is not serializable and cannot be a DoFn field).
+     *
+     * @param tableRef backtick-quoted fully-qualified table ref, e.g.
+     *                 {@code `project.dataset.DaRefer`}
+     */
+    public BigQueryDataSourceCheckpointAdapter(String tableRef) {
+        this.bigquery = BigQueryOptions.getDefaultInstance().getService();
+        this.table    = tableRef;
+        LOG.info("DaRefer table (worker): {}", tableRef);
+    }
+
     BigQueryDataSourceCheckpointAdapter(BigQuery bigquery, FrameworkOptions options) {
         this.bigquery = bigquery;
         String project = options.getCheckpointBqProject() != null

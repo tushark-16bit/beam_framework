@@ -121,7 +121,7 @@ Every source file, one line each.
 
 ```
 options/FrameworkOptions.java         All CLI flags. Every pipeline option. Read this first.
-options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCESSING | POST_DOWNLOAD_VALIDATION
+options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCESSING
 options/SourceType.java               Enum: GCS | BQ | PUBSUB | API | FILE
 options/SinkType.java                 Enum: GCS | BQ | PUBSUB
 options/RetryPolicyType.java          Enum: NONE | FIXED | EXPONENTIAL
@@ -184,10 +184,10 @@ sink/BigQuerySinkTransform.java       Writes PCollection<Row> to BQ. Returns Wri
 sink/GcsSinkTransform.java            Writes PCollection<Row> as newline-delimited JSON.
 sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
 sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
-sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs (all sources). Uses ValueProvider<Long> for daId — StaticValueProvider for Flex/Direct, runtime ValueProvider for Classic Templates.
+sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs via streaming inserts. Returns PCollection<Long> (count after all inserts commit) for Wait.on() chaining to PostDownloadFinalizeTransform.
 
 checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
-checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME.
+checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME. Has String-tableRef constructor for in-worker use.
 checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_PROCESSING tables: RptRefer, RptDaMap, RptStageDa, RptOutput.
 checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
 
@@ -246,7 +246,8 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 ```
 Main.java                       Parses CLI → routes by processType + reportName.
 PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink. fetchBqSchema() fetches typed Schema at driver-JVM time and passes it to SourceRouter.route().
-DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches, post-pipeline validation. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time and passes the Schema to SourceRouter; schema is null for query-only or failed fetches (generic fallback).
+DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creates LOADING checkpoint per source in driver JVM, wires RecordSink → PostDownloadFinalizeTransform in graph. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time.
+PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: BnC validation, checkpoint update (COMPLETED/FAILED_BNC/FAILED), failure email. Runs inside Beam worker — no external post-pipeline step needed.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
@@ -394,50 +395,29 @@ the report, with `query_template` referencing any alias in the registry. Custom 
 ```
 Main.runDataSourceDownload(options)
 │
-├─ DataSourcePipelineFactory.assemble(options)
+├─ DataSourcePipelineFactory.assemble(options)   [driver JVM]
 │   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load SourceConfig from BQ; throws if row missing
+│   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources
+│   ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id per source (LOADING row)
 │   │
-│   └─ for each SourceConfig:
-│       ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()  skip if COMPLETED
-│       ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id (LOADING row)
-│       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc. into bq_query
-│       │   └─ QueryParameterResolver.resolve()               must run in beam-runner (not beam-io)
-│       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ table sources only: BigQuerySchemaUtils.fetchBeamSchema()
-│       │   └─ null for query-only sources or on fetch failure (falls back to generic all-STRING schema)
+│   └─ for each SourceConfig (graph assembly — no data moves yet):
+│       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc.
+│       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
+│       │   └─ null for query-only or failed fetch (generic all-STRING fallback)
 │       ├─ SourceRouter.routeFromConfig(schema)               API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
-│       └─ DataSourceRecordSinkTransform(StaticValueProvider(da_id))  rows → JSON blobs → DaRec
+│       ├─ DataSourceRecordSinkTransform(da_id)               rows → streaming inserts → DaRec
+│       │   └─ returns PCollection<Long> (count after all inserts committed)
+│       └─ PostDownloadFinalizeTransform(da_id)               [wired here; runs in Beam worker]
 │
-├─ Pipeline assembled. No data has moved.
-├─ pipeline.run()                                      submit to Dataflow (or DirectRunner)
-├─ result.waitUntilFinish()
-│
-└─ DataSourcePipelineFactory.runPostPipelineSteps(state, error)
-    └─ for each SourceConfig that ran:
-        ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)
-        ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule
-        ├─ ValidationConfig checks (row count bounds, BnC SUM via JSON_VALUE)
-        └─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
-```
-
-**Classic Template (three-task Airflow DAG):**
-```
-Airflow Task 1: --processType=DATA_SOURCE_DOWNLOAD --templateLocation=gs://bucket/template
-    DataSourcePipelineFactory.assemble() detects template creation mode
-    → fetchSourceConfigs() runs (source config baked into graph)
-    → checkpoint creation SKIPPED
-    → assemblePipelineForTemplate(): daId = options.getDaId() (runtime ValueProvider)
-    → pipeline.run() serialises graph; waitUntilFinish() SKIPPED
-
-Airflow Task 2: DataflowTemplatedJobStartOperator
-    → pass --daId=<N> (N created by pre-setup script that calls createCheckpoint())
-    → DataflowJobStateSensor waits for DONE/FAILED
-
-Airflow Task 3: --processType=POST_DOWNLOAD_VALIDATION --daId=<N>
-    DataSourcePipelineFactory.runPostPipelineValidation(options)
-    → fetchSourceConfigs() reloads config for ValidationConfig
-    → countRecords(N) / sumField(N, field)
-    → updateStatus(N, COMPLETED/FAILED_BNC/FAILED, bncJson)
+├─ pipeline.run()                                submit to Dataflow (or DirectRunner)
+└─ result.waitUntilFinish()
+   (When the job reaches DONE, PostDownloadFinalizeTransform has already run in a worker:)
+       ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)
+       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule
+       ├─ ValidationConfig checks (row count bounds, BnC SUM via JSON_VALUE)
+       ├─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
+       └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```
 
 ---

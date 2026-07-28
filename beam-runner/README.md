@@ -10,9 +10,10 @@ You should rarely need to edit this module.
 | Class | Purpose |
 |---|---|
 | `Main` | Parses CLI args, routes by `--processType` and `--reportName`, delegates to the right factory |
-| `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, assembles per-source Beam branches |
+| `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, creates LOADING checkpoints, assembles per-source Beam branches |
+| `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: BnC validation + checkpoint update (COMPLETED/FAILED_BNC/FAILED) + failure email, all running in the Beam worker |
 | `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; no Beam pipeline submitted |
-| `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` |
+| `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` and `PostDownloadFinalizeTransform` |
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline |
 
 ---
@@ -28,32 +29,30 @@ DataSourcePipelineFactory.assemble(options)
     ├─ 1. BigQuerySourceConfigRepository.fetchSourceConfigs()  (throws if row missing)
     │       Each SourceConfig carries: queryConfig, sourceTransforms, validationConfig
     │
-    ├─ 3. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources
+    ├─ 2. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources
     │
-    ├─ 4. BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId per source
+    ├─ 3. BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId per source (LOADING row)
     │
-    ├─ 5. For each SourceConfig independently (no merge!):
-    │       a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query
-    │       b. fetchBqSchema()                        BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
-    │              null for query-only or failed fetch (generic all-STRING fallback)
-    │       c. SourceRouter.routeFromConfig(schema)   read raw data (typed if schema non-null)
-    │       d. SourceTransformChainAssembler.assemble()
-    │              ├─ LOOKUP: BQ side input → LookupEnrichTransform
-    │              ├─ GROUP_BY:  GroupByTransform
-    │              └─ SORT_BY:   SortByTransform (per-bundle, not global)
-    │       d. DataSourceRecordSinkTransform(dataSourceId) — rows → JSON blobs → data_source_records
-    │
-    └─ 6. Return pipeline (run() called by Main)
-
-After pipeline.run() + waitUntilFinish():
-    DataSourcePipelineFactory.runPostPipelineSteps()
-    ├─ On success: for each source
-    │    ├─ BigQueryDataSourceRecordAdapter.countRecords(dataSourceId)
-    │    ├─ BigQueryDataSourceRecordAdapter.sumField(dataSourceId, field) per BnC rule
-    │    ├─ Compare against ValidationConfig bounds
-    │    └─ updateStatus(dataSourceId, COMPLETED/FAILED_BNC, bncJson)
-    └─ On failure: updateStatus(dataSourceId, FAILED, null)
+    └─ 4. For each SourceConfig independently (no merge!):
+            a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query
+            b. fetchBqSchema()                        BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
+                   null for query-only or failed fetch (generic all-STRING fallback)
+            c. SourceRouter.routeFromConfig(schema)   read raw data (typed if schema non-null)
+            d. SourceTransformChainAssembler.assemble()
+                   ├─ LOOKUP: BQ side input → LookupEnrichTransform
+                   ├─ GROUP_BY:  GroupByTransform
+                   └─ SORT_BY:   SortByTransform (per-bundle, not global)
+            e. DataSourceRecordSinkTransform(daId)    rows → streaming inserts → DaRec
+                   → returns PCollection<Long> (count after all inserts commit)
+            f. PostDownloadFinalizeTransform(daId)    [runs in Beam worker, not driver JVM]
+                   ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)
+                   ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule
+                   ├─ Compare against ValidationConfig bounds
+                   ├─ updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
+                   └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```
+
+The terminal checkpoint update and failure email are part of the pipeline itself. When the job reaches DONE state in Dataflow, the checkpoint has already been updated. No post-pipeline driver-JVM step is needed.
 
 ## SourceTransformChainAssembler
 
