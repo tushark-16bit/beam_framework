@@ -104,12 +104,14 @@ All sources produce `PCollection<Row>` with a declared schema set via `setRowSch
 - **GCS** and **Pub/Sub** produce a single-field schema: `raw_json STRING`.
   Downstream transforms must parse this field (e.g., a `flatten-json` transform).
 - **BigQuery** (typed path): when a pre-fetched `Schema` is supplied by the beam-runner
-  caller (`DataSourcePipelineFactory.fetchBqSchema()`), each `TableRow` is converted with
-  `BigQueryUtils.toBeamRow(schema, tableRow)` and the output `PCollection<Row>` carries
-  the real column names and types (INT64, DOUBLE, BOOLEAN, DATETIME, etc.).
-  Fallback: query-only sources or failed schema fetches emit a per-row all-STRING schema
-  built from the `TableRow` key set. Schema is fetched via `BigQuerySchemaUtils.fetchBeamSchema()`
-  in beam-runner (the only module that can call beam-utils).
+  caller (`DataSourcePipelineFactory.fetchBqSchema()` / `PipelineFactory.fetchBqSchema()`),
+  each `TableRow` field is converted using a custom type-safe mapping:
+  INTEGER → `Long`, FLOAT → `Double`, BOOLEAN → `Boolean`, BYTES → `byte[]`,
+  and TIMESTAMP/DATE/DATETIME/TIME + STRING → `String` (ISO strings as-is from
+  `BigQueryIO.readTableRows()` JSON encoding). Does **not** use `BigQueryUtils.toBeamRow()`
+  — that method assumes Avro encoding and throws `NumberFormatException` on ISO temporal
+  strings like `"2024-01-07T00:00:00"`.
+  Fallback: query-only sources or failed schema fetches emit a per-row all-STRING schema.
 
 ---
 

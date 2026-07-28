@@ -171,7 +171,7 @@ model/PipelineRunConfig.java          Per-datasource runtime config from paramet
 
 ```
 source/SourceRouter.java              Stateless factory: route() (REPORT_PROCESSING) + routeFromConfig() (DATA_SOURCE_DOWNLOAD). Both have overloads with nullable Schema that pass a pre-fetched schema to BigQuerySourceTransform; schema fetched by caller in beam-runner.
-source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → BigQueryUtils.toBeamRow, native INT64/DOUBLE/BOOLEAN/DATETIME types) and generic fallback (null schema → per-row all-STRING schema from TableRow keys).
+source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → custom TableRow conversion: INT64/DOUBLE/BOOLEAN as native types, temporal and STRING as String) and generic fallback (null schema → per-row all-STRING schema from TableRow keys). Does NOT use BigQueryUtils.toBeamRow() — that assumes Avro encoding and throws NumberFormatException on ISO temporal strings.
 source/GcsSourceTransform.java        GCS glob → newline-delimited JSON rows.
 source/PubSubSourceTransform.java     Pub/Sub subscription → streaming rows.
 source/ApiSourceAdapter.java          Pure HTTP adapter: auth, PAGE_NUMBER/CURSOR/OFFSET pagination.
@@ -214,7 +214,7 @@ util/JsonUtils.java                   Row → JSON with correct type handling.
 ### beam-utils — stateless helpers, no pipeline graph code
 
 ```
-BigQuerySchemaUtils.java    fetchBeamSchema(), tableExists(), fetchRowCount(). Call in driver JVM only.
+BigQuerySchemaUtils.java    fetchBeamSchema(), tableExists(), fetchRowCount(). Call in driver JVM only. Type mapping: INTEGER/INT64→INT64, FLOAT/FLOAT64→DOUBLE, BOOLEAN/BOOL→BOOLEAN, BYTES→BYTES, TIMESTAMP/DATE/DATETIME/TIME→STRING (ISO strings preserved as-is from TableRow JSON encoding).
 GcsUtils.java               pathHasFiles(), listFiles(), writeTextFile(), readTextFile(), readBytes(), deletePrefix().
 SecretManagerUtils.java     fetchSecret(secretId). Never log result. Never store in options value.
 RowValidationUtils.java     requireFields(), matchesPattern(), inRange(), oneOf(). Thread-safe.

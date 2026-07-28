@@ -1,8 +1,8 @@
 package com.yourco.beam.io.source;
 
 import com.google.api.services.bigquery.model.TableRow;
+import com.google.common.io.BaseEncoding;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -20,9 +20,11 @@ import org.apache.beam.sdk.values.TypeDescriptor;
  * <ul>
  *   <li><b>Typed</b> (preferred): pass a pre-fetched {@link Schema} from
  *       {@code BigQuerySchemaUtils.fetchBeamSchema()} (called in the driver JVM by the
- *       caller in beam-runner). Each {@link TableRow} is converted with
- *       {@link BigQueryUtils#toBeamRow(Schema, TableRow)}, preserving native types
- *       (INT64, DOUBLE, BOOLEAN, DATETIME, etc.).</li>
+ *       caller in beam-runner). Each {@link TableRow} is converted field-by-field using
+ *       native types: INT64, DOUBLE, BOOLEAN as their Java equivalents; TIMESTAMP/DATE/
+ *       DATETIME/TIME and STRING kept as {@code String} (ISO format from JSON encoding).
+ *       Does NOT use {@code BigQueryUtils.toBeamRow()} — that API assumes Avro encoding
+ *       and throws {@link NumberFormatException} on ISO temporal strings.</li>
  *   <li><b>Generic fallback</b>: pass {@code null} for schema (or use the two-arg
  *       constructor). Each field is coerced to a nullable STRING; the column name is
  *       the key from the {@link TableRow} map. Used for query-only sources where
@@ -116,9 +118,21 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     // ── Named SerializableFunction implementations — safe for Beam serialization ──
 
     /**
-     * Typed conversion: uses {@link BigQueryUtils#toBeamRow(Schema, TableRow)} to map each
-     * BQ field to its native Beam type (INT64, DOUBLE, BOOLEAN, DATETIME, etc.).
-     * Schema was pre-fetched at driver-JVM time and is stable for all rows in this PCollection.
+     * Typed conversion from a JSON-encoded {@link TableRow} (produced by
+     * {@link BigQueryIO#readTableRows()}) to a Beam {@link Row}.
+     *
+     * <p>{@link BigQueryIO#readTableRows()} uses JSON encoding, not Avro, so field values
+     * arrive as Java types from the JSON deserializer:
+     * <ul>
+     *   <li>INTEGER / FLOAT → {@code String} (e.g. {@code "123"}, {@code "3.14"})</li>
+     *   <li>BOOLEAN → {@code Boolean} or {@code String} {@code "true"/"false"}</li>
+     *   <li>TIMESTAMP / DATE / DATETIME / TIME → {@code String} (ISO format)</li>
+     *   <li>BYTES → {@code String} (base64)</li>
+     *   <li>STRING → {@code String}</li>
+     * </ul>
+     * We do NOT use {@link org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils#toBeamRow}
+     * here because that method assumes Avro encoding and tries to parse temporal fields as
+     * epoch-float numbers, causing {@link NumberFormatException} on ISO strings.
      */
     private static final class TypedTableRowToRowFn
             implements SerializableFunction<TableRow, Row> {
@@ -133,7 +147,24 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
 
         @Override
         public Row apply(TableRow tableRow) {
-            return BigQueryUtils.toBeamRow(schema, tableRow);
+            Row.Builder builder = Row.withSchema(schema);
+            for (Schema.Field field : schema.getFields()) {
+                Object raw = tableRow.get(field.getName());
+                builder.addValue(convertValue(field.getType(), raw));
+            }
+            return builder.build();
+        }
+
+        private static Object convertValue(Schema.FieldType fieldType, Object raw) {
+            if (raw == null) return null;
+            String s = raw.toString();
+            switch (fieldType.getTypeName()) {
+                case INT64:   return Long.parseLong(s);
+                case DOUBLE:  return Double.parseDouble(s);
+                case BOOLEAN: return raw instanceof Boolean ? (Boolean) raw : Boolean.parseBoolean(s);
+                case BYTES:   return BaseEncoding.base64().decode(s);
+                default:      return s; // STRING and all temporal types (already ISO strings)
+            }
         }
     }
 

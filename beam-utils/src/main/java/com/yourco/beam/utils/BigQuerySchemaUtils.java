@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Map.Entry;
 
 /**
  * Utilities for fetching and converting BigQuery table schemas at pipeline-assembly time.
@@ -20,40 +21,46 @@ import java.util.Map;
  * before the pipeline is submitted to Dataflow. Do NOT call them inside a {@code DoFn}
  * because each worker would make a separate BQ API call, causing unnecessary load and latency.
  *
- * <h2>Why the default BQ source doesn't use this yet</h2>
- * {@link com.yourco.beam.io.source.BigQuerySourceTransform} currently emits a generic
- * string schema because it doesn't know the table structure at pipeline-build time.
- * Use {@link #fetchBeamSchema(String)} to get the real schema and pass it to the source
- * so downstream transforms see actual column names like {@code order_id}, {@code email}.
+ * <h2>Type mapping</h2>
+ * Numeric and boolean BQ types map to their native Beam equivalents (INT64, DOUBLE, BOOLEAN).
+ * Temporal types (TIMESTAMP, DATE, DATETIME, TIME) map to STRING — {@code BigQueryIO.readTableRows()}
+ * returns them as ISO strings in the {@code TableRow} JSON encoding, not as epoch numbers,
+ * and preserving them as strings avoids conversion errors in Beam's type adapters.
  *
- * <h2>Example usage in a custom source</h2>
- * <pre>{@code
- * Schema schema = BigQuerySchemaUtils.fetchBeamSchema("my-project:my-dataset.orders");
- * PCollection<Row> rows = pipeline.apply(
- *     BigQueryIO.<Row>read(record ->
- *         BigQueryUtils.toBeamRow(schema, record.getRecord()))
- *     .from("my-project:my-dataset.orders")
- *     .withCoder(SchemaCoder.of(schema, TypeDescriptor.of(Row.class),
- *         r -> null, r -> r)));
- * rows.setRowSchema(schema);
- * }</pre>
+ * <h2>Integration</h2>
+ * Fetch the schema at driver-JVM time in beam-runner (e.g. {@code DataSourcePipelineFactory}
+ * or {@code PipelineFactory}) and pass it to {@code BigQuerySourceTransform} via
+ * {@code SourceRouter.routeFromConfig(schema)} or {@code SourceRouter.route(runConfig, schema)}.
+ * The transform does its own type-safe conversion from the JSON-encoded {@code TableRow}.
  */
 public final class BigQuerySchemaUtils {
 
     private static final Logger LOG = LoggerFactory.getLogger(BigQuerySchemaUtils.class);
 
-    // BQ field type → Beam Schema field type mapping
-    private static final Map<String, Schema.FieldType> TYPE_MAP = Map.of(
-            "STRING",    Schema.FieldType.STRING,
-            "INTEGER",   Schema.FieldType.INT64,
-            "INT64",     Schema.FieldType.INT64,
-            "FLOAT",     Schema.FieldType.DOUBLE,
-            "FLOAT64",   Schema.FieldType.DOUBLE,
-            "BOOLEAN",   Schema.FieldType.BOOLEAN,
-            "BOOL",      Schema.FieldType.BOOLEAN,
-            "BYTES",     Schema.FieldType.BYTES,
-            "TIMESTAMP", Schema.FieldType.DATETIME,
-            "DATE",      Schema.FieldType.DATETIME
+    // BQ field type → Beam Schema field type mapping.
+    //
+    // Temporal types (TIMESTAMP, DATE, DATETIME, TIME) are mapped to STRING because
+    // BigQueryIO.readTableRows() returns their values as ISO strings in TableRow JSON encoding:
+    //   TIMESTAMP → "1.704585600E9"  (epoch seconds as float string)
+    //   DATE      → "2024-01-07"
+    //   DATETIME  → "2024-01-07T00:00:00"
+    //   TIME      → "12:30:00"
+    // BigQueryUtils.toBeamRow() assumes DATETIME means epoch-float, which causes
+    // NumberFormatException on these ISO strings. Keeping them as STRING is safe and
+    // preserves the full value for downstream BQ transforms.
+    private static final Map<String, Schema.FieldType> TYPE_MAP = Map.ofEntries(
+            Map.entry("STRING",    Schema.FieldType.STRING),
+            Map.entry("INTEGER",   Schema.FieldType.INT64),
+            Map.entry("INT64",     Schema.FieldType.INT64),
+            Map.entry("FLOAT",     Schema.FieldType.DOUBLE),
+            Map.entry("FLOAT64",   Schema.FieldType.DOUBLE),
+            Map.entry("BOOLEAN",   Schema.FieldType.BOOLEAN),
+            Map.entry("BOOL",      Schema.FieldType.BOOLEAN),
+            Map.entry("BYTES",     Schema.FieldType.BYTES),
+            Map.entry("TIMESTAMP", Schema.FieldType.STRING),
+            Map.entry("DATE",      Schema.FieldType.STRING),
+            Map.entry("DATETIME",  Schema.FieldType.STRING),
+            Map.entry("TIME",      Schema.FieldType.STRING)
     );
 
     private BigQuerySchemaUtils() {}
