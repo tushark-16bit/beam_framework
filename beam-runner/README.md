@@ -45,9 +45,10 @@ DataSourcePipelineFactory.assemble(options)
             e. DataSourceRecordSinkTransform(daId)    rows → streaming inserts → DaRec
                    → returns PCollection<Long> (count after all inserts commit)
             f. PostDownloadFinalizeTransform(daId)    [runs in Beam worker, not driver JVM]
-                   ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)
-                   ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule
-                   ├─ Compare against ValidationConfig bounds
+                   ├─ BigQueryDataSourceRecordAdapter.countRecords(daId) → storedRowCount
+                   ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on)
+                   ├─ min/max row count bounds check (optional, from config)
+                   ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional)
                    ├─ updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
                    └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```

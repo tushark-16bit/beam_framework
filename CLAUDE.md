@@ -248,7 +248,7 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 Main.java                       Parses CLI → routes by processType + reportName.
 PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink. fetchBqSchema() fetches typed Schema at driver-JVM time and passes it to SourceRouter.route().
 DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creates LOADING checkpoint per source in driver JVM, wires RecordSink → PostDownloadFinalizeTransform in graph. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time.
-PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: BnC validation, checkpoint update (COMPLETED/FAILED_BNC/FAILED), failure email. Runs inside Beam worker — no external post-pipeline step needed.
+PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional BnC sum rules, checkpoint update (COMPLETED/FAILED_BNC/FAILED), failure email. Runs inside Beam worker.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
                                 After transform chain, writes final result to per-report BQ table
@@ -418,9 +418,10 @@ Main.runDataSourceDownload(options)
 ├─ pipeline.run()                                submit to Dataflow (or DirectRunner)
 └─ result.waitUntilFinish()
    (When the job reaches DONE, PostDownloadFinalizeTransform has already run in a worker:)
-       ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)  → SUM(JSON_ARRAY_LENGTH) across pages
-       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule  → UNNEST JSON arrays
-       ├─ ValidationConfig checks (row count bounds, BnC SUM via UNNEST + JSON_VALUE)
+       ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)  → storedRowCount (SUM JSON_ARRAY_LENGTH)
+       ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on, no config needed)
+       ├─ min/max row count bounds check (optional; from min_row_count / max_row_count config)
+       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional; skipped if bnc_rules_json absent)
        ├─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
        └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```

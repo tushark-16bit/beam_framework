@@ -110,19 +110,30 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             // Query DaRec for the actual committed count — streaming inserts are immediately
             // queryable, so by the time this DoFn runs all rows are visible.
             long rowCount = recordAdapter.countRecords(daId);
-            if (rowCount == -1L) {
+            boolean bqCountSucceeded = (rowCount != -1L);
+            if (!bqCountSucceeded) {
                 // BQ query itself failed (infra error); fall back to pipeline count so we still
                 // set a terminal checkpoint status rather than leaving it stuck at LOADING.
                 LOG.warn("DaRec count query failed for da_id={} — falling back to pipeline count={}",
                          daId, pipelineRowCount);
                 rowCount = pipelineRowCount;
             }
-            LOG.info("DaRec row count for '{}' (da_id={}): {}", sourceConfig.datasourceName, daId, rowCount);
+            LOG.info("DaRec row count for '{}' (da_id={}): {} (pipeline processed: {})",
+                     sourceConfig.datasourceName, daId, rowCount, pipelineRowCount);
 
             List<String> failures   = new ArrayList<>();
             boolean      infraError = false;
 
-            // Row count bounds
+            // Row copy integrity check — always on, no config required.
+            // Compares rows committed to DaRec against rows the pipeline processed.
+            // Skipped only when the BQ count query itself failed (already fell back above).
+            if (bqCountSucceeded && rowCount != pipelineRowCount) {
+                failures.add("row_count_mismatch: stored " + rowCount
+                    + " rows in DaRec but pipeline processed " + pipelineRowCount
+                    + " — possible data loss during insert");
+            }
+
+            // Row count bounds (optional, from min_row_count / max_row_count config)
             if (validation.hasMinRowCheck() && rowCount < validation.minRowCount) {
                 failures.add("row_count " + rowCount + " < min " + validation.minRowCount);
             }
@@ -130,10 +141,16 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                 failures.add("row_count " + rowCount + " > max " + validation.maxRowCount);
             }
 
-            // BnC sum checks
+            // BnC sum checks — optional; only run when bnc_rules_json is configured.
+            // Absent or empty bnc_rules_json is normal — sum checks are simply skipped.
             Map<String, Object> bncSummary = new LinkedHashMap<>();
-            bncSummary.put("srcCount", rowCount);
-            bncSummary.put("dstCount", rowCount);
+            bncSummary.put("pipelineRowCount", pipelineRowCount);
+            bncSummary.put("storedRowCount",   rowCount);
+
+            if (!validation.hasBncCheck()) {
+                LOG.info("No BnC rules configured for '{}' — sum checks skipped",
+                         sourceConfig.datasourceName);
+            }
 
             for (BncRule rule : validation.bncRules) {
                 double actual = recordAdapter.sumField(daId, rule.field);
