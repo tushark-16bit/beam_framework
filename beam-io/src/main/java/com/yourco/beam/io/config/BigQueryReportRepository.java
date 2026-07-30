@@ -66,7 +66,9 @@ import java.util.stream.Collectors;
  *   ],
  *   "email": {"to_list": ["analyst@example.com"], "cc_list": [],
  *             "subject_template": "Report {periodId}",
- *             "body_template": "Please find the attached report."}
+ *             "body_template": "Please find the attached report."},
+ *   "output_bq_table":       "project.dataset.daily_trades_report",
+ *   "output_bq_input_alias": "summary"
  * }
  * </pre>
  *
@@ -156,12 +158,16 @@ public final class BigQueryReportRepository {
             List<ReportTransformStep>     transforms    = parseTransforms(root.path("transforms"));
             List<ReportOutputConfig>      outputs       = parseOutputs(root.path("outputs"));
             ReportEmailConfig             email         = parseEmail(root.path("email"));
+            String outputBqTable      = nullIfMissing(root, "output_bq_table");
+            String outputBqInputAlias = nullIfMissing(root, "output_bq_input_alias");
 
-            LOG.info("Report config parsed: {} datasource(s), {} preprocessing, {} transform(s), {} output(s)",
-                     datasources.size(), preprocessing.size(), transforms.size(), outputs.size());
+            LOG.info("Report config parsed: {} datasource(s), {} preprocessing, {} transform(s), {} output(s){}",
+                     datasources.size(), preprocessing.size(), transforms.size(), outputs.size(),
+                     outputBqTable != null ? " outputBqTable=" + outputBqTable : "");
 
             return new ReportConfig(reportName, reportSubprocess, periodId, overrideKey,
-                                    datasources, preprocessing, transforms, outputs, email);
+                                    datasources, preprocessing, transforms, outputs, email,
+                                    outputBqTable, outputBqInputAlias);
         } catch (IllegalArgumentException | IllegalStateException e) {
             throw e;
         } catch (Exception e) {

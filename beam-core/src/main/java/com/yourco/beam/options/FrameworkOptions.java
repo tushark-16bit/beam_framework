@@ -263,14 +263,6 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getRptOutputTable();
     void setRptOutputTable(String value);
 
-    @Description("BigQuery table name for the COM_CmnRptDtl common report detail table. "
-                 + "Schema: srce_sys_nm STRING, fl_nm STRING, srce_fl_create_ts DATETIME, "
-                 + "fl_da_json_tx STRING, rec_ct INT64, creat_ts DATETIME, create_user_id STRING, "
-                 + "lst_updt_ts DATETIME, lst_updt_user_id STRING.")
-    @Default.String("COM_CmnRptDtl")
-    String getCmnRptDtlTable();
-    void setCmnRptDtlTable(String value);
-
     // =========================================================================
     // RUN DATE + CALENDAR CONFIGURATION
     // Used by report pipelines to determine which business date to process.

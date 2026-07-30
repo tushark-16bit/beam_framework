@@ -61,7 +61,8 @@ io/config/
     BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING.
                                      Key: (parameter_group_name=parentId, parameter_data_source=reportSubprocess,
                                      parameter_name=reportName). Parses parameters_val_json into ReportConfig.
-                                     Includes datasources, preprocessing, transforms, outputs, and email arrays.
+                                     Includes datasources, preprocessing, transforms, outputs, email arrays,
+                                     and top-level output_bq_table / output_bq_input_alias for per-report BQ write.
 
 io/email/
     ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>)

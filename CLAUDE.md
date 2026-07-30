@@ -204,7 +204,8 @@ params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@ke
                                          fetchRequiredParameters() = look up index → fetch values → validate all present.
 
 config/BigQueryReportRepository.java       Queries parameter_store for report config nested JSON.
-                                           fetchReportConfig() parses datasources/preprocessing/transforms/outputs/email.
+                                           fetchReportConfig() parses datasources/preprocessing/transforms/outputs/email,
+                                           plus top-level output_bq_table and output_bq_input_alias.
 config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOURCE_DOWNLOAD source configs.
                                            fetchSourceConfigs(). Row → SourceConfig mapping.
 
@@ -250,6 +251,9 @@ DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creat
 PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: BnC validation, checkpoint update (COMPLETED/FAILED_BNC/FAILED), failure email. Runs inside Beam worker — no external post-pipeline step needed.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
+                                After transform chain, writes final result to per-report BQ table
+                                (output_bq_table from config) if set; resolves source alias from
+                                output_bq_input_alias → last transform alias → first datasource alias.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
 SmtpReportEmailAdapter.java     SMTP impl of ReportEmailAdapter. MimeMultipart for attachments.
 
@@ -461,6 +465,10 @@ Main.runReportProcessing(options)
     │       ├─ BigQueryJobService.runQueryToTable(resolvedSQL, step.outputBqTable)
     │       └─ aliasRegistry.put(step.outputAlias, step.outputBqTable)
     │
+    ├─ Phase 4b: Write per-report BQ table (if output_bq_table is set)
+    │   ├─ Resolve source alias: output_bq_input_alias → last transform outputAlias → first datasource alias
+    │   └─ BigQueryJobService.runQueryToTable("SELECT * FROM <alias>", config.outputBqTable)
+    │
     ├─ Phase 5: File export
     │   └─ for each ReportOutputConfig:
     │       ├─ BigQueryJobService.exportToCsv() or exportToJson()
@@ -523,7 +531,9 @@ configuration — both DATA_SOURCE_DOWNLOAD source configs and REPORT_PROCESSING
                     "output_format": "CSV", "gcs_path": "gs://bucket/reports/",
                     "file_prefix": "", "file_suffix": ".csv", "include_header": true}],
   "email":        {"to_list": ["analyst@example.com"], "cc_list": [],
-                   "subject_template": "Report {periodId}", "body_template": "Attached."}
+                   "subject_template": "Report {periodId}", "body_template": "Attached."},
+  "output_bq_table":       "project.dataset.daily_trades_report",
+  "output_bq_input_alias": "summary"
 }
 ```
 

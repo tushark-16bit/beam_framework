@@ -47,6 +47,7 @@ import java.util.Map;
  *   <li>Verify each required datasource has {@code sta_cd=COMPLETED} in DaRefer for this period</li>
  *   <li>Build alias registry: datasource alias → RptStageDa subquery (after staging DaRec rows)</li>
  *   <li>Run transformation chain (BQ jobs, each materialised to a BQ table)</li>
+ *   <li>Write final result to per-report BQ table ({@code output_bq_table} from config, if set)</li>
  *   <li>Route each output via {@link ReportOutputSinkRouter} (GCS / BQ / API)</li>
  *   <li>Write one RptOutput row per output step</li>
  *   <li>Clear staged data from RptStageDa</li>
@@ -116,6 +117,11 @@ public final class ReportPipelineFactory {
             // ── 6. Transformation chain ───────────────────────────────────────
             if (config.hasTransforms()) {
                 runTransformChain(config, options, aliasRegistry);
+            }
+
+            // ── 6b. Write final result to per-report BQ table ─────────────────
+            if (config.hasOutputBqTable()) {
+                writeOutputBqTable(config, aliasRegistry);
             }
 
             // ── 7. Route outputs to sinks (GCS / BQ / API) ───────────────────
@@ -287,6 +293,44 @@ public final class ReportPipelineFactory {
             LOG.info("Output {} done → {}", output.outputOrder, outputResult.destination());
         }
         return result;
+    }
+
+    /**
+     * Writes the final report result to the per-report BQ table declared in
+     * {@link ReportConfig#outputBqTable}.
+     *
+     * <p>Source alias resolution order:
+     * <ol>
+     *   <li>{@link ReportConfig#outputBqInputAlias} if set and non-blank</li>
+     *   <li>Last transform step's {@code outputAlias} if transforms exist</li>
+     *   <li>First datasource's {@code transformAlias} if no transforms exist</li>
+     * </ol>
+     */
+    private void writeOutputBqTable(ReportConfig config, Map<String, String> aliasRegistry) {
+        String sourceAlias = config.outputBqInputAlias;
+        if (sourceAlias == null || sourceAlias.isBlank()) {
+            if (!config.transformSteps.isEmpty()) {
+                sourceAlias = config.transformSteps.get(config.transformSteps.size() - 1).outputAlias;
+            } else if (!config.datasources.isEmpty()) {
+                sourceAlias = config.datasources.get(0).transformAlias;
+            }
+        }
+        if (sourceAlias == null) {
+            throw new IllegalStateException(
+                "Cannot determine source alias for outputBqTable=" + config.outputBqTable
+                + " — set output_bq_input_alias in parameters_val_json");
+        }
+        String sourceRef = aliasRegistry.get(sourceAlias);
+        if (sourceRef == null) {
+            throw new IllegalArgumentException(
+                "output_bq_input_alias '" + sourceAlias + "' not found in alias registry. "
+                + "Available: " + aliasRegistry.keySet());
+        }
+        String fromClause = sourceRef.startsWith("(") ? sourceRef : "`" + sourceRef + "`";
+        String sql = "SELECT * FROM " + fromClause;
+        LOG.info("Writing final report: alias='{}' → {}", sourceAlias, config.outputBqTable);
+        bqJobService.runQueryToTable(sql, config.outputBqTable);
+        LOG.info("Final report written to {}", config.outputBqTable);
     }
 
     private void sendEmail(ReportConfig config, FrameworkOptions options,
