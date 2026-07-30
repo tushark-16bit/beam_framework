@@ -184,7 +184,7 @@ sink/BigQuerySinkTransform.java       Writes PCollection<Row> to BQ. Returns Wri
 sink/GcsSinkTransform.java            Writes PCollection<Row> as newline-delimited JSON.
 sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
 sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
-sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs via streaming inserts. Returns PCollection<Long> (count after all inserts commit) for Wait.on() chaining to PostDownloadFinalizeTransform.
+sink/DataSourceRecordSinkTransform.java  Collects all source rows globally, paginates at 250 rows/page, writes one DaRec row per page with row_da_json_tx = JSON array. Streaming inserts. Returns PCollection<Long> = total source rows (held until all inserts commit) for PostDownloadFinalizeTransform Wait.on(). DaRec gains page_no INT64.
 
 checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
 checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME. Has String-tableRef constructor for in-worker use.
@@ -192,7 +192,7 @@ checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_P
 checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
 
 records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field).
-records/BigQueryDataSourceRecordAdapter.java  BQ query using JSON_VALUE(row_da_json_tx, '$.field') for BnC sums.
+records/BigQueryDataSourceRecordAdapter.java  countRecords: SUM(JSON_ARRAY_LENGTH(row_da_json_tx)) across pages. sumField: CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)).
 
 email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
 email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
@@ -406,16 +406,17 @@ Main.runDataSourceDownload(options)
 │       │   └─ null for query-only or failed fetch (generic all-STRING fallback)
 │       ├─ SourceRouter.routeFromConfig(schema)               API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
-│       ├─ DataSourceRecordSinkTransform(da_id)               rows → streaming inserts → DaRec
-│       │   └─ returns PCollection<Long> (count after all inserts committed)
+│       ├─ DataSourceRecordSinkTransform(da_id)               rows → paginated JSON arrays → DaRec
+│       │   ├─ GroupByKey collects all rows, paginate at 250 rows/page, 1 DaRec row per page
+│       │   └─ returns PCollection<Long> = total source rows (after all streaming inserts commit)
 │       └─ PostDownloadFinalizeTransform(da_id)               [wired here; runs in Beam worker]
 │
 ├─ pipeline.run()                                submit to Dataflow (or DirectRunner)
 └─ result.waitUntilFinish()
    (When the job reaches DONE, PostDownloadFinalizeTransform has already run in a worker:)
-       ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)
-       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule
-       ├─ ValidationConfig checks (row count bounds, BnC SUM via JSON_VALUE)
+       ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)  → SUM(JSON_ARRAY_LENGTH) across pages
+       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule  → UNNEST JSON arrays
+       ├─ ValidationConfig checks (row count bounds, BnC SUM via UNNEST + JSON_VALUE)
        ├─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
        └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```
@@ -720,6 +721,9 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --paramBqDataset=dw \
   --checkpointBqProject=my-gcp-project \
   --checkpointBqDataset=pipeline_metadata
+
+# Force re-run when DaRefer already shows COMPLETED (explicit operator override)
+# --manualOverrun=true
 
 # Run REPORT_PROCESSING (BQ-configured) — no JDBC required
 # NOTE: --emailSmtpHost and --smtpPasswordSecretId are no longer CLI flags.

@@ -12,8 +12,10 @@ import org.slf4j.LoggerFactory;
 /**
  * BigQuery implementation of {@link DataSourceRecordAdapter}.
  *
- * <p>Queries the {@code DaRec} table using {@code JSON_VALUE} to extract numeric
- * fields from {@code row_da_json_tx} blobs. All queries filter by {@code da_id}.
+ * <p>Each DaRec row now contains a page of up to 250 source rows serialised as a JSON array
+ * in {@code row_da_json_tx}. Queries must un-nest the array with
+ * {@code UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx))} to reach individual source records.
+ * All queries filter by {@code da_id}.
  */
 public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAdapter {
 
@@ -51,7 +53,10 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
 
     @Override
     public long countRecords(long daId) {
-        String sql = "SELECT COUNT(*) AS cnt FROM " + table + " WHERE da_id = @daId";
+        // row_da_json_tx is a JSON array of source rows per DaRec page.
+        // JSON_ARRAY_LENGTH sums element counts across all pages to return total source rows.
+        String sql = "SELECT IFNULL(SUM(JSON_ARRAY_LENGTH(row_da_json_tx)), 0) AS cnt"
+            + " FROM " + table + " WHERE da_id = @daId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("daId", QueryParameterValue.int64(daId))
             .setUseLegacySql(false)
@@ -71,8 +76,11 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
 
     @Override
     public double sumField(long daId, String field) {
-        String sql = "SELECT SUM(CAST(JSON_VALUE(row_da_json_tx, @jsonPath) AS FLOAT64)) AS total"
-            + " FROM " + table + " WHERE da_id = @daId";
+        // Unnest the JSON array in each page row, then extract and sum the target field.
+        String sql = "SELECT SUM(CAST(JSON_VALUE(row_json, @jsonPath) AS FLOAT64)) AS total"
+            + " FROM " + table
+            + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
+            + " WHERE da_id = @daId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("jsonPath", QueryParameterValue.string("$." + field))
             .addNamedParameter("daId",     QueryParameterValue.int64(daId))

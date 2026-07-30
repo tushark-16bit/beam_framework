@@ -96,16 +96,23 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
 
     @Description("When true, re-downloads data even if a COMPLETED DaRefer row exists for "
                  + "this (datasourceName, periodId). Use for forced reprocessing. "
-                 + "Default is false: sources with sta_cd=COMPLETED for the current period are skipped.")
+                 + "Default is false: sources with sta_cd=COMPLETED for the current period are skipped. "
+                 + "Prefer --manualOverrun for explicit operator-initiated re-runs.")
     @Default.Boolean(false)
     boolean getOverrideDownload();
     void setOverrideDownload(boolean value);
 
+    @Description("Explicit operator override key. When true, re-runs a DATA_SOURCE_DOWNLOAD even if "
+                 + "DaRefer already has a COMPLETED row for this (datasourceName, parentId, periodId) combo. "
+                 + "Guards against accidental re-runs: the default (false) hard-blocks execution when "
+                 + "a completed run is found. Must be set deliberately in the Airflow DAG or CLI invocation. "
+                 + "Takes effect alongside --overrideDownload (either flag enables the re-run).")
+    @Default.Boolean(false)
+    boolean getManualOverrun();
+    void setManualOverrun(boolean value);
+
     @Description("DaRefer da_id for the current run. "
-                 + "For Flex Templates and DirectRunner this is set automatically by DataSourcePipelineFactory. "
-                 + "For Classic Templates it MUST be passed as a Dataflow runtime parameter "
-                 + "(e.g. --daId=47) by the Airflow pre-setup task that created the LOADING row. "
-                 + "Also required for --processType=POST_DOWNLOAD_VALIDATION.")
+                 + "Set automatically by DataSourcePipelineFactory for Flex Templates and DirectRunner.")
     org.apache.beam.sdk.options.ValueProvider<Long> getDaId();
     void setDaId(org.apache.beam.sdk.options.ValueProvider<Long> value);
 

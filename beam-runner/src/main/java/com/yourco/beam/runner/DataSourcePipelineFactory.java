@@ -230,14 +230,20 @@ public final class DataSourcePipelineFactory {
     private static List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs,
                                                           BigQueryDataSourceCheckpointAdapter adapter,
                                                           FrameworkOptions options) {
-        if (options.getOverrideDownload()) {
-            LOG.info("--overrideDownload=true: skipping checkpoint check, re-downloading all sources");
+        boolean forceRerun = options.getManualOverrun() || options.getOverrideDownload();
+        if (forceRerun) {
+            String flag = options.getManualOverrun() ? "--manualOverrun" : "--overrideDownload";
+            LOG.info("{} = true: skipping COMPLETED checkpoint guard, re-downloading all sources", flag);
             return configs;
         }
         return configs.stream()
             .filter(config -> {
                 boolean done = adapter.isCompleted(config.datasourceName, config.periodId);
-                if (done) LOG.info("Skipping '{}' — COMPLETED checkpoint found", config.datasourceName);
+                if (done) {
+                    LOG.info("Skipping '{}' (period={}, parent={}) — COMPLETED row found in DaRefer. "
+                             + "Pass --manualOverrun=true to force a re-run.",
+                             config.datasourceName, config.periodId, config.parentId);
+                }
                 return !done;
             })
             .collect(Collectors.toList());

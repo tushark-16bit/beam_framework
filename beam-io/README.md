@@ -34,13 +34,19 @@ io/checkpoint/
 
 io/records/
     DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field)
-    BigQueryDataSourceRecordAdapter — BQ query using JSON_VALUE(row_da_json_tx, '$.field') for BnC validation.
+    BigQueryDataSourceRecordAdapter — row_da_json_tx is a JSON array per page; countRecords uses
+                                      SUM(JSON_ARRAY_LENGTH(...)); sumField unnests with
+                                      CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(...)) AS row_json then
+                                      SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)).
                                       Has a String-tableRef constructor for in-worker use (DoFn @Setup).
 
 io/sink/
-    DataSourceRecordSinkTransform   — Beam PTransform writing all rows as JSON blobs to DaRec via streaming inserts.
-                                      Returns PCollection<Long> (row count after all inserts commit) so that
-                                      PostDownloadFinalizeTransform can Wait.on() it for correct ordering.
+    DataSourceRecordSinkTransform   — Collects ALL source rows, paginates at 250 rows/page, writes one
+                                      DaRec row per page with row_da_json_tx = JSON array of that page.
+                                      Uses streaming inserts (rows immediately queryable).
+                                      Returns PCollection<Long> = total source rows (not page count),
+                                      held until all inserts complete, for PostDownloadFinalizeTransform
+                                      to Wait.on(). DaRec schema gains a page_no INT64 column.
 
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer

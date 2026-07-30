@@ -67,7 +67,8 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 --datasourceName=trades
 --periodId=2024-01-15
 --subprocessName=eod
---overrideDownload=false
+--overrideDownload=false    # legacy re-run bypass; prefer --manualOverrun
+--manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer
 ```
 
 ### Parameter BigQuery store
