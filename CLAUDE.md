@@ -451,7 +451,7 @@ Main.runReportProcessing(options)
     │   └─ for each ReportDatasourceRef:
     │       ├─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId(srceNm, perId) → da_id
     │       ├─ BigQueryReportCheckpointAdapter.addDaMapping(rptId, daId)   → map_id (RptDaMap row)
-    │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → copies DaRec rows to RptStageDa
+    │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → un-nests DaRec JSON array pages into individual source-row JSON objects in RptStageDa
     │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT stage_da_json_tx FROM RptStageDa WHERE map_id=X)
     │
     ├─ Phase 4: Transformation chain

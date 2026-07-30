@@ -136,18 +136,23 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
 
     @Override
     public void stageFromDaRec(long mapId, long daId) {
-        // stage_id is computed as base + ROW_NUMBER() to avoid per-row MAX lookups
+        // DaRec stores rows as paginated JSON arrays (up to 250 rows per DaRec row).
+        // CROSS JOIN UNNEST un-nests each page into individual source-row JSON objects so that
+        // RptStageDa.stage_da_json_tx holds exactly one source row per staging row —
+        // consistent with what report transform SQL expects (JSON_VALUE(stage_da_json_tx, '$.field')).
+        // stage_id is computed via ROW_NUMBER() to avoid per-row MAX lookups.
         String sql = "INSERT INTO " + rptStageDaTable
             + " (stage_id, map_id, stage_da_json_tx, query_config_tx, load_dt, lst_updt_ts)"
             + " SELECT"
             + "   IFNULL((SELECT MAX(stage_id) FROM " + rptStageDaTable + "), 0)"
             + "     + ROW_NUMBER() OVER (),"
             + "   @mapId,"
-            + "   row_da_json_tx,"
+            + "   row_json,"
             + "   @queryConfigTx,"
             + "   CURRENT_DATE(),"
             + "   CURRENT_DATETIME()"
             + " FROM " + daRecTable
+            + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
             + " WHERE da_id = @daId";
 
         runDml(QueryJobConfiguration.newBuilder(sql)

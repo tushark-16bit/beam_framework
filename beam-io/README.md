@@ -31,6 +31,8 @@ io/checkpoint/
                                           Has a String-tableRef constructor for in-worker use (DoFn @Setup).
     ReportCheckpointAdapter             — interface for 4 report tables: RptRefer (createCheckpoint/updateStatus/isCompleted), RptDaMap (addDaMapping), RptStageDa (stageFromDaRec/stagedDataSubquery/clearStagedData), RptOutput (writeOutput).
     BigQueryReportCheckpointAdapter     — BQ DML impl for all 4 report tables. All timestamps DATETIME. Stage_id generated via MAX+ROW_NUMBER() OVER().
+                                          stageFromDaRec uses CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to un-nest
+                                          DaRec pages into individual source-row JSON objects in stage_da_json_tx.
 
 io/records/
     DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field)
