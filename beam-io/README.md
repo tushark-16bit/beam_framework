@@ -10,7 +10,9 @@ Also contains the `DeadLetterSinkTransform` for writing failed records.
 ```
 io/source/
     SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD); overload with nullable Schema param passes pre-fetched schema to BigQuerySourceTransform
-    BigQuerySourceTransform   — reads from BQ table or SQL query; typed mode uses a pre-fetched Schema (passed from beam-runner) with BigQueryUtils.toBeamRow(); generic fallback when schema is null
+    BigQuerySourceTransform   — reads from BQ table or SQL query; typed mode uses a pre-fetched Schema (passed from beam-runner) with a custom TableRow→Row mapping; generic fallback when schema is null
+                                resolves real column names via a SELECT * LIMIT 1 preview query (no tables.get needed), all-STRING;
+                                falls back further to Schemas.RAW_JSON blob if even that query fails
     GcsSourceTransform        — reads newline-delimited JSON from GCS glob
     PubSubSourceTransform     — reads from a Pub/Sub subscription (streaming)
     ApiSourceAdapter          — pure HTTP adapter: auth, pagination (PAGE_NUMBER/CURSOR/OFFSET)
@@ -124,7 +126,14 @@ All sources produce `PCollection<Row>` with a declared schema set via `setRowSch
   `BigQueryIO.readTableRows()` JSON encoding). Does **not** use `BigQueryUtils.toBeamRow()`
   — that method assumes Avro encoding and throws `NumberFormatException` on ISO temporal
   strings like `"2024-01-07T00:00:00"`.
-  Fallback: query-only sources or failed schema fetches emit a per-row all-STRING schema.
+  Fallback (schema is `null`): `BigQuerySourceTransform.expand()` runs a lightweight
+  `SELECT * FROM (...) LIMIT 1` preview query in the driver JVM to learn real column
+  *names* — this needs only query-execution rights, not `bigquery.tables.get`, so it still
+  works when the caller's `BigQuerySchemaUtils.fetchBeamSchema()` was denied table-metadata
+  access. Builds one nullable-STRING field per resolved column name and applies that same
+  schema to both `.setRowSchema()` and every emitted `Row` (no `_row_json`/per-row schema
+  mismatch). If even the preview query fails, falls back further to `Schemas.RAW_JSON`
+  (single `raw_json` blob field, whole row as JSON text) — same convention as GCS/Pub/Sub.
 
 ---
 

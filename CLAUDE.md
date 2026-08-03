@@ -171,7 +171,7 @@ model/PipelineRunConfig.java          Per-datasource runtime config from paramet
 
 ```
 source/SourceRouter.java              Stateless factory: route() (REPORT_PROCESSING) + routeFromConfig() (DATA_SOURCE_DOWNLOAD). Both have overloads with nullable Schema that pass a pre-fetched schema to BigQuerySourceTransform; schema fetched by caller in beam-runner.
-source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → custom TableRow conversion: INT64/DOUBLE/BOOLEAN as native types, temporal and STRING as String) and generic fallback (null schema → per-row all-STRING schema from TableRow keys). Does NOT use BigQueryUtils.toBeamRow() — that assumes Avro encoding and throws NumberFormatException on ISO temporal strings.
+source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → custom TableRow conversion: INT64/DOUBLE/BOOLEAN as native types, temporal and STRING as String) and generic fallback (null schema → expand() runs a SELECT * LIMIT 1 preview query in the driver JVM to learn real column names — needs only query-execution rights, not bigquery.tables.get — builds one nullable-STRING field per column, applied consistently to setRowSchema() and every Row; falls back further to Schemas.RAW_JSON blob if even the preview query fails). Does NOT use BigQueryUtils.toBeamRow() — that assumes Avro encoding and throws NumberFormatException on ISO temporal strings.
 source/GcsSourceTransform.java        GCS glob → newline-delimited JSON rows.
 source/PubSubSourceTransform.java     Pub/Sub subscription → streaming rows.
 source/ApiSourceAdapter.java          Pure HTTP adapter: auth, PAGE_NUMBER/CURSOR/OFFSET pagination.
@@ -407,7 +407,8 @@ Main.runDataSourceDownload(options)
 │   └─ for each SourceConfig (graph assembly — no data moves yet):
 │       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc.
 │       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
-│       │   └─ null for query-only or failed fetch (generic all-STRING fallback)
+│       │   └─ null for query-only or failed fetch → BigQuerySourceTransform.expand() resolves
+│       │       real column names itself via a SELECT * LIMIT 1 preview query (no tables.get)
 │       ├─ SourceRouter.routeFromConfig(schema)               API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
 │       ├─ DataSourceRecordSinkTransform(da_id)               rows → paginated JSON arrays → DaRec

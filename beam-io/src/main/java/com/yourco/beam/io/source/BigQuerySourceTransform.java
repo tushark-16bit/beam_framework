@@ -1,7 +1,13 @@
 package com.yourco.beam.io.source;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.services.bigquery.model.TableRow;
+import com.google.cloud.bigquery.BigQuery;
+import com.google.cloud.bigquery.BigQueryOptions;
+import com.google.cloud.bigquery.QueryJobConfiguration;
+import com.google.cloud.bigquery.TableResult;
 import com.google.common.io.BaseEncoding;
+import com.yourco.beam.model.Schemas;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.MapElements;
@@ -11,6 +17,8 @@ import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Reads from a BigQuery table or SQL query and produces a {@code PCollection<Row>}.
@@ -26,9 +34,17 @@ import org.apache.beam.sdk.values.TypeDescriptor;
  *       Does NOT use {@code BigQueryUtils.toBeamRow()} — that API assumes Avro encoding
  *       and throws {@link NumberFormatException} on ISO temporal strings.</li>
  *   <li><b>Generic fallback</b>: pass {@code null} for schema (or use the two-arg
- *       constructor). Each field is coerced to a nullable STRING; the column name is
- *       the key from the {@link TableRow} map. Used for query-only sources where
- *       no table exists to inspect, or when schema fetch fails.</li>
+ *       constructor). Used for query-only sources, or when the caller's
+ *       {@code BigQuerySchemaUtils.fetchBeamSchema()} call fails (e.g. no
+ *       {@code bigquery.tables.get} permission on the table). At {@code expand()} time
+ *       (driver JVM, pipeline-assembly), this runs a lightweight
+ *       {@code SELECT * FROM (...) LIMIT 1} preview query to learn the real column
+ *       <em>names</em> — this only needs query-execution rights, not table-metadata
+ *       access — and builds one nullable-STRING field per column, applied consistently
+ *       to both {@code .setRowSchema()} and every emitted {@link Row}. If even the
+ *       preview query fails, falls back further to {@link Schemas#RAW_JSON} — a single
+ *       {@code raw_json} blob field containing the whole row as JSON text, matching the
+ *       convention used by {@code GcsSourceTransform} / {@code PubSubSourceTransform}.</li>
  * </ul>
  *
  * <h2>Configuration</h2>
@@ -40,6 +56,7 @@ import org.apache.beam.sdk.values.TypeDescriptor;
 public final class BigQuerySourceTransform extends PTransform<PBegin, PCollection<Row>> {
 
     private static final long serialVersionUID = 1L;
+    private static final Logger LOG = LoggerFactory.getLogger(BigQuerySourceTransform.class);
 
     private final String bqTable;
     private final String bqQuery;
@@ -47,7 +64,7 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     // Schema is Serializable so it can be baked into a Classic Template graph.
     private final Schema schema;
 
-    /** Generic fallback constructor — schema derived per-element from TableRow keys. */
+    /** Generic fallback constructor — column names resolved via preview query in {@code expand()}. */
     public BigQuerySourceTransform(String bqTable, String bqQuery) {
         this(bqTable, bqQuery, null);
     }
@@ -78,12 +95,16 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
                     .setRowSchema(schema);
         }
 
-        // Generic fallback: all fields as nullable STRING, schema built from first row's keys.
+        // Generic fallback: resolve real column names via a preview query (driver JVM,
+        // here in expand()), then apply that SAME schema to every Row so the PCollection's
+        // declared schema always matches what is actually emitted.
+        Schema genericSchema = resolveGenericSchema();
+        boolean blobFallback = genericSchema.equals(Schemas.RAW_JSON);
         return tableRows
                 .apply("TableRow-to-Row", MapElements
                         .into(TypeDescriptor.of(Row.class))
-                        .via(new GenericTableRowToRowFn()))
-                .setRowSchema(buildGenericSchema());
+                        .via(new GenericTableRowToRowFn(genericSchema, blobFallback)))
+                .setRowSchema(genericSchema);
     }
 
     private BigQueryIO.TypedRead<TableRow> buildRead() {
@@ -96,14 +117,50 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     }
 
     /**
-     * Sentinel schema used by the generic fallback so Beam's schema-aware code paths are
-     * activated. Downstream transforms should use the per-row schema built by
-     * {@link GenericTableRowToRowFn} instead.
+     * Learns real column names for the generic fallback by running a lightweight
+     * {@code SELECT * ... LIMIT 1} preview query in the driver JVM at pipeline-assembly time
+     * ({@code expand()} runs once here, not per-worker).
+     *
+     * <p>Unlike {@code BigQuerySchemaUtils.fetchBeamSchema()}, this never calls
+     * {@code Tables.get()} — it only needs query-execution permission, so it still works when
+     * table-metadata read access ({@code bigquery.tables.get}) is unavailable for a table.
+     * Every column becomes a nullable STRING field, matching the "generic" contract: no type
+     * guessing, just real column names with string-coerced values.
+     *
+     * <p>If the preview query itself fails (no read access at all, or a transient error),
+     * falls back to {@link Schemas#RAW_JSON} — a single blob field with the whole row as
+     * JSON text — so the pipeline can still run.
      */
-    private static Schema buildGenericSchema() {
-        return Schema.builder()
-                .addNullableStringField("_row_json")
-                .build();
+    private Schema resolveGenericSchema() {
+        String previewSql = (bqQuery != null && !bqQuery.isBlank())
+                ? "SELECT * FROM (" + bqQuery + ") LIMIT 1"
+                : "SELECT * FROM `" + bqTable.replace(':', '.') + "` LIMIT 1";
+        try {
+            BigQuery bq = BigQueryOptions.getDefaultInstance().getService();
+            TableResult result = bq.query(QueryJobConfiguration.newBuilder(previewSql)
+                    .setUseLegacySql(false)
+                    .build());
+
+            Schema.Builder builder = Schema.builder();
+            result.getSchema().getFields().forEach(f -> builder.addNullableStringField(f.getName()));
+            Schema resolved = builder.build();
+
+            if (resolved.getFieldCount() == 0) {
+                LOG.warn("Preview query for generic BQ fallback returned zero columns — "
+                         + "falling back to raw_json blob schema. sql={}", previewSql);
+                return Schemas.RAW_JSON;
+            }
+            LOG.info("Resolved {} column name(s) for generic BQ fallback via preview query",
+                     resolved.getFieldCount());
+            return resolved;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("BQ column-name preview query interrupted", e);
+        } catch (Exception e) {
+            LOG.warn("Could not resolve column names for generic BQ fallback ({}) — "
+                     + "falling back to raw_json blob schema.", e.getMessage());
+            return Schemas.RAW_JSON;
+        }
     }
 
     private void validateOptions() {
@@ -169,26 +226,53 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     }
 
     /**
-     * Generic fallback: each field is coerced to a nullable STRING.
-     * The schema is built per-row from the TableRow key set.
-     * Used when no pre-fetched schema is available (query-only sources, or schema fetch failed).
+     * Generic fallback: builds each {@link Row} against the SAME {@link Schema} resolved once
+     * by {@link #resolveGenericSchema()} — never a per-row schema — so every emitted Row matches
+     * the PCollection's declared {@code .setRowSchema()} exactly.
+     *
+     * <p>Two shapes, selected by {@code blobFallback}:
+     * <ul>
+     *   <li>{@code false} (normal case): one nullable STRING field per resolved column name.
+     *       Each value is coerced via {@code toString()}; a column missing from a given
+     *       {@link TableRow} (should not normally happen — BigQuery includes every column,
+     *       {@code null} or not) becomes {@code null} rather than throwing.</li>
+     *   <li>{@code true}: {@code schema} is {@link Schemas#RAW_JSON} — the whole row is
+     *       serialised to a single {@code raw_json} field as a last resort.</li>
+     * </ul>
      */
     private static final class GenericTableRowToRowFn
             implements SerializableFunction<TableRow, Row> {
 
         private static final long serialVersionUID = 1L;
+        private static final ObjectMapper MAPPER = new ObjectMapper();
+
+        private final Schema  schema;
+        private final boolean blobFallback;
+
+        GenericTableRowToRowFn(Schema schema, boolean blobFallback) {
+            this.schema       = schema;
+            this.blobFallback = blobFallback;
+        }
 
         @Override
         public Row apply(TableRow tableRow) {
-            Schema.Builder schemaBuilder = Schema.builder();
-            tableRow.keySet().forEach(key -> schemaBuilder.addNullableStringField(key));
-            Schema rowSchema = schemaBuilder.build();
-            Row.Builder builder = Row.withSchema(rowSchema);
-            tableRow.keySet().forEach(key -> {
-                Object value = tableRow.get(key);
-                builder.addValue(value != null ? value.toString() : null);
-            });
+            if (blobFallback) {
+                return Row.withSchema(schema).addValue(toJson(tableRow)).build();
+            }
+            Row.Builder builder = Row.withSchema(schema);
+            for (Schema.Field field : schema.getFields()) {
+                Object raw = tableRow.get(field.getName());
+                builder.addValue(raw != null ? raw.toString() : null);
+            }
             return builder.build();
+        }
+
+        private static String toJson(TableRow row) {
+            try {
+                return MAPPER.writeValueAsString(row);
+            } catch (Exception e) {
+                return String.valueOf(row);
+            }
         }
     }
 }

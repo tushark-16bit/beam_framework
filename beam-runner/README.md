@@ -36,7 +36,8 @@ DataSourcePipelineFactory.assemble(options)
     └─ 4. For each SourceConfig independently (no merge!):
             a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query
             b. fetchBqSchema()                        BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
-                   null for query-only or failed fetch (generic all-STRING fallback)
+                   null for query-only or failed fetch → BigQuerySourceTransform resolves
+                   column names itself via a preview query (see beam-io/README.md)
             c. SourceRouter.routeFromConfig(schema)   read raw data (typed if schema non-null)
             d. SourceTransformChainAssembler.assemble()
                    ├─ LOOKUP: BQ side input → LookupEnrichTransform
@@ -70,7 +71,8 @@ For global ordering, use an `ORDER BY` clause in the downstream BQ view instead 
 ```
 PipelineFactory.assemble(options)
     ├─ 1. fetchBqSchema()               BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
-    │       null for query-only or failed fetch (generic all-STRING fallback)
+    │       null for query-only or failed fetch → BigQuerySourceTransform resolves
+    │       column names itself via a preview query (see beam-io/README.md)
     ├─ 2. SourceRouter.route(schema)    reads --sourceType; typed if schema non-null
     ├─ 3. TransformRegistry + chain loop
     ├─ 4. SinkRouter.route()
