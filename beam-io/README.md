@@ -124,8 +124,8 @@ All sources produce `PCollection<Row>` with a declared schema set via `setRowSch
   caller (`DataSourcePipelineFactory.fetchBqSchema()` / `PipelineFactory.fetchBqSchema()`),
   each `TableRow` field is converted using a custom type-safe mapping:
   INTEGER → `Long`, FLOAT → `Double`, BOOLEAN → `Boolean`, BYTES → `byte[]`,
-  and TIMESTAMP/DATE/DATETIME/TIME + STRING + BIGNUMERIC → `String` (ISO strings / exact
-  decimal text as-is from `BigQueryIO.readTableRows()` JSON encoding). Does **not** use
+  and TIMESTAMP/DATE/DATETIME/TIME + STRING + NUMERIC/BIGNUMERIC → `String` (ISO strings /
+  exact decimal text as-is from `BigQueryIO.readTableRows()` JSON encoding). Does **not** use
   `BigQueryUtils.toBeamRow()` — that method assumes Avro encoding and throws
   `NumberFormatException` on ISO temporal
   strings like `"2024-01-07T00:00:00"`. A value that doesn't match its declared type throws

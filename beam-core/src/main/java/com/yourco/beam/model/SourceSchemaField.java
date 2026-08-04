@@ -8,10 +8,10 @@ import java.io.Serializable;
  *
  * <p>{@link #bqType} uses real BigQuery SQL type names — {@code STRING}, {@code INT64},
  * {@code FLOAT64}, {@code BOOLEAN}, {@code BYTES}, {@code DATE}, {@code DATETIME},
- * {@code TIME}, {@code TIMESTAMP}, {@code BIGNUMERIC} — the same names documented at
- * cloud.google.com/bigquery/docs/reference/standard-sql/data-types, so the person editing
- * the config recognises them directly rather than an internal Beam {@code Schema.FieldType}
- * name.
+ * {@code TIME}, {@code TIMESTAMP}, {@code NUMERIC}, {@code BIGNUMERIC} — the same names
+ * documented at cloud.google.com/bigquery/docs/reference/standard-sql/data-types, so the
+ * person editing the config recognises them directly rather than an internal Beam
+ * {@code Schema.FieldType} name.
  */
 public final class SourceSchemaField implements Serializable {
 
