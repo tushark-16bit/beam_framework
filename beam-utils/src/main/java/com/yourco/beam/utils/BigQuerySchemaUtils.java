@@ -28,6 +28,9 @@ import java.util.Map.Entry;
  * Temporal types (TIMESTAMP, DATE, DATETIME, TIME) map to STRING — {@code BigQueryIO.readTableRows()}
  * returns them as ISO strings in the {@code TableRow} JSON encoding, not as epoch numbers,
  * and preserving them as strings avoids conversion errors in Beam's type adapters.
+ * {@code BIGNUMERIC} also maps to STRING, for the same reason plus precision: it holds up to
+ * 76.76 decimal digits, which a Beam {@code DOUBLE} (a Java {@code double}) cannot represent
+ * without loss — the exact decimal text is preserved as-is instead.
  *
  * <h2>Integration</h2>
  * Fetch the schema at driver-JVM time in beam-runner (e.g. {@code DataSourcePipelineFactory}
@@ -50,19 +53,25 @@ public final class BigQuerySchemaUtils {
     // BigQueryUtils.toBeamRow() assumes DATETIME means epoch-float, which causes
     // NumberFormatException on these ISO strings. Keeping them as STRING is safe and
     // preserves the full value for downstream BQ transforms.
+    //
+    // BIGNUMERIC is also mapped to STRING: it holds up to 76.76 decimal digits, more precision
+    // than a Java double (Schema.FieldType.DOUBLE) can represent losslessly, so the exact
+    // decimal text from the TableRow JSON encoding is kept as-is rather than risking silent
+    // precision loss.
     private static final Map<String, Schema.FieldType> TYPE_MAP = Map.ofEntries(
-            Map.entry("STRING",    Schema.FieldType.STRING),
-            Map.entry("INTEGER",   Schema.FieldType.INT64),
-            Map.entry("INT64",     Schema.FieldType.INT64),
-            Map.entry("FLOAT",     Schema.FieldType.DOUBLE),
-            Map.entry("FLOAT64",   Schema.FieldType.DOUBLE),
-            Map.entry("BOOLEAN",   Schema.FieldType.BOOLEAN),
-            Map.entry("BOOL",      Schema.FieldType.BOOLEAN),
-            Map.entry("BYTES",     Schema.FieldType.BYTES),
-            Map.entry("TIMESTAMP", Schema.FieldType.STRING),
-            Map.entry("DATE",      Schema.FieldType.STRING),
-            Map.entry("DATETIME",  Schema.FieldType.STRING),
-            Map.entry("TIME",      Schema.FieldType.STRING)
+            Map.entry("STRING",     Schema.FieldType.STRING),
+            Map.entry("INTEGER",    Schema.FieldType.INT64),
+            Map.entry("INT64",      Schema.FieldType.INT64),
+            Map.entry("FLOAT",      Schema.FieldType.DOUBLE),
+            Map.entry("FLOAT64",    Schema.FieldType.DOUBLE),
+            Map.entry("BOOLEAN",    Schema.FieldType.BOOLEAN),
+            Map.entry("BOOL",       Schema.FieldType.BOOLEAN),
+            Map.entry("BYTES",      Schema.FieldType.BYTES),
+            Map.entry("TIMESTAMP",  Schema.FieldType.STRING),
+            Map.entry("DATE",       Schema.FieldType.STRING),
+            Map.entry("DATETIME",   Schema.FieldType.STRING),
+            Map.entry("TIME",       Schema.FieldType.STRING),
+            Map.entry("BIGNUMERIC", Schema.FieldType.STRING)
     );
 
     private BigQuerySchemaUtils() {}

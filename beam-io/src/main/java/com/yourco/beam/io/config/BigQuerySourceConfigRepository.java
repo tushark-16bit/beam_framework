@@ -99,7 +99,8 @@ import java.util.Map;
  * types (see {@link com.yourco.beam.model.SourceSchemaField}). {@code type} must be one of
  * the real BigQuery SQL type names: {@code STRING}, {@code INT64}, {@code FLOAT64},
  * {@code BOOLEAN}, {@code BYTES}, {@code DATE}, {@code DATETIME}, {@code TIME},
- * {@code TIMESTAMP}. When absent, schema resolution falls back to the existing behaviour
+ * {@code TIMESTAMP}, {@code BIGNUMERIC}. When absent, schema resolution falls back to the
+ * existing behaviour
  * (metadata fetch, then a name-only preview-query fallback).
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.

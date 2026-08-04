@@ -145,7 +145,7 @@ model/SourceConfig.java               Per-source config with Builder. Carries AL
 model/ApiSourceConfig.java            REST API config: endpoint, auth, pagination.
 model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header.
 model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map, schema (List<SourceSchemaField>, optional, from bq_schema_json).
-model/SourceSchemaField.java          One declared column (columnName + bqType) for BqFetchConfig.schema. bqType is a real BQ SQL type name (STRING/INT64/FLOAT64/BOOLEAN/BYTES/DATE/DATETIME/TIME/TIMESTAMP).
+model/SourceSchemaField.java          One declared column (columnName + bqType) for BqFetchConfig.schema. bqType is a real BQ SQL type name (STRING/INT64/FLOAT64/BOOLEAN/BYTES/DATE/DATETIME/TIME/TIMESTAMP/BIGNUMERIC).
 model/QueryConfig.java                Query template + paramMappings for token injection.
 model/SourceTransformConfig.java      One transform step: GROUP_BY | SORT_BY | LOOKUP.
 model/AggregationConfig.java          SUM/COUNT/AVG/MIN/MAX per field (used by GROUP_BY).
@@ -533,7 +533,8 @@ all) and every fetched row is converted strictly against it: a value that doesn'
 declared type fails the run with a message naming the column, declared type, and offending
 value, instead of a bare parse exception or a silent fallback. `type` must be a real BigQuery
 SQL type name — `STRING`, `INT64`, `FLOAT64`, `BOOLEAN`, `BYTES`, `DATE`, `DATETIME`, `TIME`,
-`TIMESTAMP` — so the person editing `parameter_store` recognises it directly. When absent,
+`TIMESTAMP`, `BIGNUMERIC` — so the person editing `parameter_store` recognises it directly.
+When absent,
 schema resolution falls back to `BigQuerySchemaUtils.fetchBeamSchema()` (table metadata), then
 to `BigQuerySourceTransform`'s own name-only preview-query fallback.
 
