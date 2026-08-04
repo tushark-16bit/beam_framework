@@ -127,10 +127,27 @@ Schema schema = BigQuerySchemaUtils.fetchBeamSchema("my-project:my-dataset.order
 
 // Now pass schema into BigQuerySourceTransform so it produces typed Rows:
 // order_id STRING, customer_email STRING, amount DOUBLE, ...
-// instead of the generic _row_json STRING schema
+// instead of the generic name-only fallback (see BigQuerySourceTransform's own
+// SELECT * LIMIT 1 preview query, or Schemas.RAW_JSON as a last resort)
 ```
 
 **Never call inside a DoFn** — each worker would make a BQ API call.
+
+### toBeamSchema(declaredFields) — from an operator-declared schema, not BQ metadata
+
+Builds a `Schema` from a `List<SourceSchemaField>` — the parsed `bq_schema_json` column list
+on `BqFetchConfig.schema` — instead of querying BigQuery table metadata at all:
+
+```java
+Schema schema = BigQuerySchemaUtils.toBeamSchema(bqFetchConfig.schema);
+```
+
+No BQ API call, so no `bigquery.tables.get` permission needed — the schema is exactly what
+the operator declared in `parameter_store`. Unlike `fetchBeamSchema()` (which defaults an
+unrecognised BQ-reported type to STRING), an unrecognised `bqType` here throws
+`IllegalArgumentException` immediately — a typo in a human-entered schema should fail loudly,
+not silently produce wrong data. See `DataSourcePipelineFactory.fetchBqSchema()` for where
+this is preferred over `fetchBeamSchema()` when a source declares a schema.
 
 ---
 

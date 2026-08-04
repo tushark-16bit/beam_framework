@@ -144,7 +144,8 @@ model/DataSourceRecord.java           Record row: recId (UUID), daId, rowDaJsonT
 model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config.
 model/ApiSourceConfig.java            REST API config: endpoint, auth, pagination.
 model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header.
-model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map.
+model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map, schema (List<SourceSchemaField>, optional, from bq_schema_json).
+model/SourceSchemaField.java          One declared column (columnName + bqType) for BqFetchConfig.schema. bqType is a real BQ SQL type name (STRING/INT64/FLOAT64/BOOLEAN/BYTES/DATE/DATETIME/TIME/TIMESTAMP).
 model/QueryConfig.java                Query template + paramMappings for token injection.
 model/SourceTransformConfig.java      One transform step: GROUP_BY | SORT_BY | LOOKUP.
 model/AggregationConfig.java          SUM/COUNT/AVG/MIN/MAX per field (used by GROUP_BY).
@@ -216,6 +217,7 @@ util/JsonUtils.java                   Row → JSON with correct type handling.
 
 ```
 BigQuerySchemaUtils.java    fetchBeamSchema(), tableExists(), fetchRowCount(). Call in driver JVM only. Type mapping: INTEGER/INT64→INT64, FLOAT/FLOAT64→DOUBLE, BOOLEAN/BOOL→BOOLEAN, BYTES→BYTES, TIMESTAMP/DATE/DATETIME/TIME→STRING (ISO strings preserved as-is from TableRow JSON encoding).
+                             toBeamSchema(List<SourceSchemaField>) builds a Schema from an operator-declared bq_schema_json list — no BQ call, no tables.get permission needed. Throws IllegalArgumentException on an unrecognised bqType (fail loudly on a config typo, unlike fetchBeamSchema()'s permissive STRING default for unmapped BQ-reported types).
 GcsUtils.java               pathHasFiles(), listFiles(), writeTextFile(), readTextFile(), readBytes(), deletePrefix().
 SecretManagerUtils.java     fetchSecret(secretId). Never log result. Never store in options value.
 RowValidationUtils.java     requireFields(), matchesPattern(), inRange(), oneOf(). Thread-safe.
@@ -248,6 +250,10 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 Main.java                       Parses CLI → routes by processType + reportName.
 PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink. fetchBqSchema() fetches typed Schema at driver-JVM time and passes it to SourceRouter.route().
 DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creates LOADING checkpoint per source in driver JVM, wires RecordSink → PostDownloadFinalizeTransform in graph. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time.
+                                fetchBqSchema() prefers BqFetchConfig.schema (operator-declared bq_schema_json) via
+                                BigQuerySchemaUtils.toBeamSchema() over table-metadata fetch when present — a bad
+                                declared type throws IllegalArgumentException uncaught, failing the run before any
+                                data moves.
 PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional BnC sum rules, checkpoint update (COMPLETED/FAILED_BNC/FAILED), failure email. Runs inside Beam worker.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
@@ -406,9 +412,12 @@ Main.runDataSourceDownload(options)
 │   │
 │   └─ for each SourceConfig (graph assembly — no data moves yet):
 │       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc.
-│       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
-│       │   └─ null for query-only or failed fetch → BigQuerySourceTransform.expand() resolves
-│       │       real column names itself via a SELECT * LIMIT 1 preview query (no tables.get)
+│       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ sources, in order:
+│       │   ├─ 1. BqFetchConfig.schema (operator-declared bq_schema_json) →
+│       │   │      BigQuerySchemaUtils.toBeamSchema() — no BQ call, throws on a bad type name
+│       │   ├─ 2. else BigQuerySchemaUtils.fetchBeamSchema() (table metadata)
+│       │   └─ 3. else null → BigQuerySourceTransform.expand() resolves real column names
+│       │          itself via a SELECT * LIMIT 1 preview query (no tables.get)
 │       ├─ SourceRouter.routeFromConfig(schema)               API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
 │       ├─ DataSourceRecordSinkTransform(da_id)               rows → paginated JSON arrays → DaRec
@@ -512,10 +521,21 @@ configuration — both DATA_SOURCE_DOWNLOAD source configs and REPORT_PROCESSING
   "bq_dataset":     "raw_data",
   "bq_table":       "trades",
   "bq_query":       "SELECT * FROM ... WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'",
+  "bq_schema_json": "[{\"name\":\"trade_id\",\"type\":\"STRING\"},{\"name\":\"amount\",\"type\":\"FLOAT64\"},{\"name\":\"trade_date\",\"type\":\"DATE\"}]",
   "min_row_count":  "1",
   "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]"
 }
 ```
+
+`bq_schema_json` is optional and BQ-only. When present, it is the authoritative schema —
+`DataSourcePipelineFactory.fetchBqSchema()` uses it directly (no `bigquery.tables.get` call at
+all) and every fetched row is converted strictly against it: a value that doesn't match its
+declared type fails the run with a message naming the column, declared type, and offending
+value, instead of a bare parse exception or a silent fallback. `type` must be a real BigQuery
+SQL type name — `STRING`, `INT64`, `FLOAT64`, `BOOLEAN`, `BYTES`, `DATE`, `DATETIME`, `TIME`,
+`TIMESTAMP` — so the person editing `parameter_store` recognises it directly. When absent,
+schema resolution falls back to `BigQuerySchemaUtils.fetchBeamSchema()` (table metadata), then
+to `BigQuerySourceTransform`'s own name-only preview-query fallback.
 
 ### Report configs (REPORT_PROCESSING) — nested JSON in parameters_val_json
 

@@ -60,6 +60,8 @@ io/config/
                                      Key: (parameter_group_name=parentId, parameter_data_source=subprocessName,
                                      parameter_name=datasourceName). Validates required fields from schema_of_json;
                                      parses parameters_val_json into SourceConfig. No separate source_config table.
+                                     Also parses the optional bq_schema_json array into BqFetchConfig.schema
+                                     (List<SourceSchemaField>) — an operator-declared column schema for BQ sources.
     BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING.
                                      Key: (parameter_group_name=parentId, parameter_data_source=reportSubprocess,
                                      parameter_name=reportName). Parses parameters_val_json into ReportConfig.
@@ -125,7 +127,14 @@ All sources produce `PCollection<Row>` with a declared schema set via `setRowSch
   and TIMESTAMP/DATE/DATETIME/TIME + STRING → `String` (ISO strings as-is from
   `BigQueryIO.readTableRows()` JSON encoding). Does **not** use `BigQueryUtils.toBeamRow()`
   — that method assumes Avro encoding and throws `NumberFormatException` on ISO temporal
-  strings like `"2024-01-07T00:00:00"`.
+  strings like `"2024-01-07T00:00:00"`. A value that doesn't match its declared type throws
+  `IllegalStateException` naming the column, declared type, and offending value — this is
+  the hard validation failure for a source with an explicit `bq_schema_json` schema.
+  The `Schema` for the typed path is resolved in three tiers by
+  `DataSourcePipelineFactory.fetchBqSchema()`: (1) operator-declared `BqFetchConfig.schema`
+  via `BigQuerySchemaUtils.toBeamSchema()` — no BQ call at all, authoritative; (2) BQ table
+  metadata via `BigQuerySchemaUtils.fetchBeamSchema()`; (3) `null`, deferring to the fallback
+  below.
   Fallback (schema is `null`): `BigQuerySourceTransform.expand()` runs a lightweight
   `SELECT * FROM (...) LIMIT 1` preview query in the driver JVM to learn real column
   *names* — this needs only query-execution rights, not `bigquery.tables.get`, so it still

@@ -6,10 +6,12 @@ import com.google.cloud.bigquery.Field;
 import com.google.cloud.bigquery.StandardTableDefinition;
 import com.google.cloud.bigquery.Table;
 import com.google.cloud.bigquery.TableId;
+import com.yourco.beam.model.SourceSchemaField;
 import org.apache.beam.sdk.schemas.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
@@ -104,6 +106,44 @@ public final class BigQuerySchemaUtils {
 
         Schema schema = builder.build();
         LOG.info("Fetched {} field(s) from {}", schema.getFieldCount(), tableRef);
+        return schema;
+    }
+
+    /**
+     * Builds a Beam {@link Schema} from an operator-declared column list
+     * ({@code bq_schema_json} in {@code parameter_store} — see
+     * {@code com.yourco.beam.model.BqFetchConfig#schema}), instead of querying BigQuery
+     * table metadata.
+     *
+     * <p>Unlike {@link #fetchBeamSchema}, this makes no BigQuery API call and needs no
+     * {@code bigquery.tables.get} permission — the schema is exactly what was declared.
+     * Because it is user-entered, an unrecognised type name fails loudly here rather than
+     * being silently coerced to STRING (as {@link #fetchBeamSchema} does for BQ-reported
+     * types it doesn't recognise) — a typo in {@code bq_schema_json} should surface
+     * immediately as a config error, not produce silently wrong data downstream.
+     *
+     * @param declaredFields column list from {@code bq_schema_json}; must be non-empty
+     * @return Beam {@link Schema} with one nullable field per declared column
+     * @throws IllegalArgumentException if {@code declaredFields} is empty, or a field's
+     *         {@code bqType} is not a recognised BigQuery SQL type name
+     */
+    public static Schema toBeamSchema(List<SourceSchemaField> declaredFields) {
+        if (declaredFields == null || declaredFields.isEmpty()) {
+            throw new IllegalArgumentException("Declared schema (bq_schema_json) is empty");
+        }
+        Schema.Builder builder = Schema.builder();
+        for (SourceSchemaField field : declaredFields) {
+            Schema.FieldType beamType = TYPE_MAP.get(field.bqType.toUpperCase());
+            if (beamType == null) {
+                throw new IllegalArgumentException(
+                    "Unknown BQ type '" + field.bqType + "' declared for column '"
+                    + field.columnName + "' in bq_schema_json. Supported types: "
+                    + TYPE_MAP.keySet());
+            }
+            builder.addNullableField(field.columnName, beamType);
+        }
+        Schema schema = builder.build();
+        LOG.info("Built Beam schema from {} declared column(s)", schema.getFieldCount());
         return schema;
     }
 

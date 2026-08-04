@@ -17,6 +17,7 @@ import com.yourco.beam.model.LookupConfig;
 import com.yourco.beam.model.QueryConfig;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.SourceFailureEmailConfig;
+import com.yourco.beam.model.SourceSchemaField;
 import com.yourco.beam.model.SourceTransformConfig;
 import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
@@ -51,6 +52,9 @@ import java.util.Map;
  *   "bq_table":                 "trades",
  *   "bq_query":                 "SELECT * FROM ... WHERE trade_date BETWEEN '{periodStart}' ...",
  *   "query_params_json":        "{\"key\": \"value\"}",
+ *   "bq_schema_json":           "[{\"name\":\"trade_id\",\"type\":\"STRING\"},
+ *                                 {\"name\":\"amount\",\"type\":\"FLOAT64\"},
+ *                                 {\"name\":\"trade_date\",\"type\":\"DATE\"}]",
  *   // API source
  *   "api_endpoint":             "https://api.example.com/v1/data",
  *   "api_auth_type":            "BEARER",
@@ -86,6 +90,17 @@ import java.util.Map;
  *   "bq_query":    {"required": true, "type": "string"}
  * }
  * </pre>
+ *
+ * <h2>bq_schema_json — explicit column schema (optional, BQ sources only)</h2>
+ * <p>A JSON array of {@code {"name": "<column>", "type": "<BQ SQL type>"}} objects. When
+ * present, {@code DataSourcePipelineFactory.fetchBqSchema()} uses it directly instead of
+ * calling {@code BigQuerySchemaUtils.fetchBeamSchema()} — no {@code bigquery.tables.get}
+ * permission is needed, and the fetched rows are converted strictly against the declared
+ * types (see {@link com.yourco.beam.model.SourceSchemaField}). {@code type} must be one of
+ * the real BigQuery SQL type names: {@code STRING}, {@code INT64}, {@code FLOAT64},
+ * {@code BOOLEAN}, {@code BYTES}, {@code DATE}, {@code DATETIME}, {@code TIME},
+ * {@code TIMESTAMP}. When absent, schema resolution falls back to the existing behaviour
+ * (metadata fetch, then a name-only preview-query fallback).
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
@@ -222,8 +237,37 @@ public final class BigQuerySourceConfigRepository {
             p.get("bq_dataset"),
             p.get("bq_table"),
             p.get("bq_query"),
-            parseJsonMap(p.get("query_params_json"))
+            parseJsonMap(p.get("query_params_json")),
+            parseSchemaFields(p.get("bq_schema_json"))
         );
+    }
+
+    /**
+     * Parses {@code bq_schema_json} into an ordered list of {@link SourceSchemaField}.
+     * Entries missing {@code name} or {@code type} are skipped with a warning rather than
+     * failing the whole config fetch — a malformed schema entry surfaces later, and more
+     * clearly, when {@code BigQuerySchemaUtils.toBeamSchema()} rejects an unrecognised type.
+     */
+    private List<SourceSchemaField> parseSchemaFields(String json) {
+        if (json == null || json.isBlank()) return Collections.emptyList();
+        try {
+            JsonNode array = JSON.readTree(json);
+            if (!array.isArray()) return Collections.emptyList();
+            List<SourceSchemaField> fields = new ArrayList<>();
+            for (JsonNode node : array) {
+                String name = node.path("name").asText(null);
+                String type = node.path("type").asText(null);
+                if (name == null || name.isBlank() || type == null || type.isBlank()) {
+                    LOG.warn("Skipping malformed bq_schema_json entry (missing name/type): {}", node);
+                    continue;
+                }
+                fields.add(new SourceSchemaField(name, type));
+            }
+            return fields;
+        } catch (Exception e) {
+            LOG.error("Failed to parse bq_schema_json: {}", e.getMessage());
+            return Collections.emptyList();
+        }
     }
 
     private QueryConfig toQueryConfig(Map<String, String> p) {

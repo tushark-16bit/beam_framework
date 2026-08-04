@@ -160,7 +160,7 @@ public final class DataSourcePipelineFactory {
         BqFetchConfig bq = config.bqFetchConfig;
         String resolvedQuery = QueryParameterResolver.resolve(bq.query, bq.queryParams, options);
         BqFetchConfig resolvedBq = new BqFetchConfig(
-            bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams);
+            bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema);
         return SourceConfig.builder()
             .parentId(config.parentId)
             .datasourceName(config.datasourceName)
@@ -176,18 +176,39 @@ public final class DataSourcePipelineFactory {
     }
 
     /**
-     * Fetches the Beam Schema for a BQ table source at driver-JVM time.
-     * Returns null for non-BQ sources, query-only sources (no static table), or when the
-     * fetch fails (logs a warning and continues with the generic all-string fallback).
+     * Resolves the Beam Schema for a BQ table source at driver-JVM time.
+     * Returns null for non-BQ sources, query-only sources with no declared schema (no static
+     * table to inspect), or when metadata fetch fails (logs a warning and continues with the
+     * generic fallback in {@code BigQuerySourceTransform}).
      *
-     * <p>Must be called here in beam-runner because {@link BigQuerySchemaUtils} is in
-     * beam-utils and beam-io cannot depend on beam-utils.
+     * <p>Resolution order:
+     * <ol>
+     *   <li>{@link BqFetchConfig#schema} — an explicit column list the operator declared via
+     *       {@code bq_schema_json} in {@code parameter_store}. When present, this is used
+     *       directly and no BigQuery metadata call is made at all; a bad declared type name
+     *       throws {@link IllegalArgumentException} uncaught, failing the run before any data
+     *       moves rather than silently falling back.</li>
+     *   <li>{@code BigQuerySchemaUtils.fetchBeamSchema()} — table-metadata lookup. Must be
+     *       called here in beam-runner because {@link BigQuerySchemaUtils} is in beam-utils
+     *       and beam-io cannot depend on beam-utils.</li>
+     *   <li>{@code null} — {@code BigQuerySourceTransform} resolves column names itself via a
+     *       preview query when this returns null.</li>
+     * </ol>
      */
     private static Schema fetchBqSchema(SourceConfig config) {
         if (config.sourceType != SourceType.BQ || config.bqFetchConfig == null) return null;
         BqFetchConfig bq = config.bqFetchConfig;
+
+        if (bq.hasSchema()) {
+            Schema schema = BigQuerySchemaUtils.toBeamSchema(bq.schema);
+            LOG.info("Using explicitly declared schema ({} fields, bq_schema_json) for BQ source "
+                     + "'{}' — no table-metadata fetch needed",
+                     schema.getFieldCount(), config.datasourceName);
+            return schema;
+        }
+
         if (bq.table == null || bq.table.isBlank()) {
-            LOG.debug("BQ source '{}' is query-only — using generic schema fallback",
+            LOG.debug("BQ source '{}' is query-only with no declared schema — using generic fallback",
                       config.datasourceName);
             return null;
         }

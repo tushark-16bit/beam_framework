@@ -207,20 +207,36 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
             Row.Builder builder = Row.withSchema(schema);
             for (Schema.Field field : schema.getFields()) {
                 Object raw = tableRow.get(field.getName());
-                builder.addValue(convertValue(field.getType(), raw));
+                builder.addValue(convertValue(field, raw));
             }
             return builder.build();
         }
 
-        private static Object convertValue(Schema.FieldType fieldType, Object raw) {
+        /**
+         * Converts one field's raw value to its declared type. When the schema came from an
+         * operator-declared {@code bq_schema_json} (see {@code BqFetchConfig#schema}), this is
+         * the strict validation point: a value that does not match its declared type throws
+         * immediately with the column name, declared type, and offending value, instead of a
+         * bare {@link NumberFormatException} — so a bad schema declaration or bad source data
+         * fails the run with an actionable message rather than corrupting downstream rows.
+         */
+        private static Object convertValue(Schema.Field field, Object raw) {
             if (raw == null) return null;
             String s = raw.toString();
-            switch (fieldType.getTypeName()) {
-                case INT64:   return Long.parseLong(s);
-                case DOUBLE:  return Double.parseDouble(s);
-                case BOOLEAN: return raw instanceof Boolean ? (Boolean) raw : Boolean.parseBoolean(s);
-                case BYTES:   return BaseEncoding.base64().decode(s);
-                default:      return s; // STRING and all temporal types (already ISO strings)
+            try {
+                switch (field.getType().getTypeName()) {
+                    case INT64:   return Long.parseLong(s);
+                    case DOUBLE:  return Double.parseDouble(s);
+                    case BOOLEAN: return raw instanceof Boolean ? (Boolean) raw : Boolean.parseBoolean(s);
+                    case BYTES:   return BaseEncoding.base64().decode(s);
+                    default:      return s; // STRING and all temporal types (already ISO strings)
+                }
+            } catch (RuntimeException e) {
+                throw new IllegalStateException(
+                    "Schema validation failed: column '" + field.getName() + "' is declared as "
+                    + field.getType().getTypeName() + " but the fetched value '" + s
+                    + "' does not match (" + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? ": " + e.getMessage() : "") + ")", e);
             }
         }
     }
