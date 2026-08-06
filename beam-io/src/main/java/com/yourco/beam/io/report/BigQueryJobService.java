@@ -4,6 +4,7 @@ import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryException;
 import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.ExtractJobConfiguration;
+import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.Job;
 import com.google.cloud.bigquery.JobInfo;
 import com.google.cloud.bigquery.QueryJobConfiguration;
@@ -12,16 +13,22 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Driver-JVM service for running BigQuery jobs synchronously.
+ * Service for running BigQuery jobs synchronously.
  *
- * <p>Used by {@code ReportPipelineFactory} to:
+ * <p>Used by {@code ReportPipelineFactory} (driver JVM) to:
  * <ol>
  *   <li>Run transformation queries and materialise results to BQ tables</li>
  *   <li>Export BQ tables to GCS files (CSV or JSON) for email attachment</li>
  * </ol>
  *
+ * <p>Also safe to use inside a Beam worker DoFn: the no-arg constructor holds only a plain
+ * {@link BigQuery} client, no {@code FrameworkOptions} reference, so it follows the same
+ * {@code @Setup}-time instantiation pattern as {@code BigQueryDataSourceRecordAdapter}'s
+ * String-tableRef constructor. {@code PostDownloadFinalizeTransform.FinalizeDoFn} uses it this
+ * way to run an operator-declared {@code data_transform_query}.
+ *
  * <p>All methods block until the BQ job completes. They throw {@link RuntimeException}
- * on failure so the caller can propagate the error and mark the report as FAILED.
+ * on failure so the caller can propagate the error and mark the report (or run) as FAILED.
  *
  * <h2>Table reference format</h2>
  * Accepts {@code project.dataset.table} (dot-separated) throughout.
@@ -79,6 +86,48 @@ public final class BigQueryJobService {
             .setUseLegacySql(false)
             .build();
         awaitJob(bigquery.create(JobInfo.of(config)), "query");
+    }
+
+    /**
+     * Returns the exact row count of {@code tableRef} via a live {@code SELECT COUNT(*)} query.
+     *
+     * <p>Unlike {@code BigQuerySchemaUtils.fetchRowCount()} (table-metadata based, can lag
+     * right after a write), this always reflects rows visible at query time — needed
+     * immediately after {@link #runQueryToTable} materialises a fresh result.
+     *
+     * @param tableRef table reference ({@code project.dataset.table})
+     * @return exact row count
+     * @throws RuntimeException if the count query fails or is interrupted
+     */
+    public long countRows(String tableRef) {
+        String sql = "SELECT COUNT(*) AS cnt FROM `" + tableRef + "`";
+        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setUseLegacySql(false)
+            .build();
+        try {
+            for (FieldValueList row : bigquery.query(config).iterateAll()) {
+                return row.get("cnt").getLongValue();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("BQ row count query interrupted for " + tableRef, e);
+        }
+        return 0L;
+    }
+
+    /**
+     * Drops {@code tableRef} if it exists. Best-effort — failures are logged and swallowed,
+     * never thrown, since this is always a cleanup step for a temporary/staging table and
+     * should never fail an otherwise-successful job.
+     *
+     * @param tableRef table reference ({@code project.dataset.table})
+     */
+    public void dropTableIfExists(String tableRef) {
+        try {
+            runQuery("DROP TABLE IF EXISTS `" + tableRef + "`");
+        } catch (Exception e) {
+            LOG.warn("Failed to drop temp table {}: {}", tableRef, e.getMessage());
+        }
     }
 
     // ── Table → BQ table ─────────────────────────────────────────────────────

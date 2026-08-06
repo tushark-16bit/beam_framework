@@ -37,11 +37,15 @@ io/checkpoint/
                                           DaRec pages into individual source-row JSON objects in stage_da_json_tx.
 
 io/records/
-    DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field)
+    DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field), deleteRecords(daId)
     BigQueryDataSourceRecordAdapter — row_da_json_tx is a JSON array per page; countRecords uses
                                       SUM(JSON_ARRAY_LENGTH(...)); sumField unnests with
                                       CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(...)) AS row_json then
                                       SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)).
+                                      deleteRecords(daId) — DELETE FROM DaRec WHERE da_id=@daId; best-effort
+                                      (logs and swallows failures — always a post-terminal-status cleanup step).
+                                      Used both to replace a run's own rows after a validated data_transform_query,
+                                      and to remove a superseded run's rows under --manualOverrun.
                                       Has a String-tableRef constructor for in-worker use (DoFn @Setup).
 
 io/sink/
@@ -62,6 +66,9 @@ io/config/
                                      parses parameters_val_json into SourceConfig. No separate source_config table.
                                      Also parses the optional bq_schema_json array into BqFetchConfig.schema
                                      (List<SourceSchemaField>) — an operator-declared column schema for BQ sources.
+                                     Also parses data_transform_query / data_transform_min_row_count /
+                                     data_transform_max_row_count into SourceConfig.dataTransformConfig
+                                     (DataTransformConfig) — an optional post-storage SQL transform.
     BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING.
                                      Key: (parameter_group_name=parentId, parameter_data_source=reportSubprocess,
                                      parameter_name=reportName). Parses parameters_val_json into ReportConfig.
@@ -73,7 +80,11 @@ io/email/
     EmailAttachment           — attachment model (InputStream + fileName + contentType)
 
 io/report/
-    BigQueryJobService        — driver-JVM BQ jobs: query→table, table→GCS export (CSV/JSON)
+    BigQueryJobService        — BQ jobs: query→table, table→GCS export (CSV/JSON), countRows(tableRef)
+                                (exact live SELECT COUNT(*), not table-metadata based), dropTableIfExists()
+                                (best-effort cleanup). No-arg constructor holds only a plain BigQuery client
+                                (no FrameworkOptions), so it's also safe to use inside a Beam worker DoFn —
+                                PostDownloadFinalizeTransform.FinalizeDoFn does this to run data_transform_query.
 ```
 
 ### Adapter pattern

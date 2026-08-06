@@ -11,7 +11,7 @@ You should rarely need to edit this module.
 |---|---|
 | `Main` | Parses CLI args, routes by `--processType` and `--reportName`, delegates to the right factory |
 | `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, creates LOADING checkpoints, assembles per-source Beam branches |
-| `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: BnC validation + checkpoint update (COMPLETED/FAILED_BNC/FAILED) + failure email, all running in the Beam worker |
+| `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: row/BnC validation, optional `data_transform_query` (replaces stored rows once validated), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), `--manualOverrun` cleanup of the superseded previous run's DaRec rows, and failure email — all running in the Beam worker |
 | `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted |
 | `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` and `PostDownloadFinalizeTransform` |
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline |
@@ -30,8 +30,14 @@ DataSourcePipelineFactory.assemble(options)
     │       Each SourceConfig carries: queryConfig, sourceTransforms, validationConfig
     │
     ├─ 2. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources
+    │       (bypassed entirely when --manualOverrun=true or --overrideDownload=true)
+    │
+    ├─ 2b. Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE the new
+    │        checkpoint is created — captured so PostDownloadFinalizeTransform can delete this
+    │        superseded run's DaRec rows once the new run reaches COMPLETED
     │
     ├─ 3. BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId per source (LOADING row)
+    │       Always a fresh INSERT — DaRefer only ever gains new rows, never overwritten
     │
     └─ 4. For each SourceConfig independently (no merge!):
             a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query
@@ -51,8 +57,18 @@ DataSourcePipelineFactory.assemble(options)
                    ├─ BigQueryDataSourceRecordAdapter.countRecords(daId) → storedRowCount
                    ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on)
                    ├─ min/max row count bounds check (optional, from config)
-                   ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional)
-                   ├─ updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
+                   ├─ data_transform_query (optional; only if the checks above passed):
+                   │     BigQueryJobService.runQueryToTable() against a {data} → UNNEST(DaRec)
+                   │     subquery; validates output row count; only then deletes + re-inserts
+                   │     (re-paginated at 250 rows/page) this run's DaRec rows — on any failure
+                   │     the original rows are left untouched
+                   ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional;
+                   │     runs against transformed rows if the transform above applied)
+                   ├─ updateStatus(daId, COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED, bncJson)
+                   ├─ manualOverrun cleanup (only on COMPLETED, only if this run superseded a
+                   │     previous COMPLETED da_id): BigQueryDataSourceRecordAdapter.deleteRecords()
+                   │     on the previous da_id's DaRec rows — DaRefer itself is untouched, it only
+                   │     ever gains new rows
                    └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```
 

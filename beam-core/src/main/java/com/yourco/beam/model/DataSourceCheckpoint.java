@@ -18,7 +18,7 @@ import java.time.LocalDateTime;
  *   per_id               INT64,               -- period identifier (from MSTR_Per)
  *   fl_nm                STRING,              -- BQ table ref, file path, or API endpoint
  *   bal_and_cntl_smry_tx STRING,              -- JSON: BnC summary {status, srcCount, dstCount, …}
- *   sta_cd               STRING   NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED
+ *   sta_cd               STRING   NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED_TRANSFORM | FAILED
  *   created_ts           DATETIME NOT NULL,
  *   lst_updt_ts          DATETIME NOT NULL
  * );
@@ -27,10 +27,12 @@ import java.time.LocalDateTime;
 public final class DataSourceCheckpoint {
 
     // ── Status codes ──────────────────────────────────────────────────────────
-    public static final String STA_LOADING    = "LOADING";
-    public static final String STA_COMPLETED  = "COMPLETED";
-    public static final String STA_FAILED_BNC = "FAILED_BNC";
-    public static final String STA_FAILED     = "FAILED";
+    public static final String STA_LOADING          = "LOADING";
+    public static final String STA_COMPLETED        = "COMPLETED";
+    public static final String STA_FAILED_BNC       = "FAILED_BNC";
+    /** The optional {@code data_transform_query} errored, or its output failed row-count bounds. */
+    public static final String STA_FAILED_TRANSFORM = "FAILED_TRANSFORM";
+    public static final String STA_FAILED           = "FAILED";
 
     public final long          daId;
     public final String        srceNm;

@@ -153,6 +153,7 @@ model/LookupConfig.java               Lookup table config: BQ source, key fields
 model/ValidationConfig.java           Post-fetch validation: header check, row count, BnC rules.
 model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
 model/SourceFailureEmailConfig.java   Optional failure-notification email config on SourceConfig. Populated from failure_email_* keys in parameters_val_json. isPresent() guards send.
+model/DataTransformConfig.java        Optional post-storage SQL transform (query + min/max output row bounds), run within the same DATA_SOURCE_DOWNLOAD run by PostDownloadFinalizeTransform, before COMPLETED. query is written against a {data} token (UNNEST(DaRec) reunification subquery). From data_transform_query/data_transform_min_row_count/data_transform_max_row_count.
 
 -- REPORT_PROCESSING models --
 model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int.
@@ -192,13 +193,13 @@ checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 se
 checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_PROCESSING tables: RptRefer, RptDaMap, RptStageDa, RptOutput.
 checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
 
-records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field).
-records/BigQueryDataSourceRecordAdapter.java  countRecords: SUM(JSON_ARRAY_LENGTH(row_da_json_tx)) across pages. sumField: CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)).
+records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field), deleteRecords(daId).
+records/BigQueryDataSourceRecordAdapter.java  countRecords: SUM(JSON_ARRAY_LENGTH(row_da_json_tx)) across pages. sumField: CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)). deleteRecords: DELETE FROM DaRec WHERE da_id=@daId; best-effort (logs+swallows). Used to replace a run's own rows after a validated data_transform_query, and to remove a superseded run's rows under --manualOverrun.
 
 email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
 email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
 
-report/BigQueryJobService.java        Driver-JVM BQ jobs: runQueryToTable(), exportToCsv(), exportToJson().
+report/BigQueryJobService.java        BQ jobs: runQueryToTable(), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
 
 params/BigQueryParameterAdapter.java     Interface: fetchRequiredKeys(), fetchParameters(), fetchRequiredParameters().
 params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@key). Reads --paramBqProject/Dataset/StoreTable/RequiredTable.
@@ -208,7 +209,9 @@ config/BigQueryReportRepository.java       Queries parameter_store for report co
                                            fetchReportConfig() parses datasources/preprocessing/transforms/outputs/email,
                                            plus top-level output_bq_table and output_bq_input_alias.
 config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOURCE_DOWNLOAD source configs.
-                                           fetchSourceConfigs(). Row → SourceConfig mapping.
+                                           fetchSourceConfigs(). Row → SourceConfig mapping. Also parses
+                                           data_transform_query/data_transform_min_row_count/
+                                           data_transform_max_row_count into DataTransformConfig.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
 ```
@@ -254,7 +257,10 @@ DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creat
                                 BigQuerySchemaUtils.toBeamSchema() over table-metadata fetch when present — a bad
                                 declared type throws IllegalArgumentException uncaught, failing the run before any
                                 data moves.
-PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional BnC sum rules, checkpoint update (COMPLETED/FAILED_BNC/FAILED), failure email. Runs inside Beam worker.
+                                Under --manualOverrun, fetchLatestCompletedDaId() per source BEFORE createCheckpoint()
+                                captures the superseded previous da_id, passed into PostDownloadFinalizeTransform.
+                                createCheckpoint() is always a fresh INSERT — DaRefer only ever gains new rows.
+PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional data_transform_query (post-storage SQL transform against a {data}→UNNEST(DaRec) subquery; validates output row count before replacing stored rows; original rows untouched on failure), optional BnC sum rules (against transformed rows if applied), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), manualOverrun cleanup (deletes the superseded previous da_id's DaRec rows, only on COMPLETED), failure email. Runs inside Beam worker.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
                                 After transform chain, writes final result to per-report BQ table
@@ -407,8 +413,12 @@ Main.runDataSourceDownload(options)
 │
 ├─ DataSourcePipelineFactory.assemble(options)   [driver JVM]
 │   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load SourceConfig from BQ; throws if row missing
-│   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources
+│   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources (bypassed under
+│   │                                                          --manualOverrun / --overrideDownload)
+│   ├─ Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE createCheckpoint()
+│   │   → captured as previousDaId for PostDownloadFinalizeTransform's later cleanup
 │   ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id per source (LOADING row)
+│   │   Always a fresh INSERT — DaRefer only ever gains new rows, never overwritten
 │   │
 │   └─ for each SourceConfig (graph assembly — no data moves yet):
 │       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc.
@@ -431,8 +441,18 @@ Main.runDataSourceDownload(options)
        ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)  → storedRowCount (SUM JSON_ARRAY_LENGTH)
        ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on, no config needed)
        ├─ min/max row count bounds check (optional; from min_row_count / max_row_count config)
-       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional; skipped if bnc_rules_json absent)
-       ├─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED, bncJson)
+       ├─ data_transform_query (optional; only if the checks above passed):
+       │   ├─ BigQueryJobService.runQueryToTable() runs the query against a {data} token resolved to
+       │   │   a CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) subquery — reunifies every
+       │   │   paginated DaRec page for this da_id into one flat rowset of JSON row strings
+       │   ├─ BigQueryJobService.countRows() validates the output against data_transform_min/max_row_count
+       │   └─ only if valid: recordAdapter.deleteRecords(daId) + INSERT ... re-paginated at 250 rows/page
+       │       (query failure or bounds failure → original stored rows left untouched)
+       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional; skipped if bnc_rules_json
+       │   absent; runs against transformed rows if data_transform_query applied)
+       ├─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED, bncJson)
+       ├─ Only on COMPLETED, only if previousDaId was captured: recordAdapter.deleteRecords(previousDaId)
+       │   — manualOverrun cleanup; DaRefer itself is never touched, only the superseded DaRec rows
        └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```
 
@@ -523,9 +543,19 @@ configuration — both DATA_SOURCE_DOWNLOAD source configs and REPORT_PROCESSING
   "bq_query":       "SELECT * FROM ... WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'",
   "bq_schema_json": "[{\"name\":\"trade_id\",\"type\":\"STRING\"},{\"name\":\"amount\",\"type\":\"FLOAT64\"},{\"name\":\"trade_date\",\"type\":\"DATE\"}]",
   "min_row_count":  "1",
-  "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]"
+  "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]",
+  "data_transform_query":         "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id, ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2) AS amount_with_tax FROM {data}",
+  "data_transform_min_row_count": "1"
 }
 ```
+
+`data_transform_query` is optional — see section 8. Real BigQuery Standard SQL against a single
+`{data}` token that resolves to a subquery reunifying every DaRec page for this run into a flat
+rowset of JSON row strings; extract fields with `JSON_VALUE(row_json, '$.field')`. Runs after
+storage integrity checks pass and before the checkpoint is marked `COMPLETED`; its output row
+count is validated against `data_transform_min_row_count`/`data_transform_max_row_count` before
+it replaces the stored rows — a failure at either step leaves the original rows untouched and
+sets `sta_cd=FAILED_TRANSFORM`.
 
 `bq_schema_json` is optional and BQ-only. When present, it is the authoritative schema —
 `DataSourcePipelineFactory.fetchBqSchema()` uses it directly (no `bigquery.tables.get` call at
@@ -657,24 +687,36 @@ long dsId = adapter.createCheckpoint(srceNm, perId, flNm)
 // After waitUntilFinish() / report completes:
 adapter.updateStatus(daId, DataSourceCheckpoint.STA_COMPLETED, bncJson)
 adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED_BNC, bncJson)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED_TRANSFORM, bncJson)
 adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED, null)
 
 // Skip-logic check (DATA_SOURCE_DOWNLOAD):
 adapter.isCompleted(srceNm, perId) — true if latest sta_cd == 'COMPLETED'
+// Bypassed entirely under --manualOverrun / --overrideDownload.
+
+// --manualOverrun: fetchLatestCompletedDaId(srceNm, perId) is called BEFORE createCheckpoint()
+// to capture the run being superseded. createCheckpoint() always INSERTs a fresh DaRefer row
+// (new da_id, incremented vsn_no) regardless — a re-run never overwrites or reuses a prior row.
+// Once the NEW run reaches COMPLETED, PostDownloadFinalizeTransform deletes the OLD da_id's
+// DaRec rows (recordAdapter.deleteRecords(previousDaId)) — DaRefer itself is never touched.
 
 // DataSourceRecordAdapter — validates written records:
 recordAdapter.countRecords(daId)               — COUNT(*) for row-count check
 recordAdapter.sumField(daId, "amount")         — SUM(JSON_VALUE(row_da_json_tx, '$.amount'))
+recordAdapter.deleteRecords(daId)              — DELETE FROM DaRec WHERE da_id=@daId (best-effort)
 
-// bal_and_cntl_smry_tx JSON written on COMPLETED or FAILED_BNC:
-{ "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
+// bal_and_cntl_smry_tx JSON written on COMPLETED, FAILED_BNC, or FAILED_TRANSFORM:
+{ "status": "Matched", "pipelineRowCount": 1000, "storedRowCount": 1000, "transformOutputRowCount": 950, ... }
 ```
 
 ---
 
 ## 14. BigQueryJobService — BQ job contract
 
-Used exclusively in driver JVM (ReportPipelineFactory). Not used in Beam workers.
+Used in the driver JVM (`ReportPipelineFactory`) and — since its no-arg constructor holds only a
+plain `BigQuery` client, no `FrameworkOptions` — also safe to instantiate in `@Setup` inside a
+Beam worker DoFn: `PostDownloadFinalizeTransform.FinalizeDoFn` does this to run
+`data_transform_query`.
 
 ```java
 // Run a query and materialise result to a BQ table
@@ -682,6 +724,12 @@ bqJobService.runQueryToTable(resolvedSql, "project.dataset.table");
 
 // Run a query with no destination (DDL, DML)
 bqJobService.runQuery(resolvedSql);
+
+// Exact live row count (SELECT COUNT(*), not table-metadata based)
+bqJobService.countRows("project.dataset.table");
+
+// Best-effort cleanup of a temp/staging table — logs and swallows failure, never throws
+bqJobService.dropTableIfExists("project.dataset.tmp_table");
 
 // Export BQ table to GCS as CSV
 bqJobService.exportToCsv("project.dataset.table", "gs://bucket/path/file.csv", includeHeader);
@@ -691,7 +739,8 @@ bqJobService.exportToJson("project.dataset.table", "gs://bucket/path/file.json")
 ```
 
 Table refs use `project.dataset.table` (dot-separated, 3 parts) or `dataset.table` (2 parts).
-All methods block until the BQ job completes. Failures throw `RuntimeException`.
+All methods block until the BQ job completes. Failures throw `RuntimeException`
+(except `dropTableIfExists`, which is intentionally best-effort).
 
 ---
 
@@ -719,18 +768,21 @@ inject it into `ReportPipelineFactory` via constructor.
 | Concept | Table | Written by | Read by |
 |---|---|---|---|
 | "Start/end of a DATA_SOURCE_DOWNLOAD run" | `DaRefer` | `DataSourcePipelineFactory` | `DataSourcePipelineFactory` (skip logic), `ReportPipelineFactory` (DS availability check + da_id lookup) |
-| "Loaded rows from any source" | `DaRec` | `DataSourceRecordSinkTransform` (Beam workers) | `BigQueryDataSourceRecordAdapter` (BnC validation), `ReportCheckpointAdapter` (staging into RptStageDa) |
+| "Loaded rows from any source" | `DaRec` | `DataSourceRecordSinkTransform` (Beam workers); also `PostDownloadFinalizeTransform` — replaces a run's own rows once a validated `data_transform_query` applies, and deletes a superseded run's rows under `--manualOverrun` | `BigQueryDataSourceRecordAdapter` (BnC validation), `ReportCheckpointAdapter` (staging into RptStageDa) |
 | "Start/end of a REPORT_PROCESSING run" | `RptRefer` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | — |
 | "Report run → datasource mapping" | `RptDaMap` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | `ReportCheckpointAdapter.clearStagedData()` |
 | "Staged datasource rows for current report" | `RptStageDa` | `ReportCheckpointAdapter.stageFromDaRec()` | Transform chain (as subquery alias) |
 | "One row per output step of a report" | `RptOutput` | `ReportPipelineFactory` via `ReportCheckpointAdapter.writeOutput()` | — |
 
-DATA_SOURCE_DOWNLOAD lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED`.
+DATA_SOURCE_DOWNLOAD lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED_TRANSFORM / FAILED`.
 REPORT_PROCESSING lifecycle: `LOADING → COMPLETED / FAILED`.
 All rows from one DATA_SOURCE_DOWNLOAD run share the same `da_id` — shard-safe.
 `vsn_no` in DaRefer increments each time `(srce_nm, per_id)` is re-run.
 `vsn_no` in RptOutput increments each time `(rpt_id, outpt_cd)` produces another version.
 `perId` is stored as `INT64` in all tables (Java `int`).
+Under `--manualOverrun`, a re-run's DaRefer row is always a fresh INSERT — the previous run's
+DaRefer row is never modified or deleted, only its `DaRec` rows are removed, and only after the
+new run reaches `COMPLETED`.
 
 ---
 

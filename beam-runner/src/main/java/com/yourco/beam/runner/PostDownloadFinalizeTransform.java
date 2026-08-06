@@ -3,8 +3,10 @@ package com.yourco.beam.runner;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.records.BigQueryDataSourceRecordAdapter;
+import com.yourco.beam.io.report.BigQueryJobService;
 import com.yourco.beam.model.BncRule;
 import com.yourco.beam.model.DataSourceCheckpoint;
+import com.yourco.beam.model.DataTransformConfig;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.SourceFailureEmailConfig;
 import com.yourco.beam.model.ValidationConfig;
@@ -23,9 +25,10 @@ import java.util.Map;
 
 /**
  * Final pipeline step for {@code DATA_SOURCE_DOWNLOAD}: validates row count and BnC rules
- * against the DaRec record table, updates the DaRefer checkpoint to
- * {@code COMPLETED} / {@code FAILED_BNC} / {@code FAILED}, and sends a failure email if
- * configured.
+ * against the DaRec record table, runs the optional {@code data_transform_query}, updates the
+ * DaRefer checkpoint to {@code COMPLETED} / {@code FAILED_BNC} / {@code FAILED_TRANSFORM} /
+ * {@code FAILED}, cleans up superseded data under {@code --manualOverrun}, and sends a failure
+ * email if configured.
  *
  * <p>Runs entirely inside a Beam worker (not the driver JVM), so it executes as part of the
  * Dataflow job — no external post-pipeline invocation or Classic Template multi-step DAG required.
@@ -34,6 +37,20 @@ import java.util.Map;
  * to DaRec), emitted by {@link com.yourco.beam.io.sink.DataSourceRecordSinkTransform} after
  * all streaming inserts are confirmed. Using this as input ensures {@link FinalizeDoFn} only
  * runs after every row is visible in BigQuery.
+ *
+ * <h2>Phase order inside {@link FinalizeDoFn#runValidation}</h2>
+ * <ol>
+ *   <li>row_count_mismatch (always-on) + min/max row bounds (optional) against the raw stored rows</li>
+ *   <li>{@code data_transform_query} (optional) — only attempted if phase 1 passed; runs against
+ *       a reunified view of this run's stored rows, validates the output row count, and only
+ *       then replaces the stored rows. A bounds failure or query error leaves the original rows
+ *       untouched.</li>
+ *   <li>BnC sum rules (optional) — against whatever is now stored (raw or transformed)</li>
+ *   <li>Checkpoint update. Only on {@code COMPLETED}: if {@code --manualOverrun} superseded a
+ *       previous COMPLETED run, that previous run's DaRec rows are deleted here — DaRefer keeps
+ *       both rows; only the superseded bulk data is reclaimed, and only once the new run is
+ *       confirmed good.</li>
+ * </ol>
  */
 public final class PostDownloadFinalizeTransform extends PTransform<PCollection<Long>, PDone> {
 
@@ -43,19 +60,22 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
     private final SourceConfig sourceConfig;
     private final String       daReferTableRef; // `project.dataset.DaRefer`
     private final String       daRecTableRef;   // `project.dataset.DaRec`
+    private final long         previousDaId;    // -1 = no previous run to supersede
 
     PostDownloadFinalizeTransform(long daId, SourceConfig sourceConfig,
-                                  String daReferTableRef, String daRecTableRef) {
+                                  String daReferTableRef, String daRecTableRef,
+                                  long previousDaId) {
         this.daId            = daId;
         this.sourceConfig    = sourceConfig;
         this.daReferTableRef = daReferTableRef;
         this.daRecTableRef   = daRecTableRef;
+        this.previousDaId    = previousDaId;
     }
 
     @Override
     public PDone expand(PCollection<Long> writtenCount) {
         writtenCount.apply("Finalize-" + sourceConfig.datasourceName,
-            ParDo.of(new FinalizeDoFn(daId, sourceConfig, daReferTableRef, daRecTableRef)));
+            ParDo.of(new FinalizeDoFn(daId, sourceConfig, daReferTableRef, daRecTableRef, previousDaId)));
         return PDone.in(writtenCount.getPipeline());
     }
 
@@ -71,23 +91,27 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         private final SourceConfig sourceConfig;
         private final String       daReferTableRef;
         private final String       daRecTableRef;
+        private final long         previousDaId;
 
         // Created in @Setup — BQ client is not serializable
         private transient BigQueryDataSourceCheckpointAdapter checkpointAdapter;
         private transient BigQueryDataSourceRecordAdapter     recordAdapter;
+        private transient BigQueryJobService                  bqJobService;
 
         FinalizeDoFn(long daId, SourceConfig sourceConfig,
-                     String daReferTableRef, String daRecTableRef) {
+                     String daReferTableRef, String daRecTableRef, long previousDaId) {
             this.daId            = daId;
             this.sourceConfig    = sourceConfig;
             this.daReferTableRef = daReferTableRef;
             this.daRecTableRef   = daRecTableRef;
+            this.previousDaId    = previousDaId;
         }
 
         @Setup
         public void setup() {
             checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(daReferTableRef);
             recordAdapter     = new BigQueryDataSourceRecordAdapter(daRecTableRef);
+            bqJobService      = new BigQueryJobService();
         }
 
         @ProcessElement
@@ -141,12 +165,24 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                 failures.add("row_count " + rowCount + " > max " + validation.maxRowCount);
             }
 
-            // BnC sum checks — optional; only run when bnc_rules_json is configured.
-            // Absent or empty bnc_rules_json is normal — sum checks are simply skipped.
             Map<String, Object> bncSummary = new LinkedHashMap<>();
             bncSummary.put("pipelineRowCount", pipelineRowCount);
             bncSummary.put("storedRowCount",   rowCount);
 
+            // Optional post-storage query transform — only attempted once storage integrity
+            // (row_count_mismatch + bounds above) is confirmed clean. Runs against a reunified
+            // view of this run's stored rows (UNNEST across all pages, so pagination is invisible
+            // to the operator's SQL); only replaces the stored rows once its own output passes
+            // row-count bounds. On any failure the original rows are left untouched.
+            boolean transformError = false;
+            DataTransformConfig transform = sourceConfig.dataTransformConfig;
+            if (failures.isEmpty() && transform != null && transform.hasQuery()) {
+                transformError = !applyDataTransform(transform, bncSummary, failures);
+            }
+
+            // BnC sum checks — optional; only run when bnc_rules_json is configured.
+            // Absent or empty bnc_rules_json is normal — sum checks are simply skipped.
+            // Runs against whatever is now stored: raw rows, or the transform's output if applied.
             if (!validation.hasBncCheck()) {
                 LOG.info("No BnC rules configured for '{}' — sum checks skipped",
                          sourceConfig.datasourceName);
@@ -173,10 +209,22 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                 bncSummary.put("status", "Matched");
                 staCd = DataSourceCheckpoint.STA_COMPLETED;
                 LOG.info("Validation PASSED for '{}'", sourceConfig.datasourceName);
+
+                // manualOverrun cleanup — only once THIS run is confirmed COMPLETED. DaRefer is
+                // never touched here (it only ever gains new rows, via createCheckpoint in the
+                // driver JVM); this deletes only the superseded run's bulk DaRec data.
+                if (previousDaId >= 0) {
+                    recordAdapter.deleteRecords(previousDaId);
+                    LOG.info("manualOverrun: deleted superseded DaRec rows for '{}' "
+                             + "(previous da_id={}, new da_id={})",
+                             sourceConfig.datasourceName, previousDaId, daId);
+                }
             } else {
                 bncSummary.put("status", "Not Matched");
                 bncSummary.put("failures", failures);
-                staCd = infraError ? DataSourceCheckpoint.STA_FAILED : DataSourceCheckpoint.STA_FAILED_BNC;
+                staCd = infraError ? DataSourceCheckpoint.STA_FAILED
+                      : transformError ? DataSourceCheckpoint.STA_FAILED_TRANSFORM
+                      : DataSourceCheckpoint.STA_FAILED_BNC;
                 LOG.warn("Validation FAILED for '{}': {}", sourceConfig.datasourceName, failures);
             }
 
@@ -185,6 +233,106 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             if (!DataSourceCheckpoint.STA_COMPLETED.equals(staCd)) {
                 sendFailureEmail(staCd, String.join("; ", failures), bncJson);
             }
+        }
+
+        /**
+         * Runs {@code transform.query} against a reunified view of this run's stored rows,
+         * validates the output row count, and — only if that validation passes — replaces the
+         * stored rows with the transform's output.
+         *
+         * <p>On any failure (query error, or output row count outside
+         * {@code data_transform_min_row_count}/{@code data_transform_max_row_count}), appends to
+         * {@code failures} and returns {@code false} without touching the stored rows.
+         *
+         * @return true if the transform ran and its output passed validation
+         */
+        private boolean applyDataTransform(DataTransformConfig transform,
+                                           Map<String, Object> bncSummary, List<String> failures) {
+            String resolvedQuery = transform.query.replace("{data}", dataSubquery());
+            String tmpTable = datasetPrefix(daRecTableRef) + ".tmp_transform_" + daId;
+            try {
+                bqJobService.runQueryToTable(resolvedQuery, tmpTable);
+                long transformedCount = bqJobService.countRows(tmpTable);
+                bncSummary.put("transformOutputRowCount", transformedCount);
+
+                List<String> transformFailures = new ArrayList<>();
+                if (transform.hasMinRowCheck() && transformedCount < transform.minRowCount) {
+                    transformFailures.add("data_transform_query output row_count " + transformedCount
+                        + " < min " + transform.minRowCount);
+                }
+                if (transform.hasMaxRowCheck() && transformedCount > transform.maxRowCount) {
+                    transformFailures.add("data_transform_query output row_count " + transformedCount
+                        + " > max " + transform.maxRowCount);
+                }
+
+                if (!transformFailures.isEmpty()) {
+                    failures.addAll(transformFailures);
+                    LOG.warn("data_transform_query output failed row bounds for '{}' (da_id={}): {} "
+                             + "— original stored data left untouched",
+                             sourceConfig.datasourceName, daId, transformFailures);
+                    return false;
+                }
+
+                recordAdapter.deleteRecords(daId);
+                bqJobService.runQuery(buildRepaginateInsertSql(tmpTable));
+                bncSummary.put("storedRowCount", transformedCount);
+                LOG.info("data_transform_query applied for '{}' (da_id={}): {} → {} rows",
+                         sourceConfig.datasourceName, daId, bncSummary.get("pipelineRowCount"),
+                         transformedCount);
+                return true;
+            } catch (Exception e) {
+                failures.add("data_transform_query failed: " + e.getMessage());
+                LOG.error("data_transform_query failed for '{}' (da_id={}): {} — original data left untouched",
+                          sourceConfig.datasourceName, daId, e.getMessage(), e);
+                return false;
+            } finally {
+                bqJobService.dropTableIfExists(tmpTable);
+            }
+        }
+
+        /**
+         * Subquery reunifying every paginated DaRec page for this run into one flat rowset of
+         * JSON row strings — the same {@code CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(...))} pattern
+         * used by {@code BigQueryDataSourceRecordAdapter.sumField()} and
+         * {@code BigQueryReportCheckpointAdapter.stageFromDaRec()}. Each row is a JSON object
+         * string; the operator's query extracts fields with {@code JSON_VALUE(row_json, '$.field')}.
+         */
+        private String dataSubquery() {
+            return "(SELECT row_json FROM " + daRecTableRef
+                + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
+                + " WHERE da_id = " + daId + ")";
+        }
+
+        /**
+         * Re-paginates {@code tmpTable}'s rows at 250 rows/page — matching
+         * {@code DataSourceRecordSinkTransform.PaginateAndBuildDoFn.PAGE_SIZE}, the same shape
+         * DaRec already stores — and inserts them under this run's {@code daId}. Caller is
+         * responsible for deleting the old rows for {@code daId} first.
+         */
+        private String buildRepaginateInsertSql(String tmpTable) {
+            return "INSERT INTO " + daRecTableRef
+                + " (rec_id, da_id, page_no, row_da_json_tx, load_dt, lst_updt_ts)"
+                + " WITH transformed AS (SELECT * FROM `" + tmpTable + "`),"
+                + " numbered AS ("
+                + "   SELECT TO_JSON_STRING(transformed) AS row_json, ROW_NUMBER() OVER () AS rn"
+                + "   FROM transformed"
+                + " )"
+                + " SELECT"
+                + "   GENERATE_UUID() AS rec_id,"
+                + "   " + daId + " AS da_id,"
+                + "   DIV(rn - 1, 250) + 1 AS page_no,"
+                + "   CONCAT('[', STRING_AGG(row_json, ',' ORDER BY rn), ']') AS row_da_json_tx,"
+                + "   CURRENT_DATE() AS load_dt,"
+                + "   CURRENT_DATETIME() AS lst_updt_ts"
+                + " FROM numbered"
+                + " GROUP BY page_no";
+        }
+
+        /** Strips backticks from a `project.dataset.Table` ref and drops the trailing `.Table`. */
+        private static String datasetPrefix(String backtickedTableRef) {
+            String stripped = backtickedTableRef.replace("`", "");
+            int lastDot = stripped.lastIndexOf('.');
+            return stripped.substring(0, lastDot);
         }
 
         private void sendFailureEmail(String staCd, String errorMessage, String bncSummary) {

@@ -83,7 +83,31 @@ public final class DataSourcePipelineFactory {
         }
         LOG.info("Will process {} of {} source(s)", toProcess.size(), sourceConfigs.size());
 
-        // Create LOADING checkpoints — one per source, before any worker touches the data
+        // Under --manualOverrun, capture each source's previous COMPLETED da_id (if any) BEFORE
+        // creating the new checkpoint below. Once the new run reaches COMPLETED,
+        // PostDownloadFinalizeTransform deletes this previous da_id's DaRec rows — DaRefer itself
+        // is never touched, only a new row is ever inserted (see createCheckpoint() below), so the
+        // full run history stays intact; only the superseded bulk row data is reclaimed.
+        boolean manualOverrun = options.getManualOverrun();
+        Map<String, Long> previousDaIds = new HashMap<>();
+        if (manualOverrun) {
+            for (SourceConfig config : toProcess) {
+                try {
+                    long prevDaId = checkpointAdapter.fetchLatestCompletedDaId(
+                        config.datasourceName, config.periodId);
+                    previousDaIds.put(config.datasourceName, prevDaId);
+                    LOG.info("manualOverrun: '{}' will supersede previous COMPLETED da_id={}",
+                             config.datasourceName, prevDaId);
+                } catch (IllegalArgumentException e) {
+                    LOG.debug("manualOverrun: no previous COMPLETED da_id for '{}' — nothing to supersede",
+                              config.datasourceName);
+                }
+            }
+        }
+
+        // Create LOADING checkpoints — one per source, before any worker touches the data.
+        // Always a fresh INSERT (new da_id, incremented vsn_no) — re-runs never overwrite or
+        // reuse a prior DaRefer row, even under --manualOverrun.
         Map<String, Long> dataSourceIds = new HashMap<>();
         for (SourceConfig config : toProcess) {
             long dsId = checkpointAdapter.createCheckpoint(
@@ -92,14 +116,15 @@ public final class DataSourcePipelineFactory {
             LOG.info("DaRefer LOADING row created for '{}': da_id={}", config.datasourceName, dsId);
         }
 
-        return assemblePipeline(options, toProcess, dataSourceIds);
+        return assemblePipeline(options, toProcess, dataSourceIds, previousDaIds);
     }
 
     // ── Graph assembly ────────────────────────────────────────────────────────
 
     private static Pipeline assemblePipeline(FrameworkOptions options,
                                              List<SourceConfig> configs,
-                                             Map<String, Long> dataSourceIds) {
+                                             Map<String, Long> dataSourceIds,
+                                             Map<String, Long> previousDaIds) {
         Pipeline  pipeline = Pipeline.create(options);
         LocalDate runDate  = DateUtils.resolveRunDate(options);
         LOG.info("Effective run date: {}", runDate);
@@ -133,10 +158,13 @@ public final class DataSourcePipelineFactory {
                 new DataSourceRecordSinkTransform(options,
                     ValueProvider.StaticValueProvider.of(dsId)));
 
-            // Finalize: BnC validation + checkpoint update + failure email — all in the worker
+            // Finalize: row/BnC validation, optional data_transform_query, checkpoint update,
+            // manualOverrun cleanup, and failure email — all in the worker
+            long previousDaId = previousDaIds.getOrDefault(config.datasourceName, -1L);
             writtenCount.apply(
                 "Finalize-" + config.datasourceName,
-                new PostDownloadFinalizeTransform(dsId, config, daReferTableRef, daRecTableRef));
+                new PostDownloadFinalizeTransform(
+                    dsId, config, daReferTableRef, daRecTableRef, previousDaId));
         }
 
         return pipeline;
@@ -172,6 +200,7 @@ public final class DataSourcePipelineFactory {
             .sourceTransforms(new java.util.ArrayList<>(config.sourceTransforms))
             .validationConfig(config.validationConfig)
             .failureEmailConfig(config.failureEmailConfig)
+            .dataTransformConfig(config.dataTransformConfig)
             .build();
     }
 

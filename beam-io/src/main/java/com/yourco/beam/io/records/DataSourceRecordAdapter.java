@@ -33,4 +33,20 @@ public interface DataSourceRecordAdapter {
      * @return the sum, or {@link Double#NaN} if the table cannot be queried
      */
     double sumField(long daId, String field);
+
+    /**
+     * Deletes all DaRec rows (every page) for a given {@code da_id}.
+     *
+     * <p>Best-effort: failures are logged and swallowed rather than thrown, since this is
+     * always a cleanup step performed after the run it matters to has already reached a
+     * terminal status — a delete failure here should never fail or retry the pipeline.
+     *
+     * <p>Used for two purposes: (1) replacing a run's own rows with the output of its
+     * {@code data_transform_query} once that output has been validated, and (2) under
+     * {@code --manualOverrun}, removing the superseded previous run's rows once the new
+     * run reaches {@code COMPLETED}.
+     *
+     * @param daId the run identifier whose rows should be removed
+     */
+    void deleteRecords(long daId);
 }

@@ -106,7 +106,10 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
                  + "DaRefer already has a COMPLETED row for this (datasourceName, parentId, periodId) combo. "
                  + "Guards against accidental re-runs: the default (false) hard-blocks execution when "
                  + "a completed run is found. Must be set deliberately in the Airflow DAG or CLI invocation. "
-                 + "Takes effect alongside --overrideDownload (either flag enables the re-run).")
+                 + "Takes effect alongside --overrideDownload (either flag enables the re-run). "
+                 + "The superseded run always gets a fresh DaRefer row (never overwritten) — once the new "
+                 + "run reaches COMPLETED, only the previous run's DaRec rows are deleted, reclaiming the "
+                 + "superseded bulk data while the full DaRefer run history is preserved.")
     @Default.Boolean(false)
     boolean getManualOverrun();
     void setManualOverrun(boolean value);

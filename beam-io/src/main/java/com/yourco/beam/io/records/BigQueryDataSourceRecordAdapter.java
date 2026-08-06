@@ -75,6 +75,24 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
     }
 
     @Override
+    public void deleteRecords(long daId) {
+        String sql = "DELETE FROM " + table + " WHERE da_id = @daId";
+        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .addNamedParameter("daId", QueryParameterValue.int64(daId))
+            .setUseLegacySql(false)
+            .build();
+        try {
+            bigquery.query(config);
+            LOG.info("Deleted DaRec rows for da_id={}", daId);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warn("DaRec delete interrupted for da_id={}", daId);
+        } catch (Exception e) {
+            LOG.warn("Failed to delete DaRec rows for da_id={}: {}", daId, e.getMessage());
+        }
+    }
+
+    @Override
     public double sumField(long daId, String field) {
         // Unnest the JSON array in each page row, then extract and sum the target field.
         String sql = "SELECT SUM(CAST(JSON_VALUE(row_json, @jsonPath) AS FLOAT64)) AS total"

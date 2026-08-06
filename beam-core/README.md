@@ -13,7 +13,8 @@ Every other module depends on this one — it defines the language the whole fra
 | `transform` | `BeamTransform` (SPI interface), `TransformRegistry` | The extension point for adding new transforms |
 | `retry` | `RetryPolicy`, `ExponentialRetryPolicy`, `FixedRetryPolicy`, `RetryingDoFn` | Retry logic and dead-letter routing |
 | `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig`, `SourceSchemaField` | Shared data types — DATA_SOURCE_DOWNLOAD. `SourceSchemaField` is one column of the optional explicit schema declared via `bq_schema_json`, carried on `BqFetchConfig.schema` |
-| `model` | `DataSourceCheckpoint`, `DataSourceRecord`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint/record models, per-source transform and validation config |
+| `model` | `DataSourceCheckpoint`, `DataSourceRecord`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint/record models, per-source transform and validation config. `DataSourceCheckpoint` status codes: `LOADING`, `COMPLETED`, `FAILED_BNC`, `FAILED_TRANSFORM`, `FAILED` |
+| `model` | `DataTransformConfig` | Optional post-storage SQL transform for one source's rows, run within the same `DATA_SOURCE_DOWNLOAD` run; carried on `SourceConfig.dataTransformConfig` |
 | `model` | `SourceFailureEmailConfig` | Optional failure-notification email config carried on `SourceConfig`; populated from `failure_email_*` keys in `parameters_val_json` |
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
@@ -68,7 +69,9 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 --periodId=2024-01-15
 --subprocessName=eod
 --overrideDownload=false    # legacy re-run bypass; prefer --manualOverrun
---manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer
+--manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer.
+                            # DaRefer always gets a fresh row (never overwritten); once the new
+                            # run reaches COMPLETED, the superseded run's DaRec rows are deleted.
 ```
 
 ### Parameter BigQuery store

@@ -12,6 +12,7 @@ import com.yourco.beam.model.AggregationConfig;
 import com.yourco.beam.model.ApiSourceConfig;
 import com.yourco.beam.model.BncRule;
 import com.yourco.beam.model.BqFetchConfig;
+import com.yourco.beam.model.DataTransformConfig;
 import com.yourco.beam.model.FileSourceConfig;
 import com.yourco.beam.model.LookupConfig;
 import com.yourco.beam.model.QueryConfig;
@@ -79,7 +80,13 @@ import java.util.Map;
  *   "min_row_count":            "1",
  *   "max_row_count":            "100000",
  *   "required_headers_json":    "[\"trade_id\",\"amount\"]",
- *   "bnc_rules_json":           "[{\"field\":\"amount\",\"expectedTotal\":5000000}]"
+ *   "bnc_rules_json":           "[{\"field\":\"amount\",\"expectedTotal\":5000000}]",
+ *   // Post-storage data transform (optional; see DataTransformConfig)
+ *   "data_transform_query":          "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id,
+ *                                     ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2)
+ *                                     AS amount_with_tax FROM {data}",
+ *   "data_transform_min_row_count":  "1",
+ *   "data_transform_max_row_count":  "100000"
  * }
  * </pre>
  *
@@ -102,6 +109,17 @@ import java.util.Map;
  * {@code TIMESTAMP}, {@code NUMERIC}, {@code BIGNUMERIC}. When absent, schema resolution
  * falls back to the existing behaviour
  * (metadata fetch, then a name-only preview-query fallback).
+ *
+ * <h2>data_transform_query — optional post-storage SQL transform</h2>
+ * <p>Real BigQuery Standard SQL, run by {@code PostDownloadFinalizeTransform} after this run's
+ * rows are written to {@code DaRec} and the row-count/BnC storage-integrity checks pass, but
+ * before the checkpoint is marked {@code COMPLETED} — see
+ * {@link com.yourco.beam.model.DataTransformConfig}. Written against a single {@code {data}}
+ * token that resolves to a subquery reunifying every paginated {@code DaRec} page for this run
+ * into one flat rowset of JSON row strings, so pagination is invisible to the query. The
+ * transform's output row count is validated against {@code data_transform_min_row_count} /
+ * {@code data_transform_max_row_count} before it replaces the stored rows — on failure, the
+ * original rows are left untouched and the run fails with {@code FAILED_TRANSFORM}.
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
@@ -192,7 +210,8 @@ public final class BigQuerySourceConfigRepository {
             .queryConfig(toQueryConfig(params))
             .sourceTransforms(toSourceTransforms(params.get("source_transforms_json")))
             .validationConfig(toValidationConfig(params))
-            .failureEmailConfig(toFailureEmailConfig(params));
+            .failureEmailConfig(toFailureEmailConfig(params))
+            .dataTransformConfig(toDataTransformConfig(params));
 
         switch (sourceType) {
             case API  -> builder.apiConfig(toApiConfig(params));
@@ -286,6 +305,15 @@ public final class BigQuerySourceConfigRepository {
         List<String>  requiredHeaders = parseStringList(p.get("required_headers_json"));
         List<BncRule> bncRules        = parseBncRules(p.get("bnc_rules_json"));
         return new ValidationConfig(minRows, maxRows, requiredHeaders, bncRules);
+    }
+
+    private DataTransformConfig toDataTransformConfig(Map<String, String> p) {
+        String query = p.get("data_transform_query");
+        long minRows = parseLongOrDefault(p.get("data_transform_min_row_count"), DataTransformConfig.NO_MIN);
+        long maxRows = (p.containsKey("data_transform_max_row_count") && p.get("data_transform_max_row_count") != null)
+                       ? parseLongOrDefault(p.get("data_transform_max_row_count"), DataTransformConfig.NO_MAX)
+                       : DataTransformConfig.NO_MAX;
+        return new DataTransformConfig(query, minRows, maxRows);
     }
 
     private SourceFailureEmailConfig toFailureEmailConfig(Map<String, String> p) {
