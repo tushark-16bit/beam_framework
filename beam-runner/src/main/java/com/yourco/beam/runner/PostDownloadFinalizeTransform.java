@@ -323,7 +323,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                 + "   DIV(rn - 1, 250) + 1 AS page_no,"
                 + "   CONCAT('[', STRING_AGG(row_json, ',' ORDER BY rn), ']') AS row_da_json_tx,"
                 + "   CURRENT_DATE() AS load_dt,"
-                + "   CURRENT_DATETIME() AS lst_updt_ts"
+                + "   CURRENT_TIMESTAMP() AS lst_updt_ts"
                 + " FROM numbered"
                 + " GROUP BY page_no";
         }
