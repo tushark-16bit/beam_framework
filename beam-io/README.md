@@ -42,10 +42,15 @@ io/records/
                                       SUM(JSON_ARRAY_LENGTH(...)); sumField unnests with
                                       CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(...)) AS row_json then
                                       SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)).
-                                      deleteRecords(daId) — DELETE FROM DaRec WHERE da_id=@daId; best-effort
-                                      (logs and swallows failures — always a post-terminal-status cleanup step).
-                                      Used both to replace a run's own rows after a validated data_transform_query,
-                                      and to remove a superseded run's rows under --manualOverrun.
+                                      deleteRecords(daId) — DELETE FROM DaRec WHERE da_id=@daId; best-effort at
+                                      this level (logs and swallows failures). Used directly for the
+                                      --manualOverrun cleanup of an older, already-flushed run (safe to be
+                                      best-effort there). For the data_transform_query replace of THIS run's
+                                      just-streamed rows, beam-runner's PostDownloadFinalizeTransform wraps it
+                                      with retry + a countRecords()==0 verification instead — those rows can
+                                      still be in BigQuery's streaming buffer (DML-ineligible even though
+                                      already SELECT-visible), and a silently-incomplete delete there would
+                                      leave old and new pages coexisting under the same da_id.
                                       Has a String-tableRef constructor for in-worker use (DoFn @Setup).
 
 io/sink/

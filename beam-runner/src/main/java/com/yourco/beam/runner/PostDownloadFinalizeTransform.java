@@ -273,7 +273,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                     return false;
                 }
 
-                recordAdapter.deleteRecords(daId);
+                deleteAndVerify(daId);
                 bqJobService.runQuery(buildRepaginateInsertSql(tmpTable));
                 bncSummary.put("storedRowCount", transformedCount);
                 LOG.info("data_transform_query applied for '{}' (da_id={}): {} → {} rows",
@@ -288,6 +288,52 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             } finally {
                 bqJobService.dropTableIfExists(tmpTable);
             }
+        }
+
+        /**
+         * Deletes {@code targetDaId}'s DaRec rows and verifies the delete actually took effect,
+         * retrying with backoff if rows remain.
+         *
+         * <p>This run's rows were just written via BigQuery streaming inserts, which are
+         * immediately visible to {@code SELECT} but can remain in BigQuery's internal streaming
+         * buffer for a short while longer — and DML ({@code DELETE}/{@code UPDATE}/{@code MERGE})
+         * cannot touch rows still in that buffer. Unlike {@link BigQueryDataSourceRecordAdapter#deleteRecords}
+         * (deliberately best-effort, used for cleaning up an <em>older</em> superseded run), a
+         * silently-failed delete here would be a correctness bug: {@link #applyDataTransform}
+         * would go on to insert the transformed pages regardless, leaving old and new pages
+         * coexisting under the same {@code daId}. Retries for up to ~30s total; if rows still
+         * remain after that, throws so the transform fails cleanly (no insert happens) instead of
+         * silently duplicating data.
+         */
+        private void deleteAndVerify(long targetDaId) {
+            int[] backoffMs = {2000, 4000, 8000, 8000, 8000};
+            for (int attempt = 1; attempt <= backoffMs.length + 1; attempt++) {
+                recordAdapter.deleteRecords(targetDaId);
+                long remaining = recordAdapter.countRecords(targetDaId);
+                if (remaining == 0L) {
+                    return;
+                }
+                // remaining == -1 means the verification count query itself failed (infra error) —
+                // treat that as "unknown", not "confirmed deleted", and retry the same as leftover rows.
+                LOG.warn("DaRec still has {} row(s) for da_id={} after delete attempt {}/{} — likely "
+                         + "still in BigQuery's streaming buffer (not yet eligible for DML), or the "
+                         + "verification count query itself failed",
+                         remaining, targetDaId, attempt, backoffMs.length + 1);
+                if (attempt <= backoffMs.length) {
+                    try {
+                        Thread.sleep(backoffMs[attempt - 1]);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(
+                            "Interrupted while waiting to retry DaRec delete for da_id=" + targetDaId, ie);
+                    }
+                }
+            }
+            throw new IllegalStateException(
+                "Could not confirm DaRec rows were deleted for da_id=" + targetDaId + " after "
+                + (backoffMs.length + 1) + " attempts — rows are likely still in BigQuery's "
+                + "streaming buffer. Retry this run once the buffer has flushed (usually within "
+                + "a few minutes).");
         }
 
         /**
