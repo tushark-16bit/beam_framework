@@ -46,11 +46,13 @@ io/records/
                                       this level (logs and swallows failures). Used directly for the
                                       --manualOverrun cleanup of an older, already-flushed run (safe to be
                                       best-effort there). For the data_transform_query replace of THIS run's
-                                      just-streamed rows, beam-runner's PostDownloadFinalizeTransform wraps it
-                                      with retry + a countRecords()==0 verification instead — those rows can
-                                      still be in BigQuery's streaming buffer (DML-ineligible even though
-                                      already SELECT-visible), and a silently-incomplete delete there would
-                                      leave old and new pages coexisting under the same da_id.
+                                      just-streamed rows, beam-runner's PostDownloadFinalizeTransform does NOT
+                                      use this method — it runs DELETE+INSERT as a single atomic BigQuery
+                                      multi-statement transaction instead (see beam-runner/README.md), since
+                                      those rows can still be in BigQuery's streaming buffer (DML-ineligible
+                                      even though already SELECT-visible) and two separate unverified
+                                      statements could leave a partial delete, or a successful delete with a
+                                      failed insert and nothing to restore the originals.
                                       Has a String-tableRef constructor for in-worker use (DoFn @Setup).
 
 io/sink/

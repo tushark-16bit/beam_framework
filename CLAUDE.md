@@ -194,7 +194,7 @@ checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_P
 checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
 
 records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field), deleteRecords(daId).
-records/BigQueryDataSourceRecordAdapter.java  countRecords: SUM(JSON_ARRAY_LENGTH(row_da_json_tx)) across pages. sumField: CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)). deleteRecords: DELETE FROM DaRec WHERE da_id=@daId; best-effort (logs+swallows) at the adapter level — used as-is for the --manualOverrun cleanup of an older, already-flushed run. For the data_transform_query replace (same-run, just-streamed rows), PostDownloadFinalizeTransform.deleteAndVerify() wraps it with retry + a countRecords()==0 check instead, since those rows can still be in BigQuery's streaming buffer (DML-ineligible despite being SELECT-visible) and a silently-incomplete delete there would leave old+new pages coexisting.
+records/BigQueryDataSourceRecordAdapter.java  countRecords: SUM(JSON_ARRAY_LENGTH(row_da_json_tx)) across pages. sumField: CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)). deleteRecords: DELETE FROM DaRec WHERE da_id=@daId; best-effort (logs+swallows); used as-is for the --manualOverrun cleanup of an older, already-flushed run. For the data_transform_query replace (same-run, just-streamed rows), PostDownloadFinalizeTransform.replaceStoredRows() does NOT use this method — it runs DELETE+INSERT as a single atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with ROLLBACK on error) instead, since those rows can still be in BigQuery's streaming buffer (DML-ineligible despite being SELECT-visible) and two separate unverified statements could leave a partial delete (some pages gone, some not) or, worse, a successful delete followed by a failed insert with nothing to restore the originals.
 
 email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
 email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
@@ -446,13 +446,14 @@ Main.runDataSourceDownload(options)
        │   │   a CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) subquery — reunifies every
        │   │   paginated DaRec page for this da_id into one flat rowset of JSON row strings
        │   ├─ BigQueryJobService.countRows() validates the output against data_transform_min/max_row_count
-       │   └─ only if valid: deleteAndVerify(daId) + INSERT ... re-paginated at 250 rows/page
-       │       (query failure or bounds failure → original stored rows left untouched)
-       │       deleteAndVerify retries recordAdapter.deleteRecords(daId) with backoff (~30s total)
-       │       and confirms countRecords(daId)==0 before inserting — this run's own rows were just
-       │       streamed in and can still be in BigQuery's streaming buffer (DML-ineligible even
-       │       though already SELECT-visible); if delete can't be confirmed, throws (no insert
-       │       happens) rather than risk old+new pages coexisting under the same daId
+       │   └─ only if valid: replaceStoredRows() runs DELETE + INSERT (re-paginated at 250 rows/page)
+       │       as ONE atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with
+       │       ROLLBACK on error) — never as two separate jobs. Retried as a whole with backoff
+       │       (~30s total) since this run's own rows were just streamed in and can still be in
+       │       BigQuery's streaming buffer (DML-ineligible even though already SELECT-visible); a
+       │       failed attempt is guaranteed to have changed nothing, so retrying is always safe.
+       │       (query failure or bounds failure or exhausted retries → original stored rows
+       │       completely untouched — the delete and insert can never partially apply)
        ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional; skipped if bnc_rules_json
        │   absent; runs against transformed rows if data_transform_query applied)
        ├─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED, bncJson)

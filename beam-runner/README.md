@@ -11,7 +11,7 @@ You should rarely need to edit this module.
 |---|---|
 | `Main` | Parses CLI args, routes by `--processType` and `--reportName`, delegates to the right factory |
 | `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, creates LOADING checkpoints, assembles per-source Beam branches |
-| `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: row/BnC validation, optional `data_transform_query` (replaces stored rows once validated), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), `--manualOverrun` cleanup of the superseded previous run's DaRec rows, and failure email — all running in the Beam worker |
+| `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: row/BnC validation, optional `data_transform_query` (replaces stored rows once validated, via an atomic DELETE+INSERT transaction), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), `--manualOverrun` cleanup of the superseded previous run's DaRec rows, and failure email — all running in the Beam worker |
 | `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted |
 | `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` and `PostDownloadFinalizeTransform` |
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline |
@@ -59,9 +59,14 @@ DataSourcePipelineFactory.assemble(options)
                    ├─ min/max row count bounds check (optional, from config)
                    ├─ data_transform_query (optional; only if the checks above passed):
                    │     BigQueryJobService.runQueryToTable() against a {data} → UNNEST(DaRec)
-                   │     subquery; validates output row count; only then deletes + re-inserts
-                   │     (re-paginated at 250 rows/page) this run's DaRec rows — on any failure
-                   │     the original rows are left untouched
+                   │     subquery; validates output row count; only then replaceStoredRows() runs
+                   │     DELETE + INSERT (re-paginated at 250 rows/page) as ONE atomic BigQuery
+                   │     multi-statement transaction (BEGIN TRANSACTION...COMMIT, ROLLBACK on
+                   │     error) — retried as a whole with backoff (~30s) since this run's rows were
+                   │     just streamed in and can still be in BigQuery's streaming buffer
+                   │     (DML-ineligible despite being SELECT-visible); on any failure — query
+                   │     error, bounds failure, or exhausted retries — the original rows are
+                   │     completely untouched, never partially deleted or duplicated
                    ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional;
                    │     runs against transformed rows if the transform above applied)
                    ├─ updateStatus(daId, COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED, bncJson)

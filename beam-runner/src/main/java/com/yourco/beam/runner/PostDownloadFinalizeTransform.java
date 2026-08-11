@@ -273,8 +273,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                     return false;
                 }
 
-                deleteAndVerify(daId);
-                bqJobService.runQuery(buildRepaginateInsertSql(tmpTable));
+                replaceStoredRows(tmpTable);
                 bncSummary.put("storedRowCount", transformedCount);
                 LOG.info("data_transform_query applied for '{}' (da_id={}): {} → {} rows",
                          sourceConfig.datasourceName, daId, bncSummary.get("pipelineRowCount"),
@@ -291,49 +290,61 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         }
 
         /**
-         * Deletes {@code targetDaId}'s DaRec rows and verifies the delete actually took effect,
-         * retrying with backoff if rows remain.
+         * Replaces this run's DaRec rows with {@code tmpTable}'s (re-paginated at 250 rows/page)
+         * by running the delete and the insert as a single atomic BigQuery multi-statement
+         * transaction — never as two separate jobs.
          *
-         * <p>This run's rows were just written via BigQuery streaming inserts, which are
-         * immediately visible to {@code SELECT} but can remain in BigQuery's internal streaming
-         * buffer for a short while longer — and DML ({@code DELETE}/{@code UPDATE}/{@code MERGE})
-         * cannot touch rows still in that buffer. Unlike {@link BigQueryDataSourceRecordAdapter#deleteRecords}
-         * (deliberately best-effort, used for cleaning up an <em>older</em> superseded run), a
-         * silently-failed delete here would be a correctness bug: {@link #applyDataTransform}
-         * would go on to insert the transformed pages regardless, leaving old and new pages
-         * coexisting under the same {@code daId}. Retries for up to ~30s total; if rows still
-         * remain after that, throws so the transform fails cleanly (no insert happens) instead of
-         * silently duplicating data.
+         * <p>This matters for two reasons:
+         * <ol>
+         *   <li>This run's rows were just written via streaming inserts, which are immediately
+         *       visible to {@code SELECT} but can remain in BigQuery's internal streaming buffer
+         *       for a short while longer — and DML ({@code DELETE}/{@code UPDATE}/{@code MERGE})
+         *       cannot touch rows still in that buffer. A transaction attempted while rows are
+         *       still buffered fails outright and rolls back cleanly — it cannot partially
+         *       delete some pages and leave others, the way two independent, unverified
+         *       statements could (and once did: stale pages survived alongside freshly inserted
+         *       ones, silently double-counted by every downstream reader since nothing filters
+         *       by "which page is current" — every query here scopes only by {@code da_id}).</li>
+         *   <li>If the delete succeeded but a separate, later insert then failed, the original
+         *       rows would already be gone with nothing to restore them — a single dropped
+         *       statement deletes without also inserting. Wrapping both in one transaction makes
+         *       that impossible: either both happen, or neither does.</li>
+         * </ol>
+         *
+         * <p>Retries the whole transaction (not a partial step) with backoff for up to ~30s if it
+         * fails — safe to retry because a failed attempt is guaranteed to have changed nothing.
+         * If it still hasn't succeeded after that, throws so the transform fails cleanly with the
+         * original rows completely untouched.
          */
-        private void deleteAndVerify(long targetDaId) {
+        private void replaceStoredRows(String tmpTable) {
+            String sql = buildAtomicReplaceSql(tmpTable);
             int[] backoffMs = {2000, 4000, 8000, 8000, 8000};
+            Exception lastError = null;
             for (int attempt = 1; attempt <= backoffMs.length + 1; attempt++) {
-                recordAdapter.deleteRecords(targetDaId);
-                long remaining = recordAdapter.countRecords(targetDaId);
-                if (remaining == 0L) {
+                try {
+                    bqJobService.runQuery(sql);
                     return;
-                }
-                // remaining == -1 means the verification count query itself failed (infra error) —
-                // treat that as "unknown", not "confirmed deleted", and retry the same as leftover rows.
-                LOG.warn("DaRec still has {} row(s) for da_id={} after delete attempt {}/{} — likely "
-                         + "still in BigQuery's streaming buffer (not yet eligible for DML), or the "
-                         + "verification count query itself failed",
-                         remaining, targetDaId, attempt, backoffMs.length + 1);
-                if (attempt <= backoffMs.length) {
-                    try {
-                        Thread.sleep(backoffMs[attempt - 1]);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new IllegalStateException(
-                            "Interrupted while waiting to retry DaRec delete for da_id=" + targetDaId, ie);
+                } catch (Exception e) {
+                    lastError = e;
+                    LOG.warn("Atomic DaRec replace failed for da_id={} on attempt {}/{}: {} — likely "
+                             + "rows are still in BigQuery's streaming buffer (original rows are "
+                             + "untouched — the replace is atomic); retrying",
+                             daId, attempt, backoffMs.length + 1, e.getMessage());
+                    if (attempt <= backoffMs.length) {
+                        try {
+                            Thread.sleep(backoffMs[attempt - 1]);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(
+                                "Interrupted while retrying DaRec replace for da_id=" + daId, ie);
+                        }
                     }
                 }
             }
             throw new IllegalStateException(
-                "Could not confirm DaRec rows were deleted for da_id=" + targetDaId + " after "
-                + (backoffMs.length + 1) + " attempts — rows are likely still in BigQuery's "
-                + "streaming buffer. Retry this run once the buffer has flushed (usually within "
-                + "a few minutes).");
+                "Could not replace DaRec rows for da_id=" + daId + " after " + (backoffMs.length + 1)
+                + " attempts (original rows are untouched — the replace is atomic): "
+                + lastError.getMessage(), lastError);
         }
 
         /**
@@ -350,28 +361,37 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         }
 
         /**
-         * Re-paginates {@code tmpTable}'s rows at 250 rows/page — matching
-         * {@code DataSourceRecordSinkTransform.PaginateAndBuildDoFn.PAGE_SIZE}, the same shape
-         * DaRec already stores — and inserts them under this run's {@code daId}. Caller is
-         * responsible for deleting the old rows for {@code daId} first.
+         * BigQuery script: deletes this run's existing DaRec rows and inserts {@code tmpTable}'s
+         * rows re-paginated at 250 rows/page (matching
+         * {@code DataSourceRecordSinkTransform.PaginateAndBuildDoFn.PAGE_SIZE}), both inside one
+         * {@code BEGIN TRANSACTION ... COMMIT TRANSACTION} block. On any error, explicitly rolls
+         * back and re-raises, so the whole script either fully commits or has no effect at all.
          */
-        private String buildRepaginateInsertSql(String tmpTable) {
-            return "INSERT INTO " + daRecTableRef
-                + " (rec_id, da_id, page_no, row_da_json_tx, load_dt, lst_updt_ts)"
-                + " WITH transformed AS (SELECT * FROM `" + tmpTable + "`),"
-                + " numbered AS ("
-                + "   SELECT TO_JSON_STRING(transformed) AS row_json, ROW_NUMBER() OVER () AS rn"
-                + "   FROM transformed"
-                + " )"
-                + " SELECT"
-                + "   GENERATE_UUID() AS rec_id,"
-                + "   " + daId + " AS da_id,"
-                + "   DIV(rn - 1, 250) + 1 AS page_no,"
-                + "   CONCAT('[', STRING_AGG(row_json, ',' ORDER BY rn), ']') AS row_da_json_tx,"
-                + "   CURRENT_DATE() AS load_dt,"
-                + "   CURRENT_TIMESTAMP() AS lst_updt_ts"
-                + " FROM numbered"
-                + " GROUP BY page_no";
+        private String buildAtomicReplaceSql(String tmpTable) {
+            return "BEGIN\n"
+                + "  BEGIN TRANSACTION;\n"
+                + "  DELETE FROM " + daRecTableRef + " WHERE da_id = " + daId + ";\n"
+                + "  INSERT INTO " + daRecTableRef
+                + "    (rec_id, da_id, page_no, row_da_json_tx, load_dt, lst_updt_ts)\n"
+                + "  WITH transformed AS (SELECT * FROM `" + tmpTable + "`),\n"
+                + "  numbered AS (\n"
+                + "    SELECT TO_JSON_STRING(transformed) AS row_json, ROW_NUMBER() OVER () AS rn\n"
+                + "    FROM transformed\n"
+                + "  )\n"
+                + "  SELECT\n"
+                + "    GENERATE_UUID() AS rec_id,\n"
+                + "    " + daId + " AS da_id,\n"
+                + "    DIV(rn - 1, 250) + 1 AS page_no,\n"
+                + "    CONCAT('[', STRING_AGG(row_json, ',' ORDER BY rn), ']') AS row_da_json_tx,\n"
+                + "    CURRENT_DATE() AS load_dt,\n"
+                + "    CURRENT_TIMESTAMP() AS lst_updt_ts\n"
+                + "  FROM numbered\n"
+                + "  GROUP BY page_no;\n"
+                + "  COMMIT TRANSACTION;\n"
+                + "EXCEPTION WHEN ERROR THEN\n"
+                + "  ROLLBACK TRANSACTION;\n"
+                + "  RAISE USING MESSAGE = @@error.message;\n"
+                + "END;";
         }
 
         /** Strips backticks from a `project.dataset.Table` ref and drops the trailing `.Table`. */
