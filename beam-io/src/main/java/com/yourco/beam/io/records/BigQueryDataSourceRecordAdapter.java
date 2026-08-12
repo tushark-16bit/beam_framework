@@ -13,10 +13,11 @@ import org.slf4j.LoggerFactory;
 /**
  * BigQuery implementation of {@link DataSourceRecordAdapter}.
  *
- * <p>Each DaRec row now contains a page of up to 250 source rows serialised as a JSON array
- * in {@code row_da_json_tx}. Queries must un-nest the array with
- * {@code UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx))} to reach individual source records.
- * All queries filter by {@code da_id}.
+ * <p>Each DaRec row contains a page of up to 250 source rows in {@code row_da_json_tx} — a flat
+ * JSON array for most sources, or {@code {"Data":[...],"DataHeaders":[...]}} for a FILE source
+ * with a header row. Queries un-nest the row array with
+ * {@link FileHeaderLegend#dataArrayExpr}, which handles both shapes. All queries filter by
+ * {@code da_id}.
  */
 public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAdapter {
 
@@ -54,16 +55,14 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
 
     @Override
     public long countRecords(long daId) {
-        // row_da_json_tx is a JSON array of source rows per DaRec page. Unnest and COUNT(*)
-        // individual rows rather than SUM(JSON_ARRAY_LENGTH(...)) — a FILE source's header-legend
-        // object (present on every page once a source has one) inflates array length without
-        // being a real source row, so it must be excluded explicitly. No-op for BQ/API sources,
-        // which never produce a legend row.
+        // row_da_json_tx holds a page's rows either as a flat JSON array, or (FILE sources with
+        // a header) as {"Data":[...],"DataHeaders":[...]}. FileHeaderLegend.dataArrayExpr()
+        // extracts just the row array either way, so COUNT(*) never includes the header legend
+        // — it lives in DataHeaders, structurally separate from Data, and is never unnested here.
         String sql = "SELECT COUNT(*) AS cnt"
             + " FROM " + table
-            + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
-            + " WHERE da_id = @daId"
-            + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT;
+            + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("row_da_json_tx") + ") AS row_json"
+            + " WHERE da_id = @daId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("daId", QueryParameterValue.int64(daId))
             .setUseLegacySql(false)
@@ -101,15 +100,14 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
 
     @Override
     public double sumField(long daId, String field) {
-        // Unnest the JSON array in each page row, then extract and sum the target field.
-        // Excludes any FILE-source header-legend object — without this, a BnC rule for a
-        // lettered field (e.g. "A") would try to CAST that field's legend value (a header name
-        // string) to FLOAT64 and throw, since the legend uses the same letter keys as data rows.
+        // Unnest just the Data/row array (see countRecords()), then extract and sum the target
+        // field. The header legend lives in a separate DataHeaders array and is never unnested
+        // here, so a BnC rule for a lettered field (e.g. "A") never risks CASTing a legend's
+        // header-name string instead of a real row's value.
         String sql = "SELECT SUM(CAST(JSON_VALUE(row_json, @jsonPath) AS FLOAT64)) AS total"
             + " FROM " + table
-            + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
-            + " WHERE da_id = @daId"
-            + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT;
+            + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("row_da_json_tx") + ") AS row_json"
+            + " WHERE da_id = @daId";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("jsonPath", QueryParameterValue.string("$." + field))
             .addNamedParameter("daId",     QueryParameterValue.int64(daId))

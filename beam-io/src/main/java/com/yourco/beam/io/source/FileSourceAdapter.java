@@ -39,10 +39,12 @@ import java.util.List;
  *
  * <p>When the file has a header row ({@link FileSourceConfig#hasHeader}), the real header
  * names are instead captured separately as {@link FileParseResult#headerLegendJson()} — a
- * single JSON object mapping each column letter to its real header name, tagged with
- * {@link FileHeaderLegend#MARKER_KEY} so readers can tell it apart from a data row (see that
- * class for where this must be filtered out). When there is no header row, no legend is
- * produced ({@code headerLegendJson()} is {@code null}) — there is no real name to record.
+ * single JSON object mapping each column letter to its real header name, wrapped via
+ * {@link FileHeaderLegend#wrapLegend} for transit through the same {@code PCollection<Row>} as
+ * the data rows. {@code DataSourceRecordSinkTransform} unwraps it and places it in each DaRec
+ * page's {@code DataHeaders} array (see {@link FileHeaderLegend} for the page shape). When there
+ * is no header row, no legend is produced ({@code headerLegendJson()} is {@code null}) — there
+ * is no real name to record.
  *
  * <p>Downstream transforms parse each data row's JSON from the standard
  * {@link com.yourco.beam.model.Schemas#RAW_JSON} wire type, same as before.
@@ -201,14 +203,18 @@ public final class FileSourceAdapter {
     }
 
     /**
-     * Builds the header-legend JSON object mapping each column letter to its real header name,
-     * tagged with {@link FileHeaderLegend#MARKER_KEY} so readers can tell it apart from a data
-     * row: {@code {"__header_map__":true,"A":"trade_id","B":"amount"}}.
+     * Builds the header-legend content object mapping each column letter to its real header
+     * name, e.g. {@code {"A":"trade_id","B":"amount"}}, wrapped via
+     * {@link FileHeaderLegend#wrapLegend} so it can be told apart from a data row while both
+     * travel through the same {@code PCollection<Row>}. {@code DataSourceRecordSinkTransform}
+     * unwraps it back to this plain content object before placing it in a page's
+     * {@code DataHeaders} array.
      */
     private static String headerLegendJson(List<String> letters, List<String> headerValues) {
-        StringBuilder sb = new StringBuilder("{\"").append(FileHeaderLegend.MARKER_KEY).append("\":true");
+        StringBuilder sb = new StringBuilder("{");
         for (int i = 0; i < letters.size(); i++) {
-            sb.append(",\"").append(letters.get(i)).append("\":");
+            if (i > 0) sb.append(",");
+            sb.append("\"").append(letters.get(i)).append("\":");
             String name = i < headerValues.size() ? headerValues.get(i) : null;
             if (name == null) {
                 sb.append("null");
@@ -217,7 +223,7 @@ public final class FileSourceAdapter {
             }
         }
         sb.append("}");
-        return sb.toString();
+        return FileHeaderLegend.wrapLegend(sb.toString());
     }
 
     private static String rowToJson(List<String> keys, List<String> values) {

@@ -180,30 +180,32 @@ source/ApiSourceAdapter.java          Pure HTTP adapter: auth, PAGE_NUMBER/CURSO
 source/ApiSourceTransform.java        Beam wrapper for ApiSourceAdapter. @Setup/@Teardown for HttpClient.
 source/FileSourceAdapter.java         CSV (Commons CSV) + Excel (Apache POI) from GCS bytes. Each data row is keyed by Excel-style
                                        column letters (A, B, ..., Z, AA, ...), never real header text. If the file has a header row,
-                                       the real names go into a separate header-legend JSON object (letter→name, tagged with
-                                       FileHeaderLegend.MARKER_KEY) instead of being used as row keys; no legend when there's no header.
-                                       Returns FileParseResult(rows, headerLegendJson).
+                                       the real names go into a separate header-legend content object (letter→name), wrapped via
+                                       FileHeaderLegend.wrapLegend() for transit, instead of being used as row keys; no legend when
+                                       there's no header. Returns FileParseResult(rows, headerLegendJson).
 source/FileSourceTransform.java       Beam wrapper for FileSourceAdapter. Emits one Row per data row, then one extra Row for the
-                                       header-legend JSON if present (same Schemas.RAW_JSON schema either way).
+                                       marker-wrapped header-legend JSON if present (same Schemas.RAW_JSON schema either way).
 
 sink/SinkRouter.java                  Stateless factory: route(data, options).
 sink/BigQuerySinkTransform.java       Writes PCollection<Row> to BQ. Returns WriteResult.
 sink/GcsSinkTransform.java            Writes PCollection<Row> as newline-delimited JSON.
 sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
 sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
-sink/DataSourceRecordSinkTransform.java  Collects all source rows globally, paginates at 250 rows/page, writes one DaRec row per page with row_da_json_tx = JSON array. Streaming inserts. Returns PCollection<Long> = total source rows (held until all inserts commit) for PostDownloadFinalizeTransform Wait.on(). DaRec gains page_no INT64.
-                                          PaginateAndBuildDoFn detects a FILE-source header-legend element (FileHeaderLegend.MARKER_KEY),
-                                          excludes it from totalRows/page-size accounting, and appends a copy of it to EVERY page built.
+sink/DataSourceRecordSinkTransform.java  Collects all source rows globally, paginates at 250 rows/page, writes one DaRec row per page with row_da_json_tx = flat JSON array (BQ/API, headerless FILE) or {"Data":[...],"DataHeaders":[...]} (FILE source with a header). Streaming inserts. Returns PCollection<Long> = total source rows (held until all inserts commit) for PostDownloadFinalizeTransform Wait.on(). DaRec gains page_no INT64.
+                                          PaginateAndBuildDoFn detects a FILE-source header-legend element (marker-wrapped via
+                                          FileHeaderLegend.wrapLegend), unwraps it, excludes it from totalRows/page-size accounting,
+                                          and appends a copy of it into EVERY page's DataHeaders array.
 
 checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
 checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME. Has String-tableRef constructor for in-worker use.
 checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_PROCESSING tables: RptRefer, RptDaMap, RptStageDa, RptOutput.
 checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
-                                                     stageFromDaRec excludes any FILE-source header-legend object (FileHeaderLegend) so it's
-                                                     never staged into a report's input data.
+                                                     stageFromDaRec unnests via FileHeaderLegend.dataArrayExpr() (handles both a plain array
+                                                     page and a FILE source's {"Data":[...],"DataHeaders":[...]} page), so any FILE-source
+                                                     header legend — in the separate DataHeaders array — is never staged into a report's input data.
 
 records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field), deleteRecords(daId).
-records/BigQueryDataSourceRecordAdapter.java  countRecords: CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) then COUNT(*) individual rows — not SUM(JSON_ARRAY_LENGTH(...)), which would double-count a FILE source's header-legend object (present on every page). sumField: same UNNEST then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)). Both exclude any header-legend object via FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT (no-op for BQ/API sources, which never produce one). deleteRecords: DELETE FROM DaRec WHERE da_id=@daId; best-effort (logs+swallows); used as-is for the --manualOverrun cleanup of an older, already-flushed run. For the data_transform_query replace (same-run, just-streamed rows), PostDownloadFinalizeTransform.replaceStoredRows() does NOT use this method — it runs DELETE+INSERT as a single atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with ROLLBACK on error) instead, since those rows can still be in BigQuery's streaming buffer (DML-ineligible despite being SELECT-visible) and two separate unverified statements could leave a partial delete (some pages gone, some not) or, worse, a successful delete followed by a failed insert with nothing to restore the originals.
+records/BigQueryDataSourceRecordAdapter.java  countRecords: CROSS JOIN UNNEST(FileHeaderLegend.dataArrayExpr(row_da_json_tx)) then COUNT(*) individual rows — the expression extracts just the row array whether a page is a flat array or a FILE source's {"Data":[...],"DataHeaders":[...]}, so the header legend (in the separate DataHeaders array) is never counted as a row. sumField: same UNNEST then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)) — the legend is likewise never reached. deleteRecords: DELETE FROM DaRec WHERE da_id=@daId; best-effort (logs+swallows); used as-is for the --manualOverrun cleanup of an older, already-flushed run. For the data_transform_query replace (same-run, just-streamed rows), PostDownloadFinalizeTransform.replaceStoredRows() does NOT use this method — it runs DELETE+INSERT as a single atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with ROLLBACK on error) instead, since those rows can still be in BigQuery's streaming buffer (DML-ineligible despite being SELECT-visible) and two separate unverified statements could leave a partial delete (some pages gone, some not) or, worse, a successful delete followed by a failed insert with nothing to restore the originals.
 
 email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
 email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
@@ -223,6 +225,11 @@ config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOUR
                                            data_transform_max_row_count into DataTransformConfig.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
+util/FileHeaderLegend.java            Helpers for the FILE-source column-letter storage convention: wrapLegend()/isMarkerWrapped()/
+                                       unwrapLegend() thread a header-legend content object through the same PCollection<Row> as
+                                       data rows; buildPage() builds a FILE-with-header DaRec page as {"Data":[...],"DataHeaders":[...]};
+                                       dataArrayExpr() is the one SQL expression every DaRec reader uses to extract just the row array,
+                                       whether a page is that shape or a plain array.
 ```
 
 ### beam-utils — stateless helpers, no pipeline graph code

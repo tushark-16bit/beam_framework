@@ -137,13 +137,15 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
 
     @Override
     public void stageFromDaRec(long mapId, long daId) {
-        // DaRec stores rows as paginated JSON arrays (up to 250 rows per DaRec row).
+        // DaRec stores rows as paginated JSON arrays (up to 250 rows per DaRec row) — or, for a
+        // FILE source with a header row, {"Data":[...],"DataHeaders":[...]}.
+        // FileHeaderLegend.dataArrayExpr() extracts just the row array either way, so
         // CROSS JOIN UNNEST un-nests each page into individual source-row JSON objects so that
         // RptStageDa.stage_da_json_tx holds exactly one source row per staging row —
         // consistent with what report transform SQL expects (JSON_VALUE(stage_da_json_tx, '$.field')).
         // stage_id is computed via ROW_NUMBER() to avoid per-row MAX lookups.
-        // Excludes any FILE-source header-legend object — it isn't a source row and must never
-        // be staged into a report's input data.
+        // The header legend, when present, lives in DataHeaders — structurally separate from
+        // Data, so it's never unnested and never staged into a report's input data.
         String sql = "INSERT INTO " + rptStageDaTable
             + " (stage_id, map_id, stage_da_json_tx, query_config_tx, load_dt, lst_updt_ts)"
             + " SELECT"
@@ -155,9 +157,8 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
             + "   CURRENT_DATE(),"
             + "   CURRENT_DATETIME()"
             + " FROM " + daRecTable
-            + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
-            + " WHERE da_id = @daId"
-            + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT;
+            + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("row_da_json_tx") + ") AS row_json"
+            + " WHERE da_id = @daId";
 
         runDml(QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("mapId",         QueryParameterValue.int64(mapId))

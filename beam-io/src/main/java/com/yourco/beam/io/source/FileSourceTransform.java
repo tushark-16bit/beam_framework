@@ -116,8 +116,9 @@ public final class FileSourceTransform extends PTransform<PBegin, PCollection<Ro
                 out.output(Row.withSchema(Schemas.RAW_JSON).addValue(json).build());
             }
             // Emitted as one extra element alongside the data rows — DataSourceRecordSinkTransform
-            // detects it (by its FileHeaderLegend.MARKER_KEY tag) and appends a copy to every
-            // DaRec page it builds for this source, rather than treating it as one more data row.
+            // detects it (marker-wrapped via FileHeaderLegend.wrapLegend), unwraps it, and builds
+            // each DaRec page for this source as {"Data":[...],"DataHeaders":[legend]} instead of
+            // a flat array, rather than treating it as one more data row.
             if (result.headerLegendJson() != null) {
                 out.output(Row.withSchema(Schemas.RAW_JSON).addValue(result.headerLegendJson()).build());
             }

@@ -1,30 +1,72 @@
 package com.yourco.beam.io.util;
 
+import java.util.List;
+
 /**
- * Constants for the FILE-source column-letter storage convention.
+ * Helpers for the FILE-source column-letter storage convention.
  *
  * <p>FILE (CSV/Excel) source rows are stored in {@code DaRec} keyed by Excel-style column
  * letters ({@code A}, {@code B}, ..., {@code Z}, {@code AA}, ...) rather than by real header
- * names — see {@code FileSourceAdapter}. Every {@code DaRec} page for such a source additionally
- * carries one <em>header-legend</em> object mapping each letter to its real column name, tagged
- * with {@link #MARKER_KEY} so it can be told apart from real data rows.
+ * names — see {@code FileSourceAdapter}. When the file has a header row, every DaRec page for
+ * that source is written as a single JSON object instead of a flat array:
+ * {@code {"Data":[{"A":"T1001",...},...],"DataHeaders":[{"A":"trade_id",...}]}} — {@code Data}
+ * holds the page's rows exactly as before, {@code DataHeaders} holds one object mapping each
+ * letter to its real header name. Headerless FILE pages, and all BQ/API pages (which never have
+ * letter-keyed columns or a legend), keep the original flat {@code [{...},{...},...]} shape.
  *
- * <p>Every reader that unnests {@code row_da_json_tx} into individual rows — row counts, BnC
- * sums, {@code data_transform_query}'s {@code {data}} token, REPORT_PROCESSING staging — must
- * exclude legend objects using {@link #EXCLUDE_LEGEND_SQL_FRAGMENT}. For BQ/API sources, which
- * never produce a legend row, this filter is always true and has no effect.
+ * <p>{@link #dataArrayExpr} extracts the row array from {@code row_da_json_tx} regardless of
+ * which of the two shapes a given page uses, so every DaRec reader (row counts, BnC sums,
+ * {@code data_transform_query}'s {@code {data}} token, REPORT_PROCESSING staging) can use one
+ * SQL pattern uniformly — no per-source-type branching, and no explicit legend exclusion, since
+ * {@code DataHeaders} is structurally separate from {@code Data} and never gets unnested with it.
  */
 public final class FileHeaderLegend {
 
     private FileHeaderLegend() {}
 
-    /** Marker key present (and {@code true}) only on a header-legend object, never on a data row. */
-    public static final String MARKER_KEY = "__header_map__";
+    /**
+     * Wraps a header-legend content object so it can be told apart from a real data row while
+     * both travel together through the same {@code PCollection<Row>} (single {@code raw_json}
+     * STRING field — see {@code FileSourceTransform}), before {@code DataSourceRecordSinkTransform}
+     * pulls it out and moves its content into a page's {@code DataHeaders} array.
+     */
+    private static final String WRAPPER_PREFIX = "{\"__header_map__\":";
+    private static final String WRAPPER_SUFFIX = "}";
+
+    /** Wraps a legend content object, e.g. {@code {"A":"trade_id",...}}, for Row-level transit. */
+    public static String wrapLegend(String legendContentJson) {
+        return WRAPPER_PREFIX + legendContentJson + WRAPPER_SUFFIX;
+    }
+
+    /** True if {@code json} is a marker-wrapped header-legend payload, not a real data row. */
+    public static boolean isMarkerWrapped(String json) {
+        return json.startsWith(WRAPPER_PREFIX);
+    }
+
+    /** Unwraps a marker-wrapped legend payload back to its plain content object. */
+    public static String unwrapLegend(String markerWrappedJson) {
+        return markerWrappedJson.substring(
+            WRAPPER_PREFIX.length(), markerWrappedJson.length() - WRAPPER_SUFFIX.length());
+    }
 
     /**
-     * SQL fragment excluding header-legend objects from an already-unnested {@code row_json}
-     * column. Append with {@code AND} after the usual {@code da_id} filter.
+     * Builds a FILE-sourced DaRec page with a header legend:
+     * {@code {"Data":[rows...],"DataHeaders":[legendContentJson]}}.
      */
-    public static final String EXCLUDE_LEGEND_SQL_FRAGMENT =
-        "JSON_VALUE(row_json, '$." + MARKER_KEY + "') IS NULL";
+    public static String buildPage(List<String> pageRowsJson, String legendContentJson) {
+        return "{\"Data\":[" + String.join(",", pageRowsJson) + "],"
+             + "\"DataHeaders\":[" + legendContentJson + "]}";
+    }
+
+    /**
+     * SQL expression extracting the array of individual source rows from a DaRec JSON column,
+     * regardless of shape: {@code {"Data":[...],"DataHeaders":[...]}} (FILE with header) or a
+     * flat {@code [...]} array (everything else). {@code JSON_EXTRACT(..., '$.Data')} returns
+     * NULL when the root is already an array, so {@code IFNULL} falls back to extracting it
+     * directly — one expression covers both shapes without needing to know the source type.
+     */
+    public static String dataArrayExpr(String jsonColumnExpr) {
+        return "IFNULL(JSON_EXTRACT_ARRAY(JSON_EXTRACT(" + jsonColumnExpr + ", '$.Data')), "
+             + "JSON_EXTRACT_ARRAY(" + jsonColumnExpr + "))";
+    }
 }

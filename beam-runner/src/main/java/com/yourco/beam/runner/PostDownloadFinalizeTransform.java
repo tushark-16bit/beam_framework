@@ -350,18 +350,20 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
 
         /**
          * Subquery reunifying every paginated DaRec page for this run into one flat rowset of
-         * JSON row strings — the same {@code CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(...))} pattern
-         * used by {@code BigQueryDataSourceRecordAdapter.sumField()} and
-         * {@code BigQueryReportCheckpointAdapter.stageFromDaRec()}. Each row is a JSON object
-         * string; the operator's query extracts fields with {@code JSON_VALUE(row_json, '$.field')}.
-         * Excludes any FILE-source header-legend object so operators never need to filter it out
-         * themselves in {@code data_transform_query}.
+         * JSON row strings — the same {@link FileHeaderLegend#dataArrayExpr} pattern used by
+         * {@code BigQueryDataSourceRecordAdapter.sumField()} and
+         * {@code BigQueryReportCheckpointAdapter.stageFromDaRec()}, which extracts just the row
+         * array whether a page is a flat JSON array or (FILE source with a header)
+         * {@code {"Data":[...],"DataHeaders":[...]}}. Each row is a JSON object string; the
+         * operator's query extracts fields with {@code JSON_VALUE(row_json, '$.field')}. The
+         * header legend, when present, lives in the separate {@code DataHeaders} array and is
+         * never unnested here, so operators never need to filter it out themselves in
+         * {@code data_transform_query}.
          */
         private String dataSubquery() {
             return "(SELECT row_json FROM " + daRecTableRef
-                + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
-                + " WHERE da_id = " + daId
-                + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT + ")";
+                + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("row_da_json_tx") + ") AS row_json"
+                + " WHERE da_id = " + daId + ")";
         }
 
         /**
