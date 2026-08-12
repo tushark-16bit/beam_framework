@@ -20,7 +20,6 @@ import java.io.StringReader;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -49,6 +48,15 @@ import java.util.List;
  * <p>Downstream transforms parse each data row's JSON from the standard
  * {@link com.yourco.beam.model.Schemas#RAW_JSON} wire type, same as before.
  *
+ * <h2>Where reading starts, and column width</h2>
+ * {@link FileSourceConfig#firstRow} (1-based, default 1) skips any leading rows before real
+ * content starts; the row landing there becomes the header row or the first data row depending
+ * on {@link FileSourceConfig#hasHeader}. Column width — how many letters get generated, and how
+ * wide every row is padded/truncated to — is {@link FileSourceConfig#lastColumn} when set
+ * (via {@link #columnIndexFromLetter}), otherwise the widest row seen across the header and all
+ * data rows, so a data row wider than the header never loses columns just for lacking a header
+ * name.
+ *
  * <h2>Path resolution</h2>
  * {@link #resolvePath} substitutes placeholders in prefix/suffix:
  * <ul>
@@ -74,8 +82,13 @@ public final class FileSourceAdapter {
     /**
      * Parses a CSV file from raw bytes.
      *
+     * <p>Rows before {@link FileSourceConfig#firstRow} are skipped entirely. The column width
+     * used for both the header legend and every data row is {@link FileSourceConfig#lastColumn}
+     * when set, otherwise the widest row seen (header or data row) — so a data row with more
+     * columns than the header is never truncated just because the header is narrower.
+     *
      * @param fileBytes raw file content
-     * @param config    file configuration (delimiter, hasHeader, etc.)
+     * @param config    file configuration (delimiter, hasHeader, firstRow, lastColumn, etc.)
      * @return data rows keyed by column letter, plus the header legend if the file has headers
      */
     public static FileParseResult parseCsv(byte[] fileBytes, FileSourceConfig config) {
@@ -87,25 +100,34 @@ public final class FileSourceAdapter {
             .build();
 
         try (CSVParser parser = format.parse(new StringReader(content))) {
-            List<CSVRecord> records = parser.getRecords();
+            List<CSVRecord> allRecords = parser.getRecords();
+            int skip = Math.min(config.firstRow - 1, allRecords.size());
+            List<CSVRecord> records = allRecords.subList(skip, allRecords.size());
             if (records.isEmpty()) return new FileParseResult(List.of(), null);
 
-            int cols = records.get(0).size();
-            List<String> letters = columnLetters(cols);
-            String legendJson = null;
-            int dataStartIndex;
-            if (config.hasHeader) {
-                legendJson = headerLegendJson(letters, records.get(0).toList());
-                dataStartIndex = 1;
-            } else {
-                dataStartIndex = 0;
+            int dataStartIndex = config.hasHeader ? 1 : 0;
+            int headerWidth    = config.hasHeader ? records.get(0).size() : 0;
+
+            int maxDataWidth = 0;
+            for (int i = dataStartIndex; i < records.size(); i++) {
+                maxDataWidth = Math.max(maxDataWidth, records.get(i).size());
             }
+
+            int columnCount = config.lastColumn != null
+                ? columnIndexFromLetter(config.lastColumn) + 1
+                : Math.max(headerWidth, maxDataWidth);
+            List<String> letters = columnLetters(columnCount);
+
+            String legendJson = config.hasHeader
+                ? headerLegendJson(letters, records.get(0).toList()) : null;
 
             List<String> jsonRows = new ArrayList<>(records.size() - dataStartIndex);
             for (int i = dataStartIndex; i < records.size(); i++) {
                 jsonRows.add(rowToJson(letters, records.get(i).toList()));
             }
-            LOG.info("Parsed {} CSV rows ({} header)", jsonRows.size(), config.hasHeader ? "with" : "without");
+            LOG.info("Parsed {} CSV rows ({} header, first_row={}, columns={})",
+                     jsonRows.size(), config.hasHeader ? "with" : "without",
+                     config.firstRow, columnCount);
             return new FileParseResult(jsonRows, legendJson);
         } catch (IOException e) {
             throw new FileSourceException("Failed to parse CSV", e);
@@ -115,31 +137,60 @@ public final class FileSourceAdapter {
     /**
      * Parses an Excel (.xlsx) file from raw bytes.
      *
+     * <p>Rows before {@link FileSourceConfig#firstRow} are skipped entirely. The column width
+     * used for both the header legend and every data row is {@link FileSourceConfig#lastColumn}
+     * when set, otherwise the widest row seen (header or data row) — so a data row with more
+     * columns than the header is never truncated just because the header is narrower.
+     *
      * @param fileBytes raw XLSX file content
-     * @param config    file configuration (sheetIndex, hasHeader)
+     * @param config    file configuration (sheetIndex, hasHeader, firstRow, lastColumn)
      * @return data rows keyed by column letter, plus the header legend if the file has headers
      */
     public static FileParseResult parseExcel(byte[] fileBytes, FileSourceConfig config) {
         try (Workbook workbook = new XSSFWorkbook(new ByteArrayInputStream(fileBytes))) {
             Sheet sheet = workbook.getSheetAt(config.sheetIndex);
-            Iterator<Row> rowIterator = sheet.iterator();
+            if (sheet.getPhysicalNumberOfRows() == 0) return new FileParseResult(List.of(), null);
 
-            if (!rowIterator.hasNext()) return new FileParseResult(List.of(), null);
+            int firstRowIndex = config.firstRow - 1; // 0-based
+            int lastRowIndex  = sheet.getLastRowNum(); // 0-based, inclusive
+            if (firstRowIndex > lastRowIndex) return new FileParseResult(List.of(), null);
 
-            int cols = sheet.getRow(0).getLastCellNum();
-            List<String> letters = columnLetters(cols);
+            int headerRowIdx = config.hasHeader ? firstRowIndex : -1;
+            int dataStartIdx = config.hasHeader ? firstRowIndex + 1 : firstRowIndex;
+
+            int headerWidth = 0;
+            if (headerRowIdx >= 0) {
+                Row headerRow = sheet.getRow(headerRowIdx);
+                headerWidth = headerRow != null ? headerRow.getLastCellNum() : 0;
+            }
+
+            int maxDataWidth = 0;
+            for (int r = dataStartIdx; r <= lastRowIndex; r++) {
+                Row row = sheet.getRow(r);
+                if (row != null) maxDataWidth = Math.max(maxDataWidth, row.getLastCellNum());
+            }
+
+            int columnCount = config.lastColumn != null
+                ? columnIndexFromLetter(config.lastColumn) + 1
+                : Math.max(headerWidth, maxDataWidth);
+            List<String> letters = columnLetters(columnCount);
+
             String legendJson = null;
-            if (config.hasHeader) {
-                legendJson = headerLegendJson(letters, excelRowToStrings(rowIterator.next()));
+            if (headerRowIdx >= 0) {
+                Row headerRow = sheet.getRow(headerRowIdx);
+                legendJson = headerRow != null
+                    ? headerLegendJson(letters, excelRowToStrings(headerRow)) : null;
             }
 
             List<String> jsonRows = new ArrayList<>();
-            while (rowIterator.hasNext()) {
-                List<String> values = excelRowToStrings(rowIterator.next());
-                jsonRows.add(rowToJson(letters, values));
+            for (int r = dataStartIdx; r <= lastRowIndex; r++) {
+                Row row = sheet.getRow(r);
+                if (row == null) continue;
+                jsonRows.add(rowToJson(letters, excelRowToStrings(row)));
             }
-            LOG.info("Parsed {} Excel rows from sheet {} ({})",
-                     jsonRows.size(), config.sheetIndex, config.hasHeader ? "with header" : "no header");
+            LOG.info("Parsed {} Excel rows from sheet {} ({}, first_row={}, columns={})",
+                     jsonRows.size(), config.sheetIndex, config.hasHeader ? "with header" : "no header",
+                     config.firstRow, columnCount);
             return new FileParseResult(jsonRows, legendJson);
         } catch (IOException e) {
             throw new FileSourceException("Failed to parse Excel file", e);
@@ -200,6 +251,29 @@ public final class FileSourceAdapter {
             n = (n - 1) / 26;
         }
         return sb.toString();
+    }
+
+    /**
+     * Inverse of {@link #columnLetter}: converts an Excel column letter (e.g. {@code "A"},
+     * {@code "T"}, {@code "AB"}) to its 0-based column index. Used to resolve
+     * {@link FileSourceConfig#lastColumn} into a fixed column count.
+     *
+     * @throws IllegalArgumentException if {@code letter} is empty or contains anything other
+     *                                   than A-Z (after {@link FileSourceConfig} upper-cases it)
+     */
+    static int columnIndexFromLetter(String letter) {
+        if (letter == null || letter.isEmpty()) {
+            throw new IllegalArgumentException("last_column must not be empty");
+        }
+        int result = 0;
+        for (char c : letter.toCharArray()) {
+            if (c < 'A' || c > 'Z') {
+                throw new IllegalArgumentException(
+                    "last_column must contain only letters A-Z (Excel column notation), got: " + letter);
+            }
+            result = result * 26 + (c - 'A' + 1);
+        }
+        return result - 1;
     }
 
     /**

@@ -75,6 +75,8 @@ import java.util.Map;
  *   "file_delimiter":           ",",
  *   "file_has_header":          "true",
  *   "file_sheet_index":         "0",
+ *   "file_first_row":           "1",
+ *   "file_last_column":         "T",
  *   // Transforms + validation
  *   "source_transforms_json":   "[{\"type\":\"GROUP_BY\", ...}]",
  *   "min_row_count":            "1",
@@ -247,7 +249,9 @@ public final class BigQuerySourceConfigRepository {
             p.get("file_suffix"),
             p.get("file_delimiter"),
             parseBool(p.get("file_has_header"), false),
-            parseIntOrDefault(p.get("file_sheet_index"), 0)
+            parseIntOrDefault(p.get("file_sheet_index"), 0),
+            parseIntOrDefault(p.get("file_first_row"), 1),
+            p.get("file_last_column")
         );
     }
 

@@ -24,6 +24,13 @@ io/source/
                                 object (letter → real name), wrapped via FileHeaderLegend.wrapLegend() for
                                 transit rather than used as row keys; no legend is produced when the file has
                                 no header row. parseCsv/parseExcel return a FileParseResult(rows, headerLegendJson).
+                                FileSourceConfig.firstRow (1-based, default 1) skips leading rows before real
+                                content starts — the row at that position becomes the header row (hasHeader=true)
+                                or the first data row (hasHeader=false). Column width for both the header legend
+                                and every data row is FileSourceConfig.lastColumn (explicit Excel-style letter)
+                                when set, otherwise auto-detected as the widest row seen (header or data) — so a
+                                data row with more columns than the header is never truncated. columnIndexFromLetter()
+                                is the inverse of columnLetter(), used to resolve lastColumn to a column count.
     FileSourceTransform       — Beam wrapper for FileSourceAdapter (downloads GCS bytes, parses). Emits one
                                 Row per data row, then (if present) one extra Row carrying the marker-wrapped
                                 header-legend JSON — both under the same Schemas.RAW_JSON schema.
@@ -259,6 +266,20 @@ same as BQ/API.
 **Why column letters instead of header text**: storage never depends on header text being
 stable, unique, spelled consistently, or even present. The same file re-uploaded with a
 reworded header still lands in the same letter slots.
+
+**Where reading starts — `file_first_row`.** By default the very first row of the file is used.
+Setting `file_first_row` (1-based) skips everything before it — useful when a file has leading
+title/metadata rows before the real table begins. The row landing at `file_first_row` becomes the
+header row when `file_has_header=true`, or the first data row otherwise.
+
+**Column width — auto-detected, or fixed via `file_last_column`.** The header row and the data
+rows are not required to have the same number of columns. If the header row is narrower than the
+data (e.g. 5 header cells but data rows carrying 20 values), every data column is still stored —
+column width is computed as the widest row seen (header or data), never just the header's width,
+so a column with no header name simply gets a `null` entry in `DataHeaders` rather than having its
+data silently dropped. Setting `file_last_column` (an Excel-style letter, e.g. `"T"`) overrides
+auto-detection with a fixed width instead: columns beyond it are intentionally dropped from both
+the legend and every data row, even if the file itself extends further.
 
 **Consequence for config that references FILE-sourced fields**: `bnc_rules_json`,
 `data_transform_query`, and `source_transforms_json` (`GROUP_BY`/`SORT_BY`/`LOOKUP`) written

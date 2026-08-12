@@ -143,7 +143,9 @@ model/DataSourceRecord.java           Record row: recId (UUID), daId, rowDaJsonT
 -- DATA_SOURCE_DOWNLOAD models --
 model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config.
 model/ApiSourceConfig.java            REST API config: endpoint, auth, pagination.
-model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header.
+model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header. firstRow (1-based, default 1)
+                                       skips leading rows before the header/first data row. lastColumn (Excel-style letter,
+                                       optional) fixes column width; unset auto-detects from the widest row seen.
 model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map, schema (List<SourceSchemaField>, optional, from bq_schema_json).
 model/SourceSchemaField.java          One declared column (columnName + bqType) for BqFetchConfig.schema. bqType is a real BQ SQL type name (STRING/INT64/FLOAT64/BOOLEAN/BYTES/DATE/DATETIME/TIME/TIMESTAMP/NUMERIC/BIGNUMERIC).
 model/QueryConfig.java                Query template + paramMappings for token injection.
@@ -183,6 +185,11 @@ source/FileSourceAdapter.java         CSV (Commons CSV) + Excel (Apache POI) fro
                                        the real names go into a separate header-legend content object (letter→name), wrapped via
                                        FileHeaderLegend.wrapLegend() for transit, instead of being used as row keys; no legend when
                                        there's no header. Returns FileParseResult(rows, headerLegendJson).
+                                       FileSourceConfig.firstRow skips leading rows before the header/first data row (1-based).
+                                       Column width (letters generated, and row padding/truncation) is FileSourceConfig.lastColumn
+                                       when set, else auto-detected as the widest row seen (header or data) — a data row wider than
+                                       the header is never truncated for lacking a header name. columnIndexFromLetter() is the
+                                       inverse of columnLetter(), used to resolve lastColumn.
 source/FileSourceTransform.java       Beam wrapper for FileSourceAdapter. Emits one Row per data row, then one extra Row for the
                                        marker-wrapped header-legend JSON if present (same Schemas.RAW_JSON schema either way).
 
