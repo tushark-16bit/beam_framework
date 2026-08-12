@@ -1,6 +1,7 @@
 package com.yourco.beam.io.sink;
 
 import com.google.api.services.bigquery.model.TableRow;
+import com.yourco.beam.io.util.FileHeaderLegend;
 import com.yourco.beam.io.util.JsonUtils;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
@@ -21,6 +22,8 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -60,6 +63,14 @@ import java.util.UUID;
  *   lst_updt_ts    TIMESTAMP NOT NULL
  * ) PARTITION BY load_dt;
  * }</pre>
+ *
+ * <h2>FILE-source header legend</h2>
+ * A FILE source with a header row (see {@code FileSourceAdapter}) emits one extra element
+ * alongside its data rows: a header-legend object tagged with
+ * {@link FileHeaderLegend#MARKER_KEY}. {@link PaginateAndBuildDoFn} detects it, excludes it from
+ * {@code totalRows} and from page-size accounting, and appends a copy of it to <em>every</em>
+ * page it builds — so each page is independently self-describing. It never counts as a source
+ * row; every DaRec reader must exclude it via {@link FileHeaderLegend#EXCLUDE_LEGEND_SQL_FRAGMENT}.
  */
 public final class DataSourceRecordSinkTransform extends PTransform<PCollection<Row>, PCollection<Long>> {
 
@@ -151,6 +162,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
             extends DoFn<KV<String, Iterable<String>>, TableRow> {
 
         private static final long serialVersionUID = 1L;
+        private static final Logger LOG = LoggerFactory.getLogger(PaginateAndBuildDoFn.class);
 
         /** Maximum source rows stored per DaRec row. */
         static final int PAGE_SIZE = 250;
@@ -175,10 +187,23 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
                 @Element KV<String, Iterable<String>> element,
                 MultiOutputReceiver out) {
 
-            // Materialize all JSON strings — required to paginate.
+            // Materialize all JSON strings — required to paginate. Pull out the FILE-source
+            // header legend (if any) rather than treating it as one more data row.
             List<String> allJsonRows = new ArrayList<>();
+            String headerLegendJson = null;
             for (String json : element.getValue()) {
-                allJsonRows.add(json);
+                if (isHeaderLegend(json)) {
+                    if (headerLegendJson == null) {
+                        headerLegendJson = json;
+                    } else {
+                        // Defensive: one FILE source emits at most one legend. Never expected in
+                        // practice, but don't silently drop data if it somehow happens.
+                        LOG.warn("Multiple header-legend rows found for da_id={} — keeping the "
+                                 + "first, ignoring the rest", daId.get());
+                    }
+                } else {
+                    allJsonRows.add(json);
+                }
             }
 
             long totalRows = allJsonRows.size();
@@ -188,8 +213,12 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
                 int end = Math.min(start + PAGE_SIZE, allJsonRows.size());
                 List<String> pageSlice = allJsonRows.subList(start, end);
 
-                // Build compact JSON array for this page: [{...},{...},...]
-                String pageJson = "[" + String.join(",", pageSlice) + "]";
+                // Build compact JSON array for this page: [{...},{...},...]. The header legend
+                // (FILE sources with a header row only) is appended to EVERY page so each page is
+                // independently self-describing — never counted as a source row.
+                String pageJson = headerLegendJson != null
+                    ? "[" + String.join(",", pageSlice) + "," + headerLegendJson + "]"
+                    : "[" + String.join(",", pageSlice) + "]";
 
                 out.get(PAGES_TAG).output(new TableRow()
                     .set("rec_id",         UUID.randomUUID().toString())
@@ -203,7 +232,13 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
             }
 
             // Emit total source row count exactly once (one element, not one per page).
+            // Excludes the header legend — it isn't a source row.
             out.get(TOTAL_ROWS_TAG).output(totalRows);
+        }
+
+        /** True if {@code json} is a FILE-source header-legend object, not a real data row. */
+        private static boolean isHeaderLegend(String json) {
+            return json.contains("\"" + FileHeaderLegend.MARKER_KEY + "\":true");
         }
     }
 }

@@ -5,6 +5,7 @@ import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
+import com.yourco.beam.io.util.FileHeaderLegend;
 import com.yourco.beam.model.ReportCheckpoint;
 import com.yourco.beam.options.FrameworkOptions;
 import org.slf4j.Logger;
@@ -141,6 +142,8 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
         // RptStageDa.stage_da_json_tx holds exactly one source row per staging row —
         // consistent with what report transform SQL expects (JSON_VALUE(stage_da_json_tx, '$.field')).
         // stage_id is computed via ROW_NUMBER() to avoid per-row MAX lookups.
+        // Excludes any FILE-source header-legend object — it isn't a source row and must never
+        // be staged into a report's input data.
         String sql = "INSERT INTO " + rptStageDaTable
             + " (stage_id, map_id, stage_da_json_tx, query_config_tx, load_dt, lst_updt_ts)"
             + " SELECT"
@@ -153,7 +156,8 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
             + "   CURRENT_DATETIME()"
             + " FROM " + daRecTable
             + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
-            + " WHERE da_id = @daId";
+            + " WHERE da_id = @daId"
+            + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT;
 
         runDml(QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("mapId",         QueryParameterValue.int64(mapId))

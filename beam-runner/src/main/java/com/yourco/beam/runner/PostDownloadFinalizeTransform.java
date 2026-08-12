@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.records.BigQueryDataSourceRecordAdapter;
 import com.yourco.beam.io.report.BigQueryJobService;
+import com.yourco.beam.io.util.FileHeaderLegend;
 import com.yourco.beam.model.BncRule;
 import com.yourco.beam.model.DataSourceCheckpoint;
 import com.yourco.beam.model.DataTransformConfig;
@@ -353,11 +354,14 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
          * used by {@code BigQueryDataSourceRecordAdapter.sumField()} and
          * {@code BigQueryReportCheckpointAdapter.stageFromDaRec()}. Each row is a JSON object
          * string; the operator's query extracts fields with {@code JSON_VALUE(row_json, '$.field')}.
+         * Excludes any FILE-source header-legend object so operators never need to filter it out
+         * themselves in {@code data_transform_query}.
          */
         private String dataSubquery() {
             return "(SELECT row_json FROM " + daRecTableRef
                 + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
-                + " WHERE da_id = " + daId + ")";
+                + " WHERE da_id = " + daId
+                + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT + ")";
         }
 
         /**

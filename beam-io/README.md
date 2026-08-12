@@ -17,8 +17,17 @@ io/source/
     PubSubSourceTransform     — reads from a Pub/Sub subscription (streaming)
     ApiSourceAdapter          — pure HTTP adapter: auth, pagination (PAGE_NUMBER/CURSOR/OFFSET)
     ApiSourceTransform        — Beam wrapper for ApiSourceAdapter (@Setup/@Teardown for HttpClient)
-    FileSourceAdapter         — pure file adapter: CSV (Commons CSV) + Excel (Apache POI)
-    FileSourceTransform       — Beam wrapper for FileSourceAdapter (downloads GCS bytes, parses)
+    FileSourceAdapter         — pure file adapter: CSV (Commons CSV) + Excel (Apache POI). Each data row is
+                                keyed by Excel-style column letters (A, B, ..., Z, AA, AB, ...) in file column
+                                order — see columnLetter() — never by real header text. When the file has a
+                                header row, the real names are captured separately as a header-legend JSON
+                                object (letter → real name, tagged with FileHeaderLegend.MARKER_KEY) rather
+                                than used as row keys; no legend is produced when the file has no header row.
+                                parseCsv/parseExcel return a FileParseResult(rows, headerLegendJson).
+    FileSourceTransform       — Beam wrapper for FileSourceAdapter (downloads GCS bytes, parses). Emits one
+                                Row per data row, then (if present) one extra Row carrying the header-legend
+                                JSON — both under the same Schemas.RAW_JSON schema. DataSourceRecordSinkTransform
+                                detects the legend by its marker tag and handles it specially (see io/sink/).
 
 io/sink/
     SinkRouter                — factory: picks the right sink from --sinkType
@@ -35,13 +44,18 @@ io/checkpoint/
     BigQueryReportCheckpointAdapter     — BQ DML impl for all 4 report tables. All timestamps DATETIME. Stage_id generated via MAX+ROW_NUMBER() OVER().
                                           stageFromDaRec uses CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to un-nest
                                           DaRec pages into individual source-row JSON objects in stage_da_json_tx.
+                                          Excludes any FILE-source header-legend object (FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT)
+                                          so it's never staged into a report's input data.
 
 io/records/
     DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field), deleteRecords(daId)
-    BigQueryDataSourceRecordAdapter — row_da_json_tx is a JSON array per page; countRecords uses
-                                      SUM(JSON_ARRAY_LENGTH(...)); sumField unnests with
-                                      CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(...)) AS row_json then
-                                      SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)).
+    BigQueryDataSourceRecordAdapter — row_da_json_tx is a JSON array per page; countRecords unnests and
+                                      COUNT(*)s individual rows (not SUM(JSON_ARRAY_LENGTH(...)) — that would
+                                      double-count a FILE source's header-legend object, present on every page).
+                                      sumField unnests with CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(...)) AS row_json
+                                      then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)). Both exclude
+                                      any header-legend object via FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT —
+                                      a no-op for BQ/API sources, which never produce one.
                                       deleteRecords(daId) — DELETE FROM DaRec WHERE da_id=@daId; best-effort at
                                       this level (logs and swallows failures). Used directly for the
                                       --manualOverrun cleanup of an older, already-flushed run (safe to be
@@ -62,9 +76,17 @@ io/sink/
                                       Returns PCollection<Long> = total source rows (not page count),
                                       held until all inserts complete, for PostDownloadFinalizeTransform
                                       to Wait.on(). DaRec schema gains a page_no INT64 column.
+                                      PaginateAndBuildDoFn detects a FILE-source header-legend element
+                                      (FileHeaderLegend.MARKER_KEY) among the incoming rows, excludes it
+                                      from totalRows and page-size accounting, and appends a copy of it
+                                      to EVERY page it builds — so each page is independently self-describing.
 
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer
+    FileHeaderLegend           — constants for the FILE-source column-letter storage convention: MARKER_KEY
+                                 ("__header_map__", tags a header-legend object) and EXCLUDE_LEGEND_SQL_FRAGMENT
+                                 (a JSON_VALUE(...) IS NULL check every DaRec reader must AND into its WHERE
+                                 clause). No-op filter for BQ/API sources, which never produce a legend row.
 
 io/config/
     BigQuerySourceConfigRepository — reads source connector config from parameter_store (parameters_val_json).
@@ -190,6 +212,41 @@ Files land at `gs://bucket/dlq/my-pipeline/XXXXX.json` and can be inspected with
 ```bash
 gsutil cat "gs://bucket/dlq/my-pipeline/*.json" | jq .
 ```
+
+---
+
+## FILE-source storage convention — column letters, not header names
+
+CSV/Excel rows are stored in `DaRec` keyed by Excel-style column letters (`A`, `B`, ..., `Z`,
+`AA`, `AB`, ...) in file column order, never by the file's own header text. If the file has a
+header row (`file_has_header=true`), the real header names are captured separately as one
+**header-legend** JSON object — appended to **every** `DaRec` page for that source — mapping
+each letter to its real name, tagged so readers can tell it apart from a data row:
+
+```json
+// one data row (row_da_json_tx array element)
+{"A": "T1001", "B": "500.00", "C": "2024-01-15"}
+
+// the header-legend object — appears once per page, alongside the data rows
+{"__header_map__": true, "A": "trade_id", "B": "amount", "C": "trade_date"}
+```
+
+A file with no header row produces no legend at all — there's no real name to record.
+
+**Why column letters instead of header text**: storage never depends on header text being
+stable, unique, spelled consistently, or even present. The same file re-uploaded with a
+reworded header still lands in the same letter slots.
+
+**Consequence for config that references FILE-sourced fields**: `bnc_rules_json`,
+`data_transform_query`, and `source_transforms_json` (`GROUP_BY`/`SORT_BY`/`LOOKUP`) written
+against a FILE source's parsed fields must reference the **column letter** (`A`, `B`, ...), not
+the original header name — look up the mapping via the header-legend object, or check the
+source file's column order directly.
+
+**Reading these rows**: every `DaRec` reader that unnests `row_da_json_tx` into individual
+rows — `countRecords()`, `sumField()`, `data_transform_query`'s `{data}` token, REPORT_PROCESSING
+staging — excludes the header-legend object via `FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT`.
+This filter is always true (a no-op) for BQ/API sources, which never produce a legend row.
 
 ---
 

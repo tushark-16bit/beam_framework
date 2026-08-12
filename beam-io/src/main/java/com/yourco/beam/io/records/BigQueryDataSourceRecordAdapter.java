@@ -5,6 +5,7 @@ import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
+import com.yourco.beam.io.util.FileHeaderLegend;
 import com.yourco.beam.options.FrameworkOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,10 +54,16 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
 
     @Override
     public long countRecords(long daId) {
-        // row_da_json_tx is a JSON array of source rows per DaRec page.
-        // JSON_ARRAY_LENGTH sums element counts across all pages to return total source rows.
-        String sql = "SELECT IFNULL(SUM(JSON_ARRAY_LENGTH(row_da_json_tx)), 0) AS cnt"
-            + " FROM " + table + " WHERE da_id = @daId";
+        // row_da_json_tx is a JSON array of source rows per DaRec page. Unnest and COUNT(*)
+        // individual rows rather than SUM(JSON_ARRAY_LENGTH(...)) — a FILE source's header-legend
+        // object (present on every page once a source has one) inflates array length without
+        // being a real source row, so it must be excluded explicitly. No-op for BQ/API sources,
+        // which never produce a legend row.
+        String sql = "SELECT COUNT(*) AS cnt"
+            + " FROM " + table
+            + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
+            + " WHERE da_id = @daId"
+            + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT;
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("daId", QueryParameterValue.int64(daId))
             .setUseLegacySql(false)
@@ -95,10 +102,14 @@ public final class BigQueryDataSourceRecordAdapter implements DataSourceRecordAd
     @Override
     public double sumField(long daId, String field) {
         // Unnest the JSON array in each page row, then extract and sum the target field.
+        // Excludes any FILE-source header-legend object — without this, a BnC rule for a
+        // lettered field (e.g. "A") would try to CAST that field's legend value (a header name
+        // string) to FLOAT64 and throw, since the legend uses the same letter keys as data rows.
         String sql = "SELECT SUM(CAST(JSON_VALUE(row_json, @jsonPath) AS FLOAT64)) AS total"
             + " FROM " + table
             + " CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json"
-            + " WHERE da_id = @daId";
+            + " WHERE da_id = @daId"
+            + "   AND " + FileHeaderLegend.EXCLUDE_LEGEND_SQL_FRAGMENT;
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("jsonPath", QueryParameterValue.string("$." + field))
             .addNamedParameter("daId",     QueryParameterValue.int64(daId))
