@@ -113,9 +113,7 @@ public final class FileSourceAdapter {
                 maxDataWidth = Math.max(maxDataWidth, records.get(i).size());
             }
 
-            int columnCount = config.lastColumn != null
-                ? columnIndexFromLetter(config.lastColumn) + 1
-                : Math.max(headerWidth, maxDataWidth);
+            int columnCount = resolveColumnCount(config, headerWidth, maxDataWidth);
             List<String> letters = columnLetters(columnCount);
 
             String legendJson = config.hasHeader
@@ -170,9 +168,7 @@ public final class FileSourceAdapter {
                 if (row != null) maxDataWidth = Math.max(maxDataWidth, row.getLastCellNum());
             }
 
-            int columnCount = config.lastColumn != null
-                ? columnIndexFromLetter(config.lastColumn) + 1
-                : Math.max(headerWidth, maxDataWidth);
+            int columnCount = resolveColumnCount(config, headerWidth, maxDataWidth);
             List<String> letters = columnLetters(columnCount);
 
             String legendJson = null;
@@ -274,6 +270,19 @@ public final class FileSourceAdapter {
             result = result * 26 + (c - 'A' + 1);
         }
         return result - 1;
+    }
+
+    /**
+     * Resolves the column width shared by both {@link #parseCsv} and {@link #parseExcel}:
+     * {@link FileSourceConfig#lastColumn} when set (an explicit, intentional cap — columns
+     * beyond it are dropped even if the file extends further), otherwise the widest row seen
+     * across the header and every data row, so a data row is never truncated just because the
+     * header happens to be narrower.
+     */
+    private static int resolveColumnCount(FileSourceConfig config, int headerWidth, int maxDataWidth) {
+        return config.lastColumn != null
+            ? columnIndexFromLetter(config.lastColumn) + 1
+            : Math.max(headerWidth, maxDataWidth);
     }
 
     /**

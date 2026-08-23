@@ -31,6 +31,8 @@ io/source/
                                 when set, otherwise auto-detected as the widest row seen (header or data) — so a
                                 data row with more columns than the header is never truncated. columnIndexFromLetter()
                                 is the inverse of columnLetter(), used to resolve lastColumn to a column count.
+                                Both parseCsv/parseExcel share this width resolution via the private
+                                resolveColumnCount(config, headerWidth, maxDataWidth) helper.
     FileSourceTransform       — Beam wrapper for FileSourceAdapter (downloads GCS bytes, parses). Emits one
                                 Row per data row, then (if present) one extra Row carrying the marker-wrapped
                                 header-legend JSON — both under the same Schemas.RAW_JSON schema.
@@ -310,3 +312,25 @@ reached by unnesting `Data`.
 | `null` | `null` |
 
 Used by `GcsSinkTransform` and `PubSubSinkTransform`. Import it in your own sinks.
+
+---
+
+## Unit tests
+
+`src/test/java` — JUnit 5, no BigQuery/GCS mocking required for these; they exercise pure logic
+directly, the same scenarios that were previously hand-verified with throwaway scripts:
+
+```
+io/source/FileSourceAdapterTest.java   — columnLetter/columnIndexFromLetter round-trip at known
+                                          Excel boundaries (Z→AA, AZ→BA, ZZ→AAA); parseCsv: data
+                                          wider than header keeps every column, file_first_row
+                                          skip (with and without a header), file_last_column
+                                          truncation, empty-file edge case.
+io/util/FileHeaderLegendTest.java      — wrapLegend/unwrapLegend round-trip, isMarkerWrapped
+                                          true/false, buildPage's exact {"Data":...,"DataHeaders":...}
+                                          shape, dataArrayExpr's SQL fragment text.
+```
+
+Run with `mvn -pl beam-io -am test`. This is the starting point, not full coverage — the rest of
+`beam-io` (BigQuery/GCS-backed adapters) has none yet and would need Mockito (already a
+`dependencyManagement` entry in the root `pom.xml`, unused until now).

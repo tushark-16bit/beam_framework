@@ -189,7 +189,8 @@ source/FileSourceAdapter.java         CSV (Commons CSV) + Excel (Apache POI) fro
                                        Column width (letters generated, and row padding/truncation) is FileSourceConfig.lastColumn
                                        when set, else auto-detected as the widest row seen (header or data) — a data row wider than
                                        the header is never truncated for lacking a header name. columnIndexFromLetter() is the
-                                       inverse of columnLetter(), used to resolve lastColumn.
+                                       inverse of columnLetter(), used to resolve lastColumn. parseCsv/parseExcel share this
+                                       width logic via resolveColumnCount() rather than each computing it separately.
 source/FileSourceTransform.java       Beam wrapper for FileSourceAdapter. Emits one Row per data row, then one extra Row for the
                                        marker-wrapped header-legend JSON if present (same Schemas.RAW_JSON schema either way).
 
@@ -818,6 +819,9 @@ new run reaches `COMPLETED`.
 ## 17. Build and run reference
 
 ```bash
+# Run unit tests (currently: beam-io pure-logic classes only — see beam-io/README.md)
+mvn -pl beam-io -am test
+
 # Build fat JAR from project root
 mvn package -pl beam-runner -am -DskipTests
 
