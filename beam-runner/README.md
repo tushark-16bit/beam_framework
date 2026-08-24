@@ -15,7 +15,7 @@ You should rarely need to edit this module.
 | `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted |
 | `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` and `PostDownloadFinalizeTransform` |
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline |
-| `PipelineSequenceFactory` | `PIPELINE`: runs an ordered sequence of `DATA_SOURCE` steps (batched into one Dataflow job via `DataSourcePipelineFactory.assembleForConfigs`) followed by a terminal `REPORT` step (via the unchanged `ReportPipelineFactory`). Composes both existing factories — see its own section below |
+| `PipelineSequenceFactory` | `PIPELINE`: same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, no separate config — runs whichever datasources the report's own `datasources[]` declares (batched into one Dataflow job via `DataSourcePipelineFactory.assembleForConfigs`), then the report (via the unchanged `ReportPipelineFactory`). Composes both existing factories — see its own section below |
 
 ---
 
@@ -113,50 +113,55 @@ Composes `DataSourcePipelineFactory` and `ReportPipelineFactory` — it does not
 either. Only decides which data sources to batch together and whether an incomplete one should
 stop the sequence before the report runs.
 
+**There is no separate pipeline config.** `PIPELINE` takes the exact same `--reportName`/
+`--reportSubprocess` as `REPORT_PROCESSING`, and the report's own `ReportConfig.datasources[]`
+(with each entry's `is_required`) IS the pipeline — it already declares which datasources feed
+the report and which are mandatory, so nothing redeclares that as a second, separately-maintained
+sequence. `PIPELINE` differs from plain `REPORT_PROCESSING` only in what happens when a declared
+datasource isn't `COMPLETED` yet: `REPORT_PROCESSING` fails immediately
+(`checkDatasourceAvailability()`); `PIPELINE` runs it first.
+
 ```
 PipelineSequenceFactory.execute(options)
-    ├─ 1. BigQueryPipelineConfigRepository.fetchPipelineConfig()
-    │       → ordered List<PipelineStepConfig> (DataSourceStep | ReportStep)
-    │       PipelineConfig's compact constructor already guarantees the last step is a ReportStep
+    ├─ 1. BigQueryReportRepository.fetchReportConfig(reportName, reportSubprocess, periodId)
+    │       → ReportConfig.datasources[] (List<ReportDatasourceRef>)
     │
-    ├─ 2. For every DataSourceStep: BigQuerySourceConfigRepository.fetchSourceConfigs()
+    ├─ 2. For every declared datasource: BigQuerySourceConfigRepository.fetchSourceConfigs()
     │       (one call per named datasource — each returns exactly one SourceConfig)
     │
     ├─ 3. DataSourcePipelineFactory.assembleForConfigs(options, allFetchedConfigs)
-    │       ONE Dataflow job for every pending step — never one job per step.
-    │       Internally skips any step already COMPLETED, same as standalone
+    │       ONE Dataflow job for every declared datasource — never one job per datasource.
+    │       Internally skips any already COMPLETED, same as standalone
     │       DATA_SOURCE_DOWNLOAD (DaRefer skip-logic, unchanged).
     │       pipeline.run().waitUntilFinish()
     │
-    ├─ 4. Re-check each DataSourceStep's checkpoint status (isCompleted()).
-    │       Still incomplete + the terminal report's own
-    │       ReportConfig.datasources[].required=true for that datasource
+    ├─ 4. Re-check each declared datasource's checkpoint status (isCompleted()).
+    │       Still incomplete + is_required=true
     │           → abort: PipelineSequenceFactory.PipelineAbortedException
-    │             (report step never runs)
-    │       Still incomplete + required=false, or not listed in the report's
-    │       datasources[] at all
-    │           → log and continue (not required by the report that would use it)
+    │             (report never runs)
+    │       Still incomplete + is_required=false
+    │           → log and continue
     │
-    └─ 5. options.setReportName/setReportSubprocess(terminal step) →
-            ReportPipelineFactory.execute(options)   [unchanged]
+    └─ 5. ReportPipelineFactory.execute(options)   [unchanged — options.reportName/
+            reportSubprocess were never touched, they're the operator's original values]
 ```
 
-**Why no `optional` flag on `DataSourceStep` itself**: the terminal report already declares which
-of its datasources are required, via the pre-existing `ReportDatasourceRef.required` — enforced
-on every report run (`ReportPipelineFactory.checkDatasourceAvailability()`), pipeline or
-standalone. A second, independently-set flag on the pipeline step could disagree with the first
-about the same datasource; instead there is exactly one place that decision is declared, and
-`PipelineSequenceFactory` looks it up rather than duplicating it.
+**Why no separate required/optional flag anywhere else**: the terminal report already declares
+which of its datasources are required, via the pre-existing `ReportDatasourceRef.required` —
+enforced on every report run (`ReportPipelineFactory.checkDatasourceAvailability()`), pipeline or
+standalone. A second, independently-set flag anywhere in a pipeline-specific config could
+disagree with the first about the same datasource; instead there is exactly one place that
+decision is declared, and `PipelineSequenceFactory` reads it directly rather than duplicating it.
 
-**Why batch instead of one job per step**: sources are independent Beam branches (the "never
-merged" rule still holds — no `Flatten.pCollections()` across sources), so submitting every
-pending `DATA_SOURCE` step in this run as one Dataflow job is just `DataSourcePipelineFactory`'s
+**Why batch instead of one job per datasource**: sources are independent Beam branches (the
+"never merged" rule still holds — no `Flatten.pCollections()` across sources), so submitting
+every declared datasource in this run as one Dataflow job is just `DataSourcePipelineFactory`'s
 existing multi-source behavior, reused rather than reinvented.
 
 **`--manualOverrun` applies uniformly across the whole sequence** — no PIPELINE-specific flag or
 logic needed, because `PipelineSequenceFactory` passes the exact same `options` instance straight
 into both `DataSourcePipelineFactory.assembleForConfigs()` and `ReportPipelineFactory.execute()`:
-- Every `DATA_SOURCE` step bypasses its own `COMPLETED` skip-guard and re-downloads, superseding
+- Every declared datasource bypasses its own `COMPLETED` skip-guard and re-downloads, superseding
   its previous run's `DaRec` rows once the new run completes — identical to standalone
   `DATA_SOURCE_DOWNLOAD` under `--manualOverrun`, since it's the same `filterByCheckpoint` check
   reading the same flag off the same options object.

@@ -52,7 +52,7 @@ flowchart TD
     E -->|yes| F["ReportPipelineFactory\n.execute(options)\ndriver-JVM only\nno Beam pipeline"]
     E -->|no legacy mode| G["PipelineFactory\n.assemble(options)\npipeline.run()\nwaitUntilFinish if batch"]
 
-    C -->|PIPELINE| P["PipelineSequenceFactory\n.execute(options)\nordered DATA_SOURCE steps\n(batched, one job) →\nterminal REPORT step"]
+    C -->|PIPELINE| P["PipelineSequenceFactory\n.execute(options)\nsame reportName/reportSubprocess\nas REPORT_PROCESSING —\nruns report's own datasources[]\n(batched, one job) → report"]
     P -.calls internally.-> D
     P -.calls internally.-> F
 
@@ -817,8 +817,7 @@ Where to find things in the source tree:
 | Entry point | [`beam-runner/.../runner/Main.java`](beam-runner/src/main/java/com/yourco/beam/runner/Main.java) |
 | DATA_SOURCE_DOWNLOAD orchestration | [`beam-runner/.../runner/DataSourcePipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourcePipelineFactory.java) |
 | REPORT_PROCESSING orchestration | [`beam-runner/.../runner/ReportPipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/ReportPipelineFactory.java) |
-| PIPELINE orchestration (composes the two above) | [`beam-runner/.../runner/PipelineSequenceFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/PipelineSequenceFactory.java) |
-| Pipeline step sequence loading (PIPELINE, BQ) | [`beam-io/.../io/config/BigQueryPipelineConfigRepository.java`](beam-io/src/main/java/com/yourco/beam/io/config/BigQueryPipelineConfigRepository.java) |
+| PIPELINE orchestration (composes the two above, reuses ReportConfig.datasources[]) | [`beam-runner/.../runner/PipelineSequenceFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/PipelineSequenceFactory.java) |
 | Source routing | [`beam-io/.../io/source/SourceRouter.java`](beam-io/src/main/java/com/yourco/beam/io/source/SourceRouter.java) |
 | Per-source transform chain | [`beam-runner/.../runner/SourceTransformChainAssembler.java`](beam-runner/src/main/java/com/yourco/beam/runner/SourceTransformChainAssembler.java) |
 | Lookup transform (side input) | [`beam-transforms/.../transforms/source/LookupEnrichTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/LookupEnrichTransform.java) |
@@ -837,66 +836,64 @@ Where to find things in the source tree:
 
 ---
 
-## 16. PIPELINE — Ordered Sequence
+## 16. PIPELINE — Run a Report's Own Required Data Sources First
 
 Composes section 3 (`DATA_SOURCE_DOWNLOAD`) and section 6 (`REPORT_PROCESSING`) rather than
-re-implementing either — `PipelineSequenceFactory` only decides which `DATA_SOURCE` steps to
-batch together and whether an incomplete one should stop the sequence before the report runs.
+re-implementing either. There is no separate pipeline config: `PipelineSequenceFactory` takes the
+exact same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, reads that report's own
+`ReportConfig.datasources[]` (already declaring which datasources feed it and which are
+mandatory via `is_required`), runs whichever aren't `COMPLETED`, and only then runs the report.
 
 ```mermaid
 sequenceDiagram
     participant Main
     participant PSF as PipelineSequenceFactory
-    participant PCR as BigQueryPipelineConfigRepository
+    participant RR as BigQueryReportRepository
     participant SCR as BigQuerySourceConfigRepository
     participant DSF as DataSourcePipelineFactory
     participant CKA as BigQueryDataSourceCheckpointAdapter
-    participant RR as BigQueryReportRepository
     participant RPF as ReportPipelineFactory
 
     Main->>PSF: execute(options)
-    PSF->>PCR: fetchPipelineConfig(pipelineName, subprocess)
-    PCR-->>PSF: PipelineConfig (ordered steps; last is always ReportStep)
+    PSF->>RR: fetchReportConfig(reportName, reportSubprocess, periodId)
+    RR-->>PSF: ReportConfig.datasources[] (List<ReportDatasourceRef>)
 
-    loop each DataSourceStep
+    loop each declared datasource
         PSF->>SCR: fetchSourceConfigs(parent, dsName, subprocess, periodId)
         SCR-->>PSF: SourceConfig
     end
 
     PSF->>DSF: assembleForConfigs(options, allFetchedConfigs)
-    Note over DSF: skips any step already COMPLETED —<br/>same DaRefer skip-logic as standalone<br/>DATA_SOURCE_DOWNLOAD
-    DSF-->>PSF: Pipeline (ONE job, every pending step as its own branch)
+    Note over DSF: skips any datasource already COMPLETED —<br/>same DaRefer skip-logic as standalone<br/>DATA_SOURCE_DOWNLOAD
+    DSF-->>PSF: Pipeline (ONE job, every declared datasource as its own branch)
     PSF->>PSF: pipeline.run().waitUntilFinish()
 
-    loop each DataSourceStep
+    loop each declared datasource
         PSF->>CKA: isCompleted(dsName, periodId)
         alt still not COMPLETED
-            PSF->>RR: fetchReportConfig(terminal ReportStep)
-            RR-->>PSF: ReportConfig.datasources[]
-            alt datasources[].required == true for this dsName
+            alt ReportDatasourceRef.required == true
                 PSF-->>Main: throw PipelineAbortedException
-            else required == false, or not listed at all
+            else required == false
                 PSF->>PSF: log + continue
             end
         end
     end
 
-    PSF->>PSF: options.setReportName/setReportSubprocess(terminal step)
     PSF->>RPF: execute(options)
-    Note over RPF: unchanged — runs its own<br/>checkDatasourceAvailability() too,<br/>a second line of defense
+    Note over RPF: unchanged — options.reportName/reportSubprocess<br/>were never touched. Runs its own<br/>checkDatasourceAvailability() too,<br/>a second line of defense
     RPF-->>PSF: RptRefer COMPLETED / FAILED
     PSF-->>Main: PIPELINE completed
 ```
 
-**Why no `optional` flag on `DataSourceStep` itself**: the terminal report already declares
+**Why no separate required/optional flag anywhere else**: the terminal report already declares
 required datasources via `ReportDatasourceRef.required`, enforced on every report run
 (`ReportPipelineFactory.checkDatasourceAvailability()`) whether reached via `PIPELINE` or
-standalone `REPORT_PROCESSING`. A second, independently-set flag on the pipeline step could
-disagree with the first about the same datasource — there is exactly one place "is this
-datasource required" is declared, and `PipelineSequenceFactory` looks it up there rather than
-duplicating it.
+standalone `REPORT_PROCESSING`. A second, independently-set flag anywhere in a pipeline-specific
+config could disagree with the first about the same datasource — there is exactly one place "is
+this datasource required" is declared, and `PipelineSequenceFactory` reads it directly rather
+than duplicating it.
 
-**Why one batched job instead of one job per step**: sources are independent Beam branches — the
-"never merged" rule from section 4 still holds, no `Flatten.pCollections()` across sources — so
-submitting every pending `DATA_SOURCE` step as one Dataflow job is just `DataSourcePipelineFactory`'s
+**Why one batched job instead of one job per datasource**: sources are independent Beam branches
+— the "never merged" rule from section 4 still holds, no `Flatten.pCollections()` across sources
+— so submitting every declared datasource as one Dataflow job is just `DataSourcePipelineFactory`'s
 existing multi-source behavior (`assembleForConfigs`), reused rather than reinvented.

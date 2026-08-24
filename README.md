@@ -319,7 +319,7 @@ substitutions:
 | `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer` | BQ `parameter_store` table (keyed by `parameter_group_name`, `parameter_data_source`, `parameter_name`) |
 | `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, stages data into `RptStageDa`, runs BQ transform chain, writes `RptOutput`, sends email | BQ `parameter_store` (nested JSON config) |
 | `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
-| `PIPELINE` | Runs an ordered sequence of `DATA_SOURCE` steps (batched into **one** Dataflow job, skipping any already `COMPLETED`) followed by a terminal `REPORT` step | BQ `parameter_store` (`{"steps":[...]}`, keyed by `--pipelineName`/`--pipelineSubprocess`) |
+| `PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. Runs whichever datasources the report's own `datasources[]` declares (batched into **one** Dataflow job, skipping any already `COMPLETED`), then the report | Reuses the report's `datasources[]`/`is_required` — same BQ `parameter_store` row REPORT_PROCESSING already reads |
 
 `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` can still be scheduled as **separate, sequential
 Airflow DAGs** — first the download, then the report once all sources are `COMPLETED` — exactly
@@ -510,37 +510,39 @@ options={
 }
 ```
 
-## PIPELINE — ordered data-source → report sequence
+## PIPELINE — run a report's own required data sources first
 
-A single `parameter_store` row (`--pipelineName`/`--pipelineSubprocess`) can declare a fixed,
-ordered sequence — one or more `DATA_SOURCE` steps followed by exactly one terminal `REPORT`
-step — that runs as **one JAR invocation** instead of separate Airflow-scheduled DAGs:
+`PIPELINE` takes the exact same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` —
+**there is no separate pipeline config.** A report already declares which datasources feed it,
+and whether each one is mandatory, in its own `datasources[]`:
 
 ```json
 {
-  "steps": [
-    {"type": "DATA_SOURCE", "datasource_name": "trades",   "subprocess_name": "eod"},
-    {"type": "DATA_SOURCE", "datasource_name": "fx_rates",  "subprocess_name": "eod"},
-    {"type": "REPORT",      "report_name": "daily_trades_report", "report_subprocess": "eod"}
-  ]
+  "datasources": [
+    {"datasource_name": "trades",   "datasource_subprocess": "eod", "is_required": true},
+    {"datasource_name": "fx_rates", "datasource_subprocess": "eod", "is_required": false}
+  ],
+  "...": "the rest of the report config, unchanged"
 }
 ```
 
-Every `DATA_SOURCE` step not already `COMPLETED` for the period is batched into **one** Dataflow
-job (never one job per step — sources stay independent branches within it, the same "never
-merged" rule as standalone `DATA_SOURCE_DOWNLOAD`). Once that job finishes, an incomplete step
-only aborts the whole sequence if the terminal report's own `datasources[].is_required` says that
-datasource is required — a step carries no required/optional flag of its own, avoiding two
-separately-set flags that could disagree about the same datasource. See `CLAUDE.md` section 10
-for the full config shape and `beam-runner/README.md`'s `PipelineSequenceFactory` section for the
-execution flow.
+`PIPELINE` reads that same `datasources[]` and runs whichever aren't already `COMPLETED` for the
+period, batched into **one** Dataflow job (never one job per datasource — sources stay
+independent branches within it, the same "never merged" rule as standalone
+`DATA_SOURCE_DOWNLOAD`), before running the report. Once that job finishes, a still-incomplete
+datasource only aborts the whole run if its own `is_required` says so — the exact same flag
+`REPORT_PROCESSING` already enforces (`checkDatasourceAvailability()`), so there's nothing
+PIPELINE-specific to keep in sync. `PIPELINE` differs from plain `REPORT_PROCESSING` only in what
+happens when a declared datasource isn't ready yet: `REPORT_PROCESSING` fails immediately;
+`PIPELINE` runs it first. See `CLAUDE.md` section 10 for the full config shape and
+`beam-runner/README.md`'s `PipelineSequenceFactory` section for the execution flow.
 
 ```bash
 java -jar beam-runner-bundled.jar \
   --processType=PIPELINE \
   --parentId=TRADING \
-  --pipelineName=daily_trading_pipeline \
-  --pipelineSubprocess=eod \
+  --reportName=daily_trades_report \
+  --reportSubprocess=eod \
   --periodId=202401 \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
@@ -548,11 +550,11 @@ java -jar beam-runner-bundled.jar \
   --paramBqDataset=dw
 ```
 
-**`--manualOverrun` works exactly as it does standalone**, uniformly across the whole sequence —
-no separate PIPELINE-specific flag. Every `DATA_SOURCE` step bypasses its own `COMPLETED` guard
+**`--manualOverrun` works exactly as it does standalone**, uniformly across the whole run — no
+separate PIPELINE-specific flag. Every declared datasource bypasses its own `COMPLETED` guard
 and re-downloads, superseding its previous run's `DaRec` rows once complete, same as standalone
-`DATA_SOURCE_DOWNLOAD`. The terminal `REPORT` step needs no flag at all: it has no `COMPLETED`
-guard of its own and always re-runs fresh, pipeline or standalone.
+`DATA_SOURCE_DOWNLOAD`. The report itself needs no flag at all: it has no `COMPLETED` guard of
+its own and always re-runs fresh, pipeline or standalone.
 
 ## Built-in transforms reference
 

@@ -16,12 +16,17 @@ package com.yourco.beam.options;
  *   <li>{@link #REPORT_PROCESSING} — read data already written to {@code DaRec}, apply the transform
  *       chain, and route output to one or more sinks (GCS / BQ / API). Full lifecycle tracked in
  *       {@code DaRefer}; per-output detail written to {@code RptOutput}.</li>
- *   <li>{@link #PIPELINE} — run an ordered sequence of steps (read from a
- *       {@code parameter_store} {@code {"steps":[...]}} blob, see {@code PipelineSequenceFactory}):
- *       every {@code DATA_SOURCE} step not already {@code COMPLETED} for the period is batched
- *       into one Dataflow job, followed by exactly one terminal {@code REPORT} step. Composes
- *       {@link #DATA_SOURCE_DOWNLOAD} and {@link #REPORT_PROCESSING} rather than replacing
- *       either — both remain independently runnable.</li>
+ *   <li>{@link #PIPELINE} — same {@code --reportName}/{@code --reportSubprocess} as
+ *       {@link #REPORT_PROCESSING}; runs every datasource the report's own
+ *       {@code ReportConfig.datasources[]} declares (batched into one Dataflow job, skipping any
+ *       already {@code COMPLETED}), then the report itself. There is no separate pipeline config
+ *       — the report's own datasource list and {@code is_required} flags already declare which
+ *       datasources feed it and which are mandatory, so {@code PIPELINE} reuses that directly
+ *       instead of redeclaring it. Differs from plain {@link #REPORT_PROCESSING} only in what
+ *       happens when a declared datasource isn't {@code COMPLETED} yet: {@code REPORT_PROCESSING}
+ *       fails immediately; {@code PIPELINE} runs it first. See {@code PipelineSequenceFactory}.
+ *       Composes {@link #DATA_SOURCE_DOWNLOAD} and {@link #REPORT_PROCESSING} rather than
+ *       replacing either — both remain independently runnable.</li>
  * </ul>
  */
 public enum ProcessType {

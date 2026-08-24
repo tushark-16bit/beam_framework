@@ -14,8 +14,10 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   --processType=DATA_SOURCE_DOWNLOAD  →  DataSourcePipelineFactory
  *   --processType=REPORT_PROCESSING     →  PipelineFactory (general-purpose factory)
- *   --processType=PIPELINE              →  PipelineSequenceFactory (ordered DATA_SOURCE steps,
- *                                            batched into one job, then a terminal REPORT step)
+ *   --processType=PIPELINE              →  PipelineSequenceFactory (same --reportName/
+ *                                            --reportSubprocess as REPORT_PROCESSING; runs every
+ *                                            datasource the report's own datasources[] declares,
+ *                                            batched into one job, then the report)
  * </pre>
  *
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
@@ -134,8 +136,8 @@ public final class Main {
     // ── PIPELINE ─────────────────────────────────────────────────────────────
 
     private static void runPipelineSequence(FrameworkOptions options) {
-        LOG.info("PIPELINE | pipeline={} subprocess={} period={}",
-                 options.getPipelineName(), options.getPipelineSubprocess(), options.getPeriodId());
+        LOG.info("PIPELINE | report={} subprocess={} period={}",
+                 options.getReportName(), options.getReportSubprocess(), options.getPeriodId());
         new PipelineSequenceFactory().execute(options);
     }
 }

@@ -171,26 +171,11 @@ model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtT
 model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDaJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
 model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
 model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces 21 FrameworkOptions flags. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, getCalendarName, smtp settings, etc.) + generic get(key)/get(key, default) escape hatch.
-
--- PIPELINE models (sealed step hierarchy; see options/ProcessType.java PIPELINE, io/config/BigQueryPipelineConfigRepository.java, runner/PipelineSequenceFactory.java for the rest of the wiring) --
-model/PipelineConfig.java             Record: List<PipelineStepConfig> steps, from a new parameter_store JSON shape
-                                       {"steps":[...]} — a thin ordered pointer list into existing source_config/report
-                                       rows, not a duplicate of them. Compact constructor rejects empty/null steps and
-                                       any sequence not ending in a ReportStep ("always terminating in a report").
-                                       Defensively copies the list (List.copyOf).
-model/PipelineStepConfig.java         Sealed interface, permits DataSourceStep | ReportStep. type() returns the raw JSON
-                                       discriminator string for logging only — dispatch is instanceof, not switch, since
-                                       Java 17 (this project's target) has no finalized pattern-matching switch over
-                                       sealed types (that's Java 21).
-model/DataSourceStep.java             DATA_SOURCE step: datasourceName + subprocessName only. Deliberately carries no
-                                       required/optional flag of its own — whether its failure aborts the pipeline before
-                                       the terminal report runs is decided by matching it against the report's own
-                                       ReportDatasourceRef.isRequired (existing field, already enforced by
-                                       ReportPipelineFactory.checkDatasourceAvailability()), so there is exactly one place
-                                       that decision is declared instead of two that could disagree.
-model/ReportStep.java                 REPORT step: reportName + reportSubprocess. Always the last step (enforced by
-                                       PipelineConfig).
 ```
+
+There is no separate PIPELINE config model. `ProcessType.PIPELINE` reuses `ReportConfig.datasources[]`
+(`model/ReportDatasourceRef.java`, already listed above under REPORT_PROCESSING models) directly —
+see `runner/PipelineSequenceFactory.java` in the beam-runner section below.
 
 ### beam-io — connectors and I/O adapters
 
@@ -252,11 +237,6 @@ config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOUR
                                            fetchSourceConfigs(). Row → SourceConfig mapping. Also parses
                                            data_transform_query/data_transform_min_row_count/
                                            data_transform_max_row_count into DataTransformConfig.
-config/BigQueryPipelineConfigRepository.java Queries parameter_store for a PIPELINE run's ordered {"steps":[...]}
-                                           JSON. fetchPipelineConfig() parses each step's "type" (DATA_SOURCE |
-                                           REPORT) into DataSourceStep | ReportStep, throwing on an unrecognised
-                                           type. Does not duplicate source/report config — each step is only a
-                                           name pointer, resolved via the two repositories above at run time.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
 util/FileHeaderLegend.java            Helpers for the FILE-source column-letter storage convention: wrapLegend()/isMarkerWrapped()/
@@ -323,20 +303,26 @@ ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ
                                 output_bq_input_alias → last transform alias → first datasource alias.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
 SmtpReportEmailAdapter.java     SMTP impl of ReportEmailAdapter. MimeMultipart for attachments.
-PipelineSequenceFactory.java    PIPELINE: BigQueryPipelineConfigRepository.fetchPipelineConfig() → ordered steps.
-                                Every DATA_SOURCE step's SourceConfig fetched by name (BigQuerySourceConfigRepository),
+PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSubprocess as REPORT_PROCESSING — no
+                                separate pipeline config. BigQueryReportRepository.fetchReportConfig() → the report's
+                                own datasources[] (List<ReportDatasourceRef>) IS the pipeline: it already declares
+                                which datasources feed the report and each one's is_required flag, so nothing
+                                redeclares that as a second, separately-maintained sequence.
+                                Every declared datasource's SourceConfig fetched by name (BigQuerySourceConfigRepository),
                                 then all of them batched into ONE Dataflow job via
                                 DataSourcePipelineFactory.assembleForConfigs() (skips any already COMPLETED, same
-                                as standalone DATA_SOURCE_DOWNLOAD) — never one job per step. After
-                                waitUntilFinish(), re-checks each step's checkpoint status; an incomplete one only
-                                aborts the whole PIPELINE (PipelineAbortedException) if the terminal report's own
-                                ReportDatasourceRef.required says so for that datasource (absent from the report's
-                                datasources[] → treated as not required). Terminal ReportStep then runs via the
-                                unchanged ReportPipelineFactory.execute() (sets options.reportName/reportSubprocess
-                                first). Composes both existing factories rather than reimplementing either.
+                                as standalone DATA_SOURCE_DOWNLOAD) — never one job per datasource. After
+                                waitUntilFinish(), re-checks each datasource's checkpoint status; an incomplete one
+                                only aborts the whole PIPELINE (PipelineAbortedException) if its ReportDatasourceRef.required
+                                says so (this IS the report's own datasources[].is_required — nothing separate to
+                                keep in sync). options.reportName/reportSubprocess are never touched — PIPELINE differs
+                                from plain REPORT_PROCESSING only in running missing datasources first instead of
+                                failing immediately; the terminal report then runs via the unchanged
+                                ReportPipelineFactory.execute(). Composes both existing factories rather than
+                                reimplementing either.
                                 --manualOverrun applies uniformly across the whole sequence with no PIPELINE-specific
                                 code: the same options instance is passed straight into both assembleForConfigs()
-                                and ReportPipelineFactory.execute(), so every DATA_SOURCE step gets the same
+                                and ReportPipelineFactory.execute(), so every declared datasource gets the same
                                 bypass-COMPLETED-guard-and-supersede treatment DataSourcePipelineFactory already
                                 gives it standalone. The REPORT step needs nothing extra — it has no COMPLETED
                                 guard of its own and always re-runs, manualOverrun or not.
@@ -602,12 +588,14 @@ Main.runReportProcessing(options)
 
 All pipeline configuration lives in BigQuery, in the dataset specified by
 `--paramBqProject` + `--paramBqDataset`. A single `parameter_store` table holds all
-configuration — DATA_SOURCE_DOWNLOAD source configs, REPORT_PROCESSING report configs, and
-PIPELINE step sequences.
+configuration — DATA_SOURCE_DOWNLOAD source configs and REPORT_PROCESSING report configs.
+PIPELINE has no config of its own: it reads the same report config as REPORT_PROCESSING
+(`--reportName`/`--reportSubprocess`) and runs the datasources that report's own
+`datasources[]` already declares.
 
 | BQ Table | Contents | Key columns |
 |---|---|---|
-| `parameter_store` | All pipeline params (source configs + report configs + pipeline step sequences) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess / --pipelineSubprocess), parameter_name (--datasourceName / --reportName / --pipelineName) |
+| `parameter_store` | All pipeline params (source configs + report configs) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess), parameter_name (--datasourceName / --reportName) |
 
 `schema_of_json` declares required top-level fields. `parameters_val_json` holds the config JSON.
 
@@ -647,7 +635,7 @@ directly. When absent,
 schema resolution falls back to `BigQuerySchemaUtils.fetchBeamSchema()` (table metadata), then
 to `BigQuerySourceTransform`'s own name-only preview-query fallback.
 
-### Report configs (REPORT_PROCESSING) — nested JSON in parameters_val_json
+### Report configs (REPORT_PROCESSING and PIPELINE) — nested JSON in parameters_val_json
 
 ```json
 {
@@ -669,31 +657,16 @@ to `BigQuerySourceTransform`'s own name-only preview-query fallback.
 }
 ```
 
-### Pipeline configs (PIPELINE) — ordered steps in parameters_val_json
+The `datasources[]` array (with each entry's `is_required`) is the **same config PIPELINE reads**
+— there is no separate pipeline config. `--processType=PIPELINE` takes the identical
+`--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` and runs whichever declared
+datasources aren't yet `COMPLETED` before running the report; `is_required` decides whether a
+still-incomplete one aborts the run. See section 4's `PipelineSequenceFactory` entry.
 
-```json
-{
-  "steps": [
-    {"type": "DATA_SOURCE", "datasource_name": "trades",   "subprocess_name": "eod"},
-    {"type": "DATA_SOURCE", "datasource_name": "fx_rates",  "subprocess_name": "eod"},
-    {"type": "REPORT",      "report_name": "daily_trades_report", "report_subprocess": "eod"}
-  ]
-}
-```
+`periodId` is not part of the lookup key for either config type — both are period-agnostic.
+Period tokens (`{periodStart}`, `{periodEnd}`) are resolved at runtime by `QueryParameterResolver`.
 
-A thin ordered pointer list, not a duplicate of the actual per-datasource/per-report config —
-each step is resolved by name via the existing `BigQuerySourceConfigRepository`/
-`BigQueryReportRepository`, unchanged. `steps` must be non-empty and end in a `REPORT` step
-(`PipelineConfig`'s compact constructor enforces this — "always terminating in a report" is a
-checked invariant). A `DATA_SOURCE` step carries no required/optional flag of its own — see
-section 4's `PipelineSequenceFactory` entry for how that's resolved from the terminal report's
-own `datasources[].is_required` instead.
-
-`periodId` is not part of the lookup key for any of the three config types — all are
-period-agnostic. Period tokens (`{periodStart}`, `{periodEnd}`) are resolved at runtime by
-`QueryParameterResolver`.
-
-**Typical call sequence (report config):**
+**Typical call sequence (report config — REPORT_PROCESSING or PIPELINE):**
 ```java
 BigQueryReportRepository repo = new BigQueryReportRepository(options);
 ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
@@ -703,12 +676,6 @@ ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, perio
 ```java
 BigQuerySourceConfigRepository repo = new BigQuerySourceConfigRepository(options);
 List<SourceConfig> configs = repo.fetchSourceConfigs(parentId, datasourceName, subprocess, periodId);
-```
-
-**Typical call sequence (pipeline config):**
-```java
-BigQueryPipelineConfigRepository repo = new BigQueryPipelineConfigRepository(options);
-PipelineConfig config = repo.fetchPipelineConfig(pipelineName, pipelineSubprocess);
 ```
 
 ### CLI flags for the parameter store
@@ -933,15 +900,14 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --paramBqProject=my-gcp-project \
   --paramBqDataset=dw
 
-# Run PIPELINE (ordered DATA_SOURCE steps batched into one job, then a terminal REPORT step)
-# --pipelineName looks up a {"steps":[...]} row in parameter_store; --reportName/--reportSubprocess
-# are NOT passed here — PipelineSequenceFactory sets them itself from the sequence's terminal step
+# Run PIPELINE (same --reportName/--reportSubprocess as REPORT_PROCESSING — no separate pipeline
+# config; runs whichever datasources the report's own datasources[] declares, then the report)
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --runner=DirectRunner \
   --processType=PIPELINE \
   --parentId=TRADING \
-  --pipelineName=daily_trading_pipeline \
-  --pipelineSubprocess=eod \
+  --reportName=daily_trades_report \
+  --reportSubprocess=eod \
   --periodId=202401 \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \

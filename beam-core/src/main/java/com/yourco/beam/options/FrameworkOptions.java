@@ -144,29 +144,6 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getReportSubprocess();
     void setReportSubprocess(String value);
 
-    // =========================================================================
-    // PIPELINE SELECTION (--processType=PIPELINE only)
-    // Ordered DATA_SOURCE step(s) → terminal REPORT step, read from a
-    // parameter_store {"steps":[...]} blob. See PipelineSequenceFactory.
-    // =========================================================================
-
-    @Description("Pipeline name as registered in parameter_store (parameter_name column). "
-                 + "Required for --processType=PIPELINE. Looks up a {\"steps\":[...]} JSON blob: "
-                 + "an ordered sequence of DATA_SOURCE steps followed by exactly one terminal "
-                 + "REPORT step. Every DATA_SOURCE step not already COMPLETED for the period is "
-                 + "batched into one Dataflow job before the report runs. "
-                 + "Example: daily_trading_pipeline")
-    @Default.String("")
-    String getPipelineName();
-    void setPipelineName(String value);
-
-    @Description("Pipeline subprocess name. Allows the same pipeline_name to have multiple "
-                 + "variants (e.g. intraday vs eod). Matched against parameter_data_source in "
-                 + "parameter_store — same convention as --reportSubprocess/--subprocessName.")
-    @Default.String("default")
-    String getPipelineSubprocess();
-    void setPipelineSubprocess(String value);
-
     @Description("Period start date in ISO-8601 format (YYYY-MM-DD). "
                  + "Injected into query templates as the {periodStart} token. "
                  + "Example: 2024-01-01")

@@ -19,7 +19,9 @@ Every other module depends on this one — it defines the language the whole fra
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
 | `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces 21 CLI flags (source, sink, transforms, retry, calendar, email). Typed getters + generic `get(key)` for extensibility. |
-| `model` | `PipelineConfig`, `PipelineStepConfig` (sealed), `DataSourceStep`, `ReportStep` | Ordered step sequence for the `PIPELINE` process type. `PipelineStepConfig` is a sealed interface (`permits DataSourceStep, ReportStep`); `PipelineConfig`'s compact constructor rejects an empty sequence or one not ending in a `ReportStep`. `DataSourceStep` has no required/optional flag of its own — that's resolved via the terminal report's own `ReportDatasourceRef.required`, deliberately avoiding a second, independently-set flag for the same decision. Fetched by `BigQueryPipelineConfigRepository`; run by `PipelineSequenceFactory` (both in sibling modules — see their own READMEs). |
+There is no separate model for the `PIPELINE` process type — it reuses `ReportConfig.datasources`
+(`List<ReportDatasourceRef>`, row above) directly. See `beam-runner/README.md`'s
+`PipelineSequenceFactory` section.
 
 ---
 
@@ -29,7 +31,7 @@ Every other module depends on this one — it defines the language the whole fra
 |---|---|---|
 | `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Fetch raw data from APIs/files/BQ; creates LOADING checkpoint, runs workers, runs BnC post-pipeline |
 | `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | Transform downloaded data into reports |
-| `PIPELINE` | `--processType=PIPELINE` | Run an ordered sequence of `DATA_SOURCE` steps (batched into one Dataflow job) followed by a terminal `REPORT` step, read from one `parameter_store` row (`--pipelineName`/`--pipelineSubprocess`). Composes the other two process types rather than replacing them. |
+| `PIPELINE` | `--processType=PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. Runs whichever datasources the report's own `datasources[]` declares (batched into one Dataflow job, skipping any already `COMPLETED`), then the report. Differs from plain `REPORT_PROCESSING` only in running a missing datasource first instead of failing immediately. |
 
 ```bash
 # Download raw trades from an external API
@@ -96,14 +98,12 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 ```
 
 ### Pipeline selection (PIPELINE only)
-```
---pipelineName=daily_trading_pipeline
---pipelineSubprocess=eod    # default: "default"
-```
-Looks up a `{"steps":[...]}` row in `parameter_store` — an ordered sequence of `DATA_SOURCE`
-steps (batched into one Dataflow job) followed by a terminal `REPORT` step. `--reportName`/
-`--reportSubprocess` are not passed on the command line for `PIPELINE` — `PipelineSequenceFactory`
-sets them itself from the sequence's terminal step before delegating to the unchanged
+
+No separate flags — `PIPELINE` reuses the exact same `--reportName`/`--reportSubprocess` as
+`REPORT_PROCESSING` (see above). There is no separate pipeline config to look up: the report's
+own `datasources[]` (with each entry's `is_required`) already declares which datasources feed it
+and which are mandatory, so `PipelineSequenceFactory` reads that directly, runs whichever aren't
+`COMPLETED` yet (batched into one Dataflow job), then runs the report via the unchanged
 `ReportPipelineFactory`.
 
 > **Source, sink, transform chain, retry/DLQ, calendar, and email settings** are no longer CLI flags.
