@@ -567,3 +567,68 @@ VALUES (
 | `--reportSubprocess` | `default` | Maps to `parameter_data_source` |
 | `--periodStart` | — | Substituted into `{periodStart}` query tokens |
 | `--periodEnd` | — | Substituted into `{periodEnd}` query tokens |
+| `--customParamsJson` | — | Ad-hoc `{"key":"value"}` custom query tokens, resolved for both process types — see section 10 |
+
+---
+
+## 10. Custom query parameters (`--customParamsJson`)
+
+The transform step's `query_params_json` (section 2) already supports custom `{token}`s stored
+*in* the parameter_store row. `--customParamsJson` is the CLI-supplied equivalent, for a value
+that should come from the invocation itself instead of being edited into stored config —
+e.g. an Airflow DAG conf value, or an ad-hoc filter for a one-off run.
+
+The sample trades data has a `desk` column (`FX` / `RATES`) that the transform step doesn't
+currently filter on. To make it filterable per-run without editing `parameter_store`, add a
+`{desk}` token to the transform's `query_template` (one-time parameter_store edit):
+
+```sql
+UPDATE `my-gcp-project.dw.parameter_store`
+SET parameters_val_json = JSON_SET(
+  parameters_val_json,
+  '$.transforms[0].query_template',
+  'SELECT JSON_VALUE(stage_da_json_tx, \'$.currency\') AS currency, '
+  || 'SUM(CAST(JSON_VALUE(stage_da_json_tx, \'$.amount\') AS FLOAT64)) AS total_amount, '
+  || 'COUNT(*) AS trade_count '
+  || 'FROM {raw_trades} '
+  || 'WHERE JSON_VALUE(stage_da_json_tx, \'$.desk\') = \'{desk}\' '
+  || 'GROUP BY currency ORDER BY total_amount DESC'
+)
+WHERE parameter_group_name = 'TRADING' AND parameter_data_source = 'eod'
+  AND parameter_name = 'daily_trades_summary';
+```
+
+Now every run of this report must supply `{desk}` or the query fails at BigQuery execution time
+(unresolved `{desk}` left as a literal string) — supply it via `--customParamsJson`:
+
+```bash
+java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
+  --processType=REPORT_PROCESSING \
+  --project=my-gcp-project \
+  --parentId=TRADING \
+  --reportName=daily_trades_summary \
+  --reportSubprocess=eod \
+  --periodId=202401 \
+  --periodStart=2024-01-01 \
+  --periodEnd=2024-01-31 \
+  --customParamsJson='{"desk":"FX"}' \
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=dw \
+  --paramStoreTable=parameter_store \
+  --checkpointBqProject=my-gcp-project \
+  --checkpointBqDataset=pipeline_metadata
+```
+
+With `--customParamsJson='{"desk":"FX"}'`, only the FX-desk trades (T001, T002, T004, T006,
+T007 — see the seed data in section 2) are aggregated:
+
+```
+currency,total_amount,trade_count
+JPY,500000.0,1
+USD,360000.0,2
+EUR,80000.0,1
+GBP,60000.0,1
+```
+
+Re-run with `--customParamsJson='{"desk":"RATES"}'` to get the RATES-desk-only breakdown instead
+— no `parameter_store` edit needed between runs, only the CLI flag changes.

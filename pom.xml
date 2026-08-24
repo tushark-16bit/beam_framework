@@ -146,9 +146,26 @@
             </dependency>
 
             <!-- ── JSON for API response parsing ────────────────────────── -->
+            <!-- jackson-core/jackson-annotations pinned alongside jackson-databind: without
+                 this, Maven's nearest-wins mediation can resolve an older transitively-pulled
+                 jackson-core (e.g. 2.14.x via Beam SDK) against this newer jackson-databind,
+                 which throws NoClassDefFoundError at class-init time (jackson-databind's
+                 TokenBuffer references classes, e.g. StreamReadConstraints, only present in a
+                 matching jackson-core version) — including in PipelineOptionsFactory's own
+                 static initializer, i.e. the very first line of Main.java. -->
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
                 <version>${jackson.version}</version>
             </dependency>
 

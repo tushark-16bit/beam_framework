@@ -258,6 +258,9 @@ MetricsUtils.java           transformCounter(), pipelineDlqTotal(). Consistent n
 CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyOffset(). Must be implemented.
 DateUtils.java              resolveRunDate(), partitionedPath(), shardedTable(), toDisplayString().
 QueryParameterResolver.java resolve(template, paramMappings, options). Two-pass: standard then custom tokens.
+                             Custom tokens merge paramMappings (a step's query_params_json) with
+                             options.getCustomParamsJson() (--customParamsJson CLI flag) — the CLI value
+                             wins on a key collision. Malformed/non-object --customParamsJson throws.
 
 ```
 
@@ -708,11 +711,21 @@ Layer 2 — Standard tokens (both process types)
     {periodId}    → options.getPeriodId()
     {runDate}     → DateUtils.resolveRunDate(options).toString()
 
-Layer 3 — Custom tokens (both process types, from query_params_json column)
+Layer 3 — Custom tokens (both process types, from query_params_json column,
+          plus --customParamsJson from the CLI on top)
     QueryParameterResolver.resolve() — pass 2
     {exchange}  → "NYSE"    (from query_params_json)
     {threshold} → "10000"   (from query_params_json)
     Note: param values may reference standard tokens — those are resolved first.
+
+    --customParamsJson='{"exchange":"NASDAQ"}' is the CLI-supplied equivalent of
+    query_params_json, for a value that should come from the invocation itself
+    (Airflow DAG conf, ad-hoc CLI run) rather than be hard-coded into the stored
+    parameter_store row. On a key collision it wins over the step's own
+    query_params_json — e.g. the override above makes {exchange} resolve to
+    "NASDAQ" for this run only, no parameter_store edit needed. Malformed JSON
+    or a non-object root throws immediately rather than silently resolving to
+    nothing.
 
 Any number of custom tokens are supported. Unknown tokens are left unchanged.
 ```
@@ -862,8 +875,8 @@ new run reaches `COMPLETED`.
 ## 17. Build and run reference
 
 ```bash
-# Run unit tests (currently: beam-io pure-logic classes only — see beam-io/README.md)
-mvn -pl beam-io -am test
+# Run unit tests (currently: beam-io and beam-utils pure-logic classes only — see their READMEs)
+mvn -pl beam-io,beam-utils -am test
 
 # Build fat JAR from project root
 mvn package -pl beam-runner -am -DskipTests

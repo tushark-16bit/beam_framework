@@ -156,6 +156,20 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getPeriodEnd();
     void setPeriodEnd(String value);
 
+    @Description("JSON object of ad-hoc custom query-template tokens, resolved by "
+                 + "QueryParameterResolver for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING "
+                 + "query templates — the CLI-supplied equivalent of a step's own query_params_json "
+                 + "in parameter_store, for a value that should come from the invocation itself "
+                 + "(Airflow DAG conf, CLI) rather than be hard-coded into the stored config. "
+                 + "On a key collision with a step's own query_params_json, this value wins. "
+                 + "Values may reference {periodStart}/{periodEnd}/{periodId}/{runDate} — those "
+                 + "are resolved first. "
+                 + "Example: {\"exchange\":\"NYSE\",\"threshold\":\"10000\"} makes {exchange} and "
+                 + "{threshold} available in any query_template/bq_query this run resolves.")
+    @Default.String("")
+    String getCustomParamsJson();
+    void setCustomParamsJson(String value);
+
     // =========================================================================
     // PARAMETER BIGQUERY STORE  (config tables — read-only at runtime)
     // All pipeline configuration is stored in BigQuery and fetched at startup.
@@ -290,4 +304,12 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     @Default.Integer(0)
     int getBusinessDayOffset();
     void setBusinessDayOffset(int value);
+
+    @Description("Business calendar name used by CalendarUtils to resolve business days and "
+                 + "apply --businessDayOffset. Supported names are defined per CalendarUtils "
+                 + "implementation, e.g. DEFAULT (Mon-Fri, no holidays), NYSE, LSE, UK_BANKING, "
+                 + "IN_NSE. See CalendarUtils class Javadoc.")
+    @Default.String("DEFAULT")
+    String getCalendarName();
+    void setCalendarName(String value);
 }

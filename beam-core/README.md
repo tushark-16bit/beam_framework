@@ -95,7 +95,19 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 ```
 --runDate=2024-01-15
 --businessDayOffset=0
+--calendarName=NYSE          # optional, default "DEFAULT" — used by CalendarUtils
 ```
+
+### Custom query parameters (DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING)
+```
+--customParamsJson={"exchange":"NASDAQ","threshold":"10000"}
+```
+The CLI-supplied equivalent of a step's own `query_params_json` in `parameter_store`, for a
+value that should come from the invocation itself (Airflow DAG conf, an ad-hoc CLI run) rather
+than be hard-coded into stored config. Resolved by `QueryParameterResolver` alongside any
+step-level `query_params_json` — on a key collision, `--customParamsJson` wins. Values may
+reference `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}`, resolved first. Malformed JSON
+or a non-object root fails the run immediately rather than silently resolving to nothing.
 
 ### Pipeline selection (PIPELINE only)
 
@@ -106,9 +118,11 @@ and which are mandatory, so `PipelineSequenceFactory` reads that directly, runs 
 `COMPLETED` yet (batched into one Dataflow job), then runs the report via the unchanged
 `ReportPipelineFactory`.
 
-> **Source, sink, transform chain, retry/DLQ, calendar, and email settings** are no longer CLI flags.
+> **Source, sink, transform chain, retry/DLQ, and email settings** are no longer CLI flags.
 > They are fetched per-datasource from `parameter_store` via `PipelineRunConfig`.
 > Add a row with the appropriate keys (e.g. `source_type`, `sink_type`, `transform_chain`, etc.) to `parameter_store`.
+> (`--calendarName` remains a whole-run CLI flag — see below — distinct from `PipelineRunConfig`'s
+> own per-datasource `getCalendarName()`; the two serve different scopes.)
 
 ### Adding a new flag
 

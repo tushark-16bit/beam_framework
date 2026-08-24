@@ -16,6 +16,7 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `MetricsUtils` | Factory for consistently-named Beam counters, distributions, and gauges |
 | `CalendarUtils` | Business calendar stubs: `isBusinessDay`, `nextBusinessDay`, `applyOffset`, etc. |
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
+| `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens, then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
 
 ### DB adapter sub-package (`db/`)
 
@@ -27,7 +28,6 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `ParameterRepository` | Business queries: validate required params, fetch `SourceConfig` list with full per-source config |
 | `ReportRepository` | Report queries: fetch `ReportConfig` (all report tables), look up datasource output BQ table |
 | `DatabaseException` | Unchecked wrapper for `SQLException` — callers don't need to declare checked exceptions |
-| `QueryParameterResolver` | Resolves `{periodStart}`, `{periodEnd}`, `{periodId}`, `{runDate}` tokens in query templates |
 
 ```java
 // Pattern for fetching source config from BigQuery parameter_store:
@@ -37,6 +37,15 @@ List<SourceConfig> configs = repo.fetchSourceConfigs(
     options.getParentId(), options.getDatasourceName(),
     options.getSubprocessName(), options.getPeriodId());
 ```
+
+---
+
+## Unit tests
+
+`src/test/java` — `QueryParameterResolverTest.java`: standard-token resolution, step-level
+`query_params_json` resolution, `--customParamsJson` resolution and its override of a
+same-named step-level key, standard-token references inside a custom value, and malformed/
+non-object `--customParamsJson` rejection. Run with `mvn -pl beam-utils -am test`.
 
 **Required DB tables** (must be created before first run):
 
