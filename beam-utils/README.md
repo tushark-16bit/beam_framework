@@ -9,7 +9,7 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 
 | Class | Purpose |
 |---|---|
-| `BigQuerySchemaUtils` | Fetch real BQ table schema at pipeline-assembly time; table existence check; row count |
+| `BigQuerySchemaUtils` | Fetch real BQ table schema at pipeline-assembly time (table metadata or an operator-declared `bq_schema_json` list) |
 | `GcsUtils` | Pre-flight path checks, read/write small files, list objects, delete prefixes |
 | `SecretManagerUtils` | Fetch secrets from GCP Secret Manager by secret ID (never by value) |
 | `RowValidationUtils` | Stateless row-level validators: required fields, patterns, ranges, allowed values |
@@ -18,16 +18,10 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
 | `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens, then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
 
-### DB adapter sub-package (`db/`)
-
-| Class | Purpose |
-|---|---|
-| `DatabaseAdapter` | Interface for relational DB operations: `query`, `queryOne`, `update`, `close` |
-| `JdbcDatabaseAdapter` | JDBC + HikariCP implementation. One pool per instance; always use try-with-resources |
-| `DatabaseAdapterFactory` | Static factory: reads `--paramDb*` options, fetches password from Secret Manager |
-| `ParameterRepository` | Business queries: validate required params, fetch `SourceConfig` list with full per-source config |
-| `ReportRepository` | Report queries: fetch `ReportConfig` (all report tables), look up datasource output BQ table |
-| `DatabaseException` | Unchecked wrapper for `SQLException` — callers don't need to declare checked exceptions |
+There is no JDBC / relational-DB adapter in this module — the framework has no JDBC dependency
+anywhere (see `CLAUDE.md` §12). All configuration lives in BigQuery, fetched via
+`BigQuerySourceConfigRepository` (source configs) and `BigQueryReportRepository` (report configs)
+in `beam-io`.
 
 ```java
 // Pattern for fetching source config from BigQuery parameter_store:
@@ -163,17 +157,18 @@ this is preferred over `fetchBeamSchema()` when a source declares a schema.
 ## SecretManagerUtils — secrets pattern
 
 ```
-❌ BAD — secret in plaintext in Airflow DAG / pipeline options:
---smtpPassword=MyS3cr3tP@ss
+❌ BAD — secret in plaintext in Airflow DAG / pipeline options / parameter_store:
+smtp_password = MyS3cr3tP@ss
 
 ✅ GOOD — only the secret ID travels; value fetched at runtime:
---smtpPasswordSecretId=projects/my-project/secrets/smtp-password/versions/latest
+smtp_password_secret_id = projects/my-project/secrets/smtp-password/versions/latest
 ```
 
 ```java
-// In PipelineFactory (driver JVM, not in a DoFn):
-String smtpPassword = SecretManagerUtils.fetchSecret(options.getSmtpPasswordSecretId());
-// Pass smtpPassword directly to your code — never log it, never store it
+// In PipelineFactory or PostDownloadFinalizeTransform's @Setup (driver JVM, not per-element):
+String smtpPassword = SecretManagerUtils.fetchSecret(emailConfig.smtpPasswordSecretId);
+// emailConfig is a SourceFailureEmailConfig (or similar). Pass smtpPassword directly to
+// your code — never log it, never store it.
 ```
 
 IAM requirement: grant `roles/secretmanager.secretAccessor` to the Dataflow and

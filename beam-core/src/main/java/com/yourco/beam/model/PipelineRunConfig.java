@@ -105,34 +105,6 @@ public final class PipelineRunConfig {
         return get("dead_letter_sink");
     }
 
-    // ── Calendar ──────────────────────────────────────────────────────────────
-
-    public String getCalendarName() {
-        return get("calendar_name", "DEFAULT");
-    }
-
-    // ── Email / SMTP ──────────────────────────────────────────────────────────
-
-    public String getBusinessEmail() {
-        return get("business_email");
-    }
-
-    public String getDevErrorEmail() {
-        return get("dev_error_email");
-    }
-
-    public String getEmailSmtpHost() {
-        return get("email_smtp_host", "smtp.gmail.com");
-    }
-
-    public int getEmailSmtpPort() {
-        return Integer.parseInt(get("email_smtp_port", "587"));
-    }
-
-    public String getSmtpPasswordSecretId() {
-        return get("smtp_password_secret_id");
-    }
-
     // ── Generic extensibility ─────────────────────────────────────────────────
 
     /** Returns the raw value for any parameter_store key, or {@code null} if absent. */

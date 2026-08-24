@@ -41,7 +41,8 @@ import java.util.Properties;
  * // Send notification when pipeline completes (branch off success path)
  * PCollection<Row> notification = successRows.apply("BuildNotification",
  *     new BuildEmailRowTransform(options));
- * notification.apply("SendEmail", new SideEffectEmailTransform(options));
+ * notification.apply("SendEmail",
+ *     new SideEffectEmailTransform(smtpHost, smtpPort, smtpPasswordSecretId, fromAddress));
  * }</pre>
  *
  * <h2>Serialization</h2>

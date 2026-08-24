@@ -140,7 +140,6 @@ retry/RetryingDoFn.java               Generic retry + DLQ routing via TupleTag.
 model/FailedRecord.java               DLQ envelope. @DefaultCoder(SerializableCoder.class).
 model/Schemas.java                    RAW_JSON schema constant.
 model/DataSourceCheckpoint.java       Checkpoint row: daId, srceNm, vsnNo, perId (int), flNm, balAndCntlSmryTx, staCd. BQ cols: da_id INT64, srce_nm, vsn_no, per_id INT64, fl_nm, bal_and_cntl_smry_tx, sta_cd. Timestamps: DATETIME (LocalDateTime).
-model/DataSourceRecord.java           Record row: recId (UUID), daId, rowDaJsonTx (JSON blob), loadDt. BQ cols: rec_id, da_id, row_da_json_tx, load_dt.
 
 -- DATA_SOURCE_DOWNLOAD models --
 model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config.
@@ -170,7 +169,7 @@ model/ReportCheckpoint.java           RptRefer row: rptId, rptNm, perId (int), r
 model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtTs. Links a report run to a data source da_id.
 model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDaJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
 model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
-model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces 21 FrameworkOptions flags. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, getCalendarName, smtp settings, etc.) + generic get(key)/get(key, default) escape hatch.
+model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces FrameworkOptions flags for source, sink, transforms, and retry/DLQ. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, etc.) + generic get(key)/get(key, default) escape hatch. Calendar (--calendarName) and per-source failure email (SourceFailureEmailConfig) are configured elsewhere, not here.
 ```
 
 There is no separate PIPELINE config model. `ProcessType.PIPELINE` reuses `ReportConfig.datasources[]`
@@ -249,7 +248,7 @@ util/FileHeaderLegend.java            Helpers for the FILE-source column-letter 
 ### beam-utils — stateless helpers, no pipeline graph code
 
 ```
-BigQuerySchemaUtils.java    fetchBeamSchema(), tableExists(), fetchRowCount(). Call in driver JVM only. Type mapping: INTEGER/INT64→INT64, FLOAT/FLOAT64→DOUBLE, BOOLEAN/BOOL→BOOLEAN, BYTES→BYTES, TIMESTAMP/DATE/DATETIME/TIME→STRING (ISO strings preserved as-is from TableRow JSON encoding).
+BigQuerySchemaUtils.java    fetchBeamSchema(). Call in driver JVM only. Type mapping: INTEGER/INT64→INT64, FLOAT/FLOAT64→DOUBLE, BOOLEAN/BOOL→BOOLEAN, BYTES→BYTES, TIMESTAMP/DATE/DATETIME/TIME→STRING (ISO strings preserved as-is from TableRow JSON encoding).
                              toBeamSchema(List<SourceSchemaField>) builds a Schema from an operator-declared bq_schema_json list — no BQ call, no tables.get permission needed. Throws IllegalArgumentException on an unrecognised bqType (fail loudly on a config typo, unlike fetchBeamSchema()'s permissive STRING default for unmapped BQ-reported types).
 GcsUtils.java               pathHasFiles(), listFiles(), writeTextFile(), readTextFile(), readBytes(), deletePrefix().
 SecretManagerUtils.java     fetchSecret(secretId). Never log result. Never store in options value.

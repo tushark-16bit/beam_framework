@@ -158,36 +158,6 @@ public final class BigQuerySchemaUtils {
         return schema;
     }
 
-    /**
-     * Returns the number of rows in the given table. Useful for pre-flight validation
-     * in report pipelines (e.g., check source table is not empty before running).
-     *
-     * @param tableRef BigQuery table reference
-     * @return approximate row count, or -1 if unavailable
-     */
-    public static long fetchRowCount(String tableRef) {
-        BigQuery bq = BigQueryOptions.getDefaultInstance().getService();
-        Table table = bq.getTable(parseTableRef(tableRef));
-        if (table == null) return -1L;
-        StandardTableDefinition def = table.getDefinition();
-        Long rows = def.getNumRows();
-        return rows != null ? rows : -1L;
-    }
-
-    /**
-     * Returns {@code true} if the given table exists and is accessible.
-     * Safe to call at pipeline-assembly time for pre-flight checks.
-     */
-    public static boolean tableExists(String tableRef) {
-        try {
-            BigQuery bq = BigQueryOptions.getDefaultInstance().getService();
-            return bq.getTable(parseTableRef(tableRef)) != null;
-        } catch (Exception e) {
-            LOG.warn("Could not check table existence for {}: {}", tableRef, e.getMessage());
-            return false;
-        }
-    }
-
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /**

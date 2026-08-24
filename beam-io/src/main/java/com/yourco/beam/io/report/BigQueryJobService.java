@@ -91,9 +91,9 @@ public final class BigQueryJobService {
     /**
      * Returns the exact row count of {@code tableRef} via a live {@code SELECT COUNT(*)} query.
      *
-     * <p>Unlike {@code BigQuerySchemaUtils.fetchRowCount()} (table-metadata based, can lag
-     * right after a write), this always reflects rows visible at query time — needed
-     * immediately after {@link #runQueryToTable} materialises a fresh result.
+     * <p>Unlike a table-metadata row count (which can lag right after a write), this always
+     * reflects rows visible at query time — needed immediately after {@link #runQueryToTable}
+     * materialises a fresh result.
      *
      * @param tableRef table reference ({@code project.dataset.table})
      * @return exact row count

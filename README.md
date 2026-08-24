@@ -218,8 +218,9 @@ combines `--runDate`, `--businessDayOffset`, and `--calendarName` automatically.
 ```
 ✅ Correct pattern:
   1. Store secret in GCP Secret Manager
-  2. Pass only the secret ID: --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
-  3. Fetch at runtime: SecretManagerUtils.fetchSecret(options.getSmtpPasswordSecretId())
+  2. Store only the secret ID in parameter_store, e.g. smtp_password_secret_id =
+     projects/p/secrets/smtp/versions/latest (SourceFailureEmailConfig reads this key)
+  3. Fetch at runtime: SecretManagerUtils.fetchSecret(emailConfig.smtpPasswordSecretId)
 ```
 
 Grant `roles/secretmanager.secretAccessor` to the Dataflow + Cloud Composer service accounts.
@@ -569,4 +570,3 @@ its own and always re-runs fresh, pipeline or standalone.
 | Class | Produces | Use for |
 |---|---|---|
 | `SideEffectEmailTransform` | `PDone` | SMTP notifications (success/failure summary emails) |
-| `SideEffectDbWriteTransform` | `PDone` | Writing audit logs or status updates back to the parameter DB |

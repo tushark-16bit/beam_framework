@@ -13,12 +13,12 @@ Every other module depends on this one — it defines the language the whole fra
 | `transform` | `BeamTransform` (SPI interface), `TransformRegistry` | The extension point for adding new transforms |
 | `retry` | `RetryPolicy`, `ExponentialRetryPolicy`, `FixedRetryPolicy`, `RetryingDoFn` | Retry logic and dead-letter routing |
 | `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig`, `SourceSchemaField` | Shared data types — DATA_SOURCE_DOWNLOAD. `SourceSchemaField` is one column of the optional explicit schema declared via `bq_schema_json`, carried on `BqFetchConfig.schema` |
-| `model` | `DataSourceCheckpoint`, `DataSourceRecord`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint/record models, per-source transform and validation config. `DataSourceCheckpoint` status codes: `LOADING`, `COMPLETED`, `FAILED_BNC`, `FAILED_TRANSFORM`, `FAILED` |
+| `model` | `DataSourceCheckpoint`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint model, per-source transform and validation config. `DataSourceCheckpoint` status codes: `LOADING`, `COMPLETED`, `FAILED_BNC`, `FAILED_TRANSFORM`, `FAILED`. (`DaRec` record rows have no dedicated model class — `DataSourceRecordSinkTransform` builds each paginated JSON row directly.) |
 | `model` | `DataTransformConfig` | Optional post-storage SQL transform for one source's rows, run within the same `DATA_SOURCE_DOWNLOAD` run; carried on `SourceConfig.dataTransformConfig` |
 | `model` | `SourceFailureEmailConfig` | Optional failure-notification email config carried on `SourceConfig`; populated from `failure_email_*` keys in `parameters_val_json` |
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
-| `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces 21 CLI flags (source, sink, transforms, retry, calendar, email). Typed getters + generic `get(key)` for extensibility. |
+| `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces CLI flags for source, sink, transform chain, and retry/DLQ. Typed getters + generic `get(key)` for extensibility. Calendar and per-source failure email are configured elsewhere — see `--calendarName` and `SourceFailureEmailConfig`. |
 There is no separate model for the `PIPELINE` process type — it reuses `ReportConfig.datasources`
 (`List<ReportDatasourceRef>`, row above) directly. See `beam-runner/README.md`'s
 `PipelineSequenceFactory` section.
@@ -118,11 +118,12 @@ and which are mandatory, so `PipelineSequenceFactory` reads that directly, runs 
 `COMPLETED` yet (batched into one Dataflow job), then runs the report via the unchanged
 `ReportPipelineFactory`.
 
-> **Source, sink, transform chain, retry/DLQ, and email settings** are no longer CLI flags.
+> **Source, sink, transform chain, and retry/DLQ settings** are no longer CLI flags.
 > They are fetched per-datasource from `parameter_store` via `PipelineRunConfig`.
 > Add a row with the appropriate keys (e.g. `source_type`, `sink_type`, `transform_chain`, etc.) to `parameter_store`.
-> (`--calendarName` remains a whole-run CLI flag — see below — distinct from `PipelineRunConfig`'s
-> own per-datasource `getCalendarName()`; the two serve different scopes.)
+> Per-source failure-notification email (SMTP host/port/secret, recipients) is separate — it lives
+> on `SourceConfig.failureEmailConfig` (`SourceFailureEmailConfig`, `failure_email_*` keys), not on
+> `PipelineRunConfig`. `--calendarName` is a whole-run CLI flag — see below.
 
 ### Adding a new flag
 
