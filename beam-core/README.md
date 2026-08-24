@@ -19,6 +19,7 @@ Every other module depends on this one — it defines the language the whole fra
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
 | `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces 21 CLI flags (source, sink, transforms, retry, calendar, email). Typed getters + generic `get(key)` for extensibility. |
+| `model` | `PipelineConfig`, `PipelineStepConfig` (sealed), `DataSourceStep`, `ReportStep` | Ordered step sequence for a future `PIPELINE` process type (design in progress — no `ProcessType`/CLI/repository wiring yet). `PipelineStepConfig` is a sealed interface (`permits DataSourceStep, ReportStep`); `PipelineConfig`'s compact constructor rejects an empty sequence or one not ending in a `ReportStep`. `DataSourceStep` has no required/optional flag of its own — that's resolved via the terminal report's existing `ReportDatasourceRef.isRequired`, deliberately avoiding a second, independently-set flag for the same decision. |
 
 ---
 

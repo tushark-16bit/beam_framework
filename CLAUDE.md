@@ -169,6 +169,25 @@ model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtT
 model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDaJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
 model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
 model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces 21 FrameworkOptions flags. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, getCalendarName, smtp settings, etc.) + generic get(key)/get(key, default) escape hatch.
+
+-- PIPELINE models (sealed step hierarchy; repository/factory/CLI wiring not yet implemented) --
+model/PipelineConfig.java             Record: List<PipelineStepConfig> steps, from a new parameter_store JSON shape
+                                       {"steps":[...]} — a thin ordered pointer list into existing source_config/report
+                                       rows, not a duplicate of them. Compact constructor rejects empty/null steps and
+                                       any sequence not ending in a ReportStep ("always terminating in a report").
+                                       Defensively copies the list (List.copyOf).
+model/PipelineStepConfig.java         Sealed interface, permits DataSourceStep | ReportStep. type() returns the raw JSON
+                                       discriminator string for logging only — dispatch is instanceof, not switch, since
+                                       Java 17 (this project's target) has no finalized pattern-matching switch over
+                                       sealed types (that's Java 21).
+model/DataSourceStep.java             DATA_SOURCE step: datasourceName + subprocessName only. Deliberately carries no
+                                       required/optional flag of its own — whether its failure aborts the pipeline before
+                                       the terminal report runs is decided by matching it against the report's own
+                                       ReportDatasourceRef.isRequired (existing field, already enforced by
+                                       ReportPipelineFactory.checkDatasourceAvailability()), so there is exactly one place
+                                       that decision is declared instead of two that could disagree.
+model/ReportStep.java                 REPORT step: reportName + reportSubprocess. Always the last step (enforced by
+                                       PipelineConfig).
 ```
 
 ### beam-io — connectors and I/O adapters
