@@ -16,9 +16,16 @@ package com.yourco.beam.options;
  *   <li>{@link #REPORT_PROCESSING} — read data already written to {@code DaRec}, apply the transform
  *       chain, and route output to one or more sinks (GCS / BQ / API). Full lifecycle tracked in
  *       {@code DaRefer}; per-output detail written to {@code RptOutput}.</li>
+ *   <li>{@link #PIPELINE} — run an ordered sequence of steps (read from a
+ *       {@code parameter_store} {@code {"steps":[...]}} blob, see {@code PipelineSequenceFactory}):
+ *       every {@code DATA_SOURCE} step not already {@code COMPLETED} for the period is batched
+ *       into one Dataflow job, followed by exactly one terminal {@code REPORT} step. Composes
+ *       {@link #DATA_SOURCE_DOWNLOAD} and {@link #REPORT_PROCESSING} rather than replacing
+ *       either — both remain independently runnable.</li>
  * </ul>
  */
 public enum ProcessType {
     DATA_SOURCE_DOWNLOAD,
-    REPORT_PROCESSING
+    REPORT_PROCESSING,
+    PIPELINE
 }

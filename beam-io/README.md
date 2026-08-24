@@ -125,6 +125,14 @@ io/config/
                                      parameter_name=reportName). Parses parameters_val_json into ReportConfig.
                                      Includes datasources, preprocessing, transforms, outputs, email arrays,
                                      and top-level output_bq_table / output_bq_input_alias for per-report BQ write.
+    BigQueryPipelineConfigRepository — reads a PIPELINE run's ordered {"steps":[...]} JSON from parameter_store.
+                                     Key: (parameter_group_name=parentId, parameter_data_source=pipelineSubprocess,
+                                     parameter_name=pipelineName). Parses each step's "type" (DATA_SOURCE | REPORT)
+                                     into DataSourceStep | ReportStep — PipelineConfig's compact constructor then
+                                     rejects an empty sequence or one not ending in a REPORT step. A thin ordered
+                                     pointer list only: each step's actual config is still fetched by name via the
+                                     two repositories above, unchanged. Unrecognised step "type" throws at parse
+                                     time rather than being silently dropped.
 
 io/email/
     ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>)

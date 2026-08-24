@@ -55,14 +55,8 @@ public final class DataSourcePipelineFactory {
      * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility.
      */
     public Pipeline assemble(FrameworkOptions options) {
-        String jobRunId = options.getJobRunId();
-        if (jobRunId == null || jobRunId.isBlank()) {
-            jobRunId = UUID.randomUUID().toString();
-            options.setJobRunId(jobRunId);
-        }
-        LOG.info("DATA_SOURCE_DOWNLOAD | jobRunId={} | datasource={} | period={} | subprocess={}",
-                 jobRunId, options.getDatasourceName(), options.getPeriodId(),
-                 options.getSubprocessName());
+        LOG.info("DATA_SOURCE_DOWNLOAD | datasource={} | period={} | subprocess={}",
+                 options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
 
         validateRequiredParameters(options);
 
@@ -71,6 +65,31 @@ public final class DataSourcePipelineFactory {
             options.getParentId(), options.getDatasourceName(),
             options.getSubprocessName(), options.getPeriodId());
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
+
+        return assembleForConfigs(options, sourceConfigs);
+    }
+
+    /**
+     * Same assembly as {@link #assemble} — checkpoint filtering, {@code --manualOverrun}
+     * previous-{@code da_id} capture, LOADING checkpoint creation, per-source Beam branch
+     * assembly — starting from an explicitly supplied list of {@link SourceConfig} instead of
+     * fetching by a single {@code --datasourceName}. Used by {@code PipelineSequenceFactory} to
+     * batch every {@code DATA_SOURCE} step of a {@code PIPELINE} run's still-pending sources
+     * (each fetched by its own name, possibly several different datasources) into one Dataflow
+     * job — sources already {@code COMPLETED} for the period are still skipped here exactly as
+     * they are for a standalone {@code DATA_SOURCE_DOWNLOAD} run, via the same
+     * {@link #filterByCheckpoint}.
+     *
+     * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility. Assigns a
+     * {@code jobRunId} exactly like {@link #assemble} does, if the caller hasn't already.
+     */
+    public Pipeline assembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
+        String jobRunId = options.getJobRunId();
+        if (jobRunId == null || jobRunId.isBlank()) {
+            jobRunId = UUID.randomUUID().toString();
+            options.setJobRunId(jobRunId);
+        }
+        LOG.info("Assembling {} source config(s) | jobRunId={}", sourceConfigs.size(), jobRunId);
 
         BigQueryDataSourceCheckpointAdapter checkpointAdapter =
             new BigQueryDataSourceCheckpointAdapter(options);

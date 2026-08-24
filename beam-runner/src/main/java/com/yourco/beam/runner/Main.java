@@ -14,6 +14,8 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   --processType=DATA_SOURCE_DOWNLOAD  →  DataSourcePipelineFactory
  *   --processType=REPORT_PROCESSING     →  PipelineFactory (general-purpose factory)
+ *   --processType=PIPELINE              →  PipelineSequenceFactory (ordered DATA_SOURCE steps,
+ *                                            batched into one job, then a terminal REPORT step)
  * </pre>
  *
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
@@ -66,6 +68,7 @@ public final class Main {
         switch (options.getProcessType()) {
             case DATA_SOURCE_DOWNLOAD -> runDataSourceDownload(options);
             case REPORT_PROCESSING    -> runReportProcessing(options);
+            case PIPELINE             -> runPipelineSequence(options);
         }
     }
 
@@ -126,5 +129,13 @@ public final class Main {
         } else {
             LOG.info("Streaming pipeline submitted. Job running indefinitely until cancelled.");
         }
+    }
+
+    // ── PIPELINE ─────────────────────────────────────────────────────────────
+
+    private static void runPipelineSequence(FrameworkOptions options) {
+        LOG.info("PIPELINE | pipeline={} subprocess={} period={}",
+                 options.getPipelineName(), options.getPipelineSubprocess(), options.getPeriodId());
+        new PipelineSequenceFactory().execute(options);
     }
 }

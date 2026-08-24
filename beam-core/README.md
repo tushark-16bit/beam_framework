@@ -19,7 +19,7 @@ Every other module depends on this one — it defines the language the whole fra
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
 | `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces 21 CLI flags (source, sink, transforms, retry, calendar, email). Typed getters + generic `get(key)` for extensibility. |
-| `model` | `PipelineConfig`, `PipelineStepConfig` (sealed), `DataSourceStep`, `ReportStep` | Ordered step sequence for a future `PIPELINE` process type (design in progress — no `ProcessType`/CLI/repository wiring yet). `PipelineStepConfig` is a sealed interface (`permits DataSourceStep, ReportStep`); `PipelineConfig`'s compact constructor rejects an empty sequence or one not ending in a `ReportStep`. `DataSourceStep` has no required/optional flag of its own — that's resolved via the terminal report's existing `ReportDatasourceRef.isRequired`, deliberately avoiding a second, independently-set flag for the same decision. |
+| `model` | `PipelineConfig`, `PipelineStepConfig` (sealed), `DataSourceStep`, `ReportStep` | Ordered step sequence for the `PIPELINE` process type. `PipelineStepConfig` is a sealed interface (`permits DataSourceStep, ReportStep`); `PipelineConfig`'s compact constructor rejects an empty sequence or one not ending in a `ReportStep`. `DataSourceStep` has no required/optional flag of its own — that's resolved via the terminal report's own `ReportDatasourceRef.required`, deliberately avoiding a second, independently-set flag for the same decision. Fetched by `BigQueryPipelineConfigRepository`; run by `PipelineSequenceFactory` (both in sibling modules — see their own READMEs). |
 
 ---
 
@@ -29,7 +29,7 @@ Every other module depends on this one — it defines the language the whole fra
 |---|---|---|
 | `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Fetch raw data from APIs/files/BQ; creates LOADING checkpoint, runs workers, runs BnC post-pipeline |
 | `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | Transform downloaded data into reports |
-| `POST_DOWNLOAD_VALIDATION` | `--processType=POST_DOWNLOAD_VALIDATION` | Run BnC validation + final checkpoint update for a Classic Template job that has already finished. Requires `--daId=<N>`. Used as a separate Airflow task after the DataflowJobStateSensor passes. |
+| `PIPELINE` | `--processType=PIPELINE` | Run an ordered sequence of `DATA_SOURCE` steps (batched into one Dataflow job) followed by a terminal `REPORT` step, read from one `parameter_store` row (`--pipelineName`/`--pipelineSubprocess`). Composes the other two process types rather than replacing them. |
 
 ```bash
 # Download raw trades from an external API
@@ -94,6 +94,17 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 --runDate=2024-01-15
 --businessDayOffset=0
 ```
+
+### Pipeline selection (PIPELINE only)
+```
+--pipelineName=daily_trading_pipeline
+--pipelineSubprocess=eod    # default: "default"
+```
+Looks up a `{"steps":[...]}` row in `parameter_store` — an ordered sequence of `DATA_SOURCE`
+steps (batched into one Dataflow job) followed by a terminal `REPORT` step. `--reportName`/
+`--reportSubprocess` are not passed on the command line for `PIPELINE` — `PipelineSequenceFactory`
+sets them itself from the sequence's terminal step before delegating to the unchanged
+`ReportPipelineFactory`.
 
 > **Source, sink, transform chain, retry/DLQ, calendar, and email settings** are no longer CLI flags.
 > They are fetched per-datasource from `parameter_store` via `PipelineRunConfig`.
