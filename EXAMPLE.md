@@ -68,12 +68,17 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.DaRefer` (
   lst_updt_ts          DATETIME  NOT NULL
 );
 
--- DaRec: all source rows from every DATA_SOURCE_DOWNLOAD run, stored as JSON blobs.
--- Filter by da_id (FK → DaRefer) to retrieve all rows for one run.
+-- DaRec: all source rows from every DATA_SOURCE_DOWNLOAD run, stored as paginated JSON blobs.
+-- One DaRec row = one PAGE of up to 250 source rows (row_da_json_tx is a JSON ARRAY, e.g.
+-- [{"currency":"USD",...},{"currency":"EUR",...}]), not one row per DaRec row. An 8-row source
+-- like the trades example below produces a single page (1 DaRec row, page_no=1).
+-- Filter by da_id (FK → DaRefer) and UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to retrieve
+-- individual source rows across all pages of a run.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.DaRec` (
-  rec_id         STRING    NOT NULL,   -- UUID per row
+  rec_id         STRING    NOT NULL,   -- UUID per page
   da_id          INT64     NOT NULL,   -- FK → DaRefer.da_id
-  row_da_json_tx STRING,               -- source row serialised as JSON after transforms
+  page_no        INT64     NOT NULL,   -- 1-based page number within this da_id (≤250 rows/page)
+  row_da_json_tx STRING,               -- JSON array of source rows in this page, after transforms
   load_dt        DATE      NOT NULL,   -- partition column; set once per run
   lst_updt_ts    DATETIME  NOT NULL
 )
@@ -99,12 +104,12 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptDaMap` (
   lst_updt_ts DATETIME  NOT NULL
 );
 
--- RptStageDa: transient staging table — DaRec rows are copied here before transforms,
--- then deleted via clearStagedData() at the end of every successful run.
+-- RptStageDa: transient staging table — DaRec pages are un-nested into individual source rows
+-- here before transforms, then deleted via clearStagedData() at the end of every successful run.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptStageDa` (
   stage_id        INT64     NOT NULL,   -- surrogate PK (base + ROW_NUMBER per bulk INSERT)
   map_id          INT64     NOT NULL,   -- FK → RptDaMap.map_id
-  stage_da_json_tx STRING,              -- source row JSON (copied from DaRec.row_da_json_tx)
+  stage_da_json_tx STRING,              -- one source row's JSON (un-nested from a DaRec page's array)
   query_config_tx  STRING,              -- JSON metadata: {da_id, map_id}
   load_dt         DATE      NOT NULL,
   lst_updt_ts     DATETIME  NOT NULL
@@ -187,7 +192,7 @@ VALUES (
     "bq_table":       "trades",
     "bq_query":       "SELECT trade_id, currency, amount, trade_date, desk FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\"",
     "min_row_count":  "1",
-    "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000,\"tolerancePct\":0.01}]",
+    "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":1170000,\"tolerancePct\":0.01}]",
 
     "failure_email_to":      "ops-team@example.com,data-owner@example.com",
     "failure_email_cc":      "manager@example.com",
@@ -230,7 +235,7 @@ VALUES (
         "step_name":       "aggregate_by_currency",
         "input_alias":     "raw_trades",
         "output_alias":    "summary",
-        "query_template":  "SELECT JSON_VALUE(row_da_json_tx, ''$.currency'') AS currency, SUM(CAST(JSON_VALUE(row_da_json_tx, ''$.amount'') AS FLOAT64)) AS total_amount, COUNT(*) AS trade_count FROM {raw_trades} GROUP BY currency ORDER BY total_amount DESC",
+        "query_template":  "SELECT JSON_VALUE(stage_da_json_tx, ''$.currency'') AS currency, SUM(CAST(JSON_VALUE(stage_da_json_tx, ''$.amount'') AS FLOAT64)) AS total_amount, COUNT(*) AS trade_count FROM {raw_trades} GROUP BY currency ORDER BY total_amount DESC",
         "output_bq_table": "my-gcp-project.reports.daily_trades_summary",
         "query_params_json": {}
       }
@@ -356,7 +361,7 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 3 | Run preprocessing steps in `step_order` (BQ_QUERY or API_ENRICHMENT), if any | — |
 | 4 | For each required datasource ref: `isCompleted(srce_nm, 202401)` via DaRefer — fail if not COMPLETED | — |
 | 5 | For each datasource ref: `fetchLatestCompletedDaId()` → `addDaMapping(rpt_id, da_id)` → RptDaMap row | — |
-| 6 | `stageFromDaRec(map_id, da_id)` — bulk copy DaRec rows for that da_id into RptStageDa | — |
+| 6 | `stageFromDaRec(map_id, da_id)` — CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to un-nest every DaRec page for that da_id into individual source rows, bulk-inserted into RptStageDa (one stage_da_json_tx row per source row, page boundaries invisible from here on) | — |
 | 7 | Register alias: `raw_trades` → `(SELECT stage_da_json_tx FROM RptStageDa WHERE map_id=X)` | — |
 | 8 | Run transform chain in `step_order`: resolve alias + period tokens → `runQueryToTable(sql, output_bq_table)` | — |
 | 9 | Route each output: BQ export job → GCS CSV or JSON | — |
@@ -386,17 +391,24 @@ WHERE srce_nm = 'trades' AND per_id = 202401
 ORDER BY lst_updt_ts DESC
 LIMIT 5;
 
--- DaRec: count rows written by a specific download run (replace 42 with actual da_id)
-SELECT COUNT(*) AS row_count, MIN(load_dt) AS load_dt
+-- DaRec: how many pages a download run wrote (replace 42 with actual da_id) — NOT the source
+-- row count, since each page can hold up to 250 rows; see the next query for that.
+SELECT COUNT(*) AS page_count, MIN(load_dt) AS load_dt
 FROM `my-gcp-project.pipeline_metadata.DaRec`
 WHERE da_id = 42;
 
--- DaRec: sample a few rows for a run
-SELECT rec_id,
-       JSON_VALUE(row_da_json_tx, '$.currency') AS currency,
-       CAST(JSON_VALUE(row_da_json_tx, '$.amount') AS FLOAT64) AS amount,
-       load_dt
+-- DaRec: count and sample individual source rows for a run — un-nest every page first
+SELECT COUNT(*) AS row_count
 FROM `my-gcp-project.pipeline_metadata.DaRec`
+CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json
+WHERE da_id = 42;
+
+SELECT
+  JSON_VALUE(row_json, '$.currency')                   AS currency,
+  CAST(JSON_VALUE(row_json, '$.amount') AS FLOAT64)    AS amount,
+  load_dt
+FROM `my-gcp-project.pipeline_metadata.DaRec`
+CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json
 WHERE da_id = 42
 LIMIT 10;
 
@@ -453,9 +465,9 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 | 3 | Validate required parameters present in BQ | — |
 | 4 | Check DaRefer — skip if `sta_cd=COMPLETED` already exists (unless `--overrideDownload`) | — |
 | 5 | `createCheckpoint('trades', '202401', '<bq-table-ref>')` → DaRefer row | → **LOADING** |
-| 6 | Dataflow: read source → apply transforms → write rows to DaRec as `row_da_json_tx` JSON | — |
+| 6 | Dataflow: read source → apply transforms → paginate at ≤250 rows/page → write each page as one DaRec row (`row_da_json_tx` = JSON array) | — |
 | 7 | `waitUntilFinish()` | — |
-| 8 | `COUNT(*) FROM DaRec WHERE da_id = X` + BnC SUM checks | — |
+| 8 | Un-nest every page (`CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx))`) then `COUNT(*)` + BnC SUM checks against individual rows | — |
 | 9a | All checks pass → `updateStatus(COMPLETED, bncJson)` | → **COMPLETED** |
 | 9b | BnC mismatch → `updateStatus(FAILED_BNC, bncJson)` → send failure email if `failure_email_to` configured | → **FAILED_BNC** |
 | 9c | Infrastructure error → `updateStatus(FAILED, errorJson)` → send failure email if configured | → **FAILED** |
@@ -481,8 +493,8 @@ Available body/subject tokens: `{datasourceName}`, `{periodId}`, `{staCd}`, `{er
 
 ```
 currency,total_amount,trade_count
-USD,455000.0,3
 JPY,500000.0,1
+USD,455000.0,3
 EUR,120000.0,2
 GBP,95000.0,2
 ```
