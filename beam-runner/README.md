@@ -153,6 +153,17 @@ merged" rule still holds — no `Flatten.pCollections()` across sources), so sub
 pending `DATA_SOURCE` step in this run as one Dataflow job is just `DataSourcePipelineFactory`'s
 existing multi-source behavior, reused rather than reinvented.
 
+**`--manualOverrun` applies uniformly across the whole sequence** — no PIPELINE-specific flag or
+logic needed, because `PipelineSequenceFactory` passes the exact same `options` instance straight
+into both `DataSourcePipelineFactory.assembleForConfigs()` and `ReportPipelineFactory.execute()`:
+- Every `DATA_SOURCE` step bypasses its own `COMPLETED` skip-guard and re-downloads, superseding
+  its previous run's `DaRec` rows once the new run completes — identical to standalone
+  `DATA_SOURCE_DOWNLOAD` under `--manualOverrun`, since it's the same `filterByCheckpoint` check
+  reading the same flag off the same options object.
+- The terminal `REPORT` step needs no equivalent handling: `ReportPipelineFactory` has no
+  `COMPLETED`-skip guard of its own to begin with — every invocation already inserts a fresh
+  `RptRefer` row and re-runs, `--manualOverrun` or not.
+
 ---
 
 ## Building the fat JAR

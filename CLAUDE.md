@@ -334,6 +334,12 @@ PipelineSequenceFactory.java    PIPELINE: BigQueryPipelineConfigRepository.fetch
                                 datasources[] → treated as not required). Terminal ReportStep then runs via the
                                 unchanged ReportPipelineFactory.execute() (sets options.reportName/reportSubprocess
                                 first). Composes both existing factories rather than reimplementing either.
+                                --manualOverrun applies uniformly across the whole sequence with no PIPELINE-specific
+                                code: the same options instance is passed straight into both assembleForConfigs()
+                                and ReportPipelineFactory.execute(), so every DATA_SOURCE step gets the same
+                                bypass-COMPLETED-guard-and-supersede treatment DataSourcePipelineFactory already
+                                gives it standalone. The REPORT step needs nothing extra — it has no COMPLETED
+                                guard of its own and always re-runs, manualOverrun or not.
 
 example/ExampleWorkflow.java    Self-contained end-to-end example. Shows: BigQueryParameterAdapter
                                 → fetchRequiredParameters → resolve tokens → BigQueryJobService

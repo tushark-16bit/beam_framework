@@ -109,7 +109,11 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
                  + "Takes effect alongside --overrideDownload (either flag enables the re-run). "
                  + "The superseded run always gets a fresh DaRefer row (never overwritten) — once the new "
                  + "run reaches COMPLETED, only the previous run's DaRec rows are deleted, reclaiming the "
-                 + "superseded bulk data while the full DaRefer run history is preserved.")
+                 + "superseded bulk data while the full DaRefer run history is preserved. "
+                 + "Also applies under --processType=PIPELINE: every DATA_SOURCE step in the sequence gets "
+                 + "this same bypass-and-supersede treatment (PipelineSequenceFactory passes this same "
+                 + "options object straight into DataSourcePipelineFactory, unchanged). The terminal REPORT "
+                 + "step needs no equivalent flag — it has no COMPLETED guard of its own and always re-runs.")
     @Default.Boolean(false)
     boolean getManualOverrun();
     void setManualOverrun(boolean value);

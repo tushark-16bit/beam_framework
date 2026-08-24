@@ -51,6 +51,24 @@ import java.util.List;
  * <p>Composes the existing {@link DataSourcePipelineFactory} and {@link ReportPipelineFactory}
  * rather than reimplementing either — this class only decides which sources to batch together
  * and whether an incomplete one should stop the sequence before the report runs.
+ *
+ * <h2>{@code --manualOverrun}</h2>
+ * Applies uniformly across the whole sequence, exactly as it does standalone, because the same
+ * {@code options} instance — never a copy, never a reset field — is passed straight into both
+ * {@link DataSourcePipelineFactory#assembleForConfigs} and {@link ReportPipelineFactory#execute}:
+ * <ul>
+ *   <li>Every {@code DATA_SOURCE} step bypasses its own {@code COMPLETED} skip-guard and
+ *       re-downloads, superseding its previous run's {@code DaRec} rows once the new run
+ *       completes — identical to standalone {@code DATA_SOURCE_DOWNLOAD} under
+ *       {@code --manualOverrun}, because it's the same {@code filterByCheckpoint} check reading
+ *       the same flag off the same options object.</li>
+ *   <li>The terminal {@code REPORT} step needs no special handling at all —
+ *       {@code ReportPipelineFactory} has no {@code COMPLETED}-skip guard of its own to begin
+ *       with (see its class javadoc); every invocation already inserts a fresh {@code RptRefer}
+ *       row and re-runs, {@code --manualOverrun} or not.</li>
+ * </ul>
+ * This is a real invariant this class relies on, not an accident of implementation — do not
+ * introduce a scoped copy of {@code options} for either phase without re-threading this flag.
  */
 public final class PipelineSequenceFactory {
 
@@ -63,6 +81,12 @@ public final class PipelineSequenceFactory {
         String pipelineSubprocess = options.getPipelineSubprocess();
         LOG.info("PIPELINE | pipeline={} subprocess={} period={}",
                  pipelineName, pipelineSubprocess, options.getPeriodId());
+        if (options.getManualOverrun()) {
+            LOG.info("--manualOverrun=true: every DATA_SOURCE step in this sequence will bypass "
+                     + "its COMPLETED guard and re-download, superseding its previous run once "
+                     + "complete — same as standalone DATA_SOURCE_DOWNLOAD. The terminal REPORT "
+                     + "step always re-runs regardless (it has no COMPLETED guard of its own).");
+        }
 
         BigQueryPipelineConfigRepository pipelineRepo = new BigQueryPipelineConfigRepository(options);
         PipelineConfig pipelineConfig = pipelineRepo.fetchPipelineConfig(pipelineName, pipelineSubprocess);

@@ -548,6 +548,12 @@ java -jar beam-runner-bundled.jar \
   --paramBqDataset=dw
 ```
 
+**`--manualOverrun` works exactly as it does standalone**, uniformly across the whole sequence —
+no separate PIPELINE-specific flag. Every `DATA_SOURCE` step bypasses its own `COMPLETED` guard
+and re-downloads, superseding its previous run's `DaRec` rows once complete, same as standalone
+`DATA_SOURCE_DOWNLOAD`. The terminal `REPORT` step needs no flag at all: it has no `COMPLETED`
+guard of its own and always re-runs fresh, pipeline or standalone.
+
 ## Built-in transforms reference
 
 | Token | Options | Description |
