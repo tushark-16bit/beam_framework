@@ -59,8 +59,10 @@ DataSourcePipelineFactory.assemble(options)
                    ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on)
                    ├─ min/max row count bounds check (optional, from config)
                    ├─ data_transform_query (optional; only if the checks above passed):
-                   │     BigQueryJobService.runQueryToTable() against a {data} → UNNEST(DaRec)
-                   │     subquery; validates output row count; only then replaceStoredRows() runs
+                   │     a `WITH data AS (...)` UNNEST(DaRec) CTE is always prepended — never
+                   │     opt-in, the operator's query just references `data` as a plain table —
+                   │     then BigQueryJobService.runQueryToTable() runs it; validates output row
+                   │     count; only then replaceStoredRows() runs
                    │     DELETE + INSERT (re-paginated at 250 rows/page) as ONE atomic BigQuery
                    │     multi-statement transaction (BEGIN TRANSACTION...COMMIT, ROLLBACK on
                    │     error) — retried as a whole with backoff (~30s) since this run's rows were

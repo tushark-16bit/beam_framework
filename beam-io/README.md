@@ -294,8 +294,8 @@ source file's column order directly. Field paths are unaffected by the page-leve
 is the same letter-keyed row object regardless of which page shape it came from.
 
 **Reading these rows**: every `DaRec` reader that unnests `row_da_json_tx` into individual
-rows — `countRecords()`, `sumField()`, `data_transform_query`'s `{data}` token, REPORT_PROCESSING
-staging — extracts the row array with `FileHeaderLegend.dataArrayExpr()`, one SQL expression that
+rows — `countRecords()`, `sumField()`, the `data` CTE always prepended to `data_transform_query`,
+REPORT_PROCESSING staging — extracts the row array with `FileHeaderLegend.dataArrayExpr()`, one SQL expression that
 handles both page shapes (`IFNULL(JSON_EXTRACT_ARRAY(JSON_EXTRACT(row_da_json_tx, '$.Data')),
 JSON_EXTRACT_ARRAY(row_da_json_tx))`). No caller needs to know the source type or exclude
 anything explicitly — `DataHeaders` is structurally separate from `Data` and is simply never

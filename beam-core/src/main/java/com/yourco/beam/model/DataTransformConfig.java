@@ -8,18 +8,22 @@ import java.io.Serializable;
  *
  * <p>Runs in {@code PostDownloadFinalizeTransform} — after rows are written to {@code DaRec}
  * and after the existing row-count/BnC storage-integrity checks pass, but before the checkpoint
- * is marked {@code COMPLETED}. {@link #query} is real BigQuery Standard SQL, written against a
- * single {@code {data}} token that resolves to a subquery reunifying every paginated {@code DaRec}
+ * is marked {@code COMPLETED}. {@link #query} is real BigQuery Standard SQL, run underneath an
+ * always-prepended {@code WITH data AS (...)} CTE that reunifies every paginated {@code DaRec}
  * page for this run into one flat rowset of JSON strings — the same
  * {@code CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx))} pattern already used elsewhere
- * in this framework, so pagination is invisible to the operator's SQL. Each row in {@code {data}}
- * is a JSON object string; extract fields with {@code JSON_VALUE(row_json, '$.field')}.
+ * in this framework, so pagination is invisible to the operator's SQL. This CTE is unconditional:
+ * it runs every time {@link #query} runs, whether or not the operator's SQL actually references
+ * {@code data} — there is no placeholder token to remember to include, so unnesting can never be
+ * silently skipped by omission. Each row in {@code data} is a JSON object string; extract fields
+ * with {@code JSON_VALUE(row_json, '$.field')}.
  *
- * <p>Example:
+ * <p>Example ({@link #query} as stored — the {@code WITH data AS (...)} CTE is added automatically,
+ * not written by the operator):
  * <pre>{@code
  * SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id,
  *        ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2) AS amount_with_tax
- * FROM {data}
+ * FROM data
  * WHERE CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) > 0
  * }</pre>
  *
@@ -39,7 +43,7 @@ public final class DataTransformConfig implements Serializable {
     public static final long NO_MIN = 0L;
     public static final long NO_MAX = -1L;
 
-    /** SQL against the {@code {data}} token. Null means no transform is configured. */
+    /** SQL run beneath an always-prepended {@code WITH data AS (...)} CTE. Null means no transform is configured. */
     public final String query;
 
     /** Minimum acceptable row count in the transform's output. {@code 0} = no check. */

@@ -156,7 +156,7 @@ model/LookupConfig.java               Lookup table config: BQ source, key fields
 model/ValidationConfig.java           Post-fetch validation: header check, row count, BnC rules.
 model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
 model/SourceFailureEmailConfig.java   Optional failure-notification email config on SourceConfig. Populated from failure_email_* keys in parameters_val_json. isPresent() guards send.
-model/DataTransformConfig.java        Optional post-storage SQL transform (query + min/max output row bounds), run within the same DATA_SOURCE_DOWNLOAD run by PostDownloadFinalizeTransform, before COMPLETED. query is written against a {data} token (UNNEST(DaRec) reunification subquery). From data_transform_query/data_transform_min_row_count/data_transform_max_row_count.
+model/DataTransformConfig.java        Optional post-storage SQL transform (query + min/max output row bounds), run within the same DATA_SOURCE_DOWNLOAD run by PostDownloadFinalizeTransform, before COMPLETED. A `WITH data AS (...)` UNNEST(DaRec) reunification CTE is always prepended to query before it runs — unconditional, not opt-in — so the operator's SQL just references `data` as a plain table. From data_transform_query/data_transform_min_row_count/data_transform_max_row_count.
 
 -- REPORT_PROCESSING models --
 model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int.
@@ -297,7 +297,7 @@ DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creat
                                 manualOverrun capture, LOADING checkpoint creation, per-source branch assembly —
                                 so PipelineSequenceFactory can batch several explicitly-fetched SourceConfigs
                                 (one per PIPELINE DATA_SOURCE step) into the same single Dataflow job.
-PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional data_transform_query (post-storage SQL transform against a {data}→UNNEST(DaRec) subquery; validates output row count before replacing stored rows; original rows untouched on failure), optional BnC sum rules (against transformed rows if applied), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), manualOverrun cleanup (deletes the superseded previous da_id's DaRec rows, only on COMPLETED), failure email. Runs inside Beam worker.
+PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional data_transform_query (post-storage SQL transform; a WITH data AS (...) UNNEST(DaRec) CTE is always prepended before it runs, unconditionally — the operator's SQL just references `data` as a plain table; validates output row count before replacing stored rows; original rows untouched on failure), optional BnC sum rules (against transformed rows if applied), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), manualOverrun cleanup (deletes the superseded previous da_id's DaRec rows, only on COMPLETED), failure email. Runs inside Beam worker.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
                                 After transform chain, writes final result to per-report BQ table
@@ -502,9 +502,11 @@ Main.runDataSourceDownload(options)
        ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on, no config needed)
        ├─ min/max row count bounds check (optional; from min_row_count / max_row_count config)
        ├─ data_transform_query (optional; only if the checks above passed):
-       │   ├─ BigQueryJobService.runQueryToTable() runs the query against a {data} token resolved to
-       │   │   a CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) subquery — reunifies every
-       │   │   paginated DaRec page for this da_id into one flat rowset of JSON row strings
+       │   ├─ a `WITH data AS (...)` CTE — CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)),
+       │   │   reunifying every paginated DaRec page for this da_id into one flat rowset of JSON
+       │   │   row strings — is always prepended before the query runs; never opt-in, so the
+       │   │   operator's SQL just references `data` as a plain table, then
+       │   │   BigQueryJobService.runQueryToTable() runs the combined query
        │   ├─ BigQueryJobService.countRows() validates the output against data_transform_min/max_row_count
        │   └─ only if valid: replaceStoredRows() runs DELETE + INSERT (re-paginated at 250 rows/page)
        │       as ONE atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with
@@ -613,18 +615,19 @@ PIPELINE has no config of its own: it reads the same report config as REPORT_PRO
   "bq_schema_json": "[{\"name\":\"trade_id\",\"type\":\"STRING\"},{\"name\":\"amount\",\"type\":\"FLOAT64\"},{\"name\":\"trade_date\",\"type\":\"DATE\"}]",
   "min_row_count":  "1",
   "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]",
-  "data_transform_query":         "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id, ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2) AS amount_with_tax FROM {data}",
+  "data_transform_query":         "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id, ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2) AS amount_with_tax FROM data",
   "data_transform_min_row_count": "1"
 }
 ```
 
-`data_transform_query` is optional — see section 8. Real BigQuery Standard SQL against a single
-`{data}` token that resolves to a subquery reunifying every DaRec page for this run into a flat
-rowset of JSON row strings; extract fields with `JSON_VALUE(row_json, '$.field')`. Runs after
-storage integrity checks pass and before the checkpoint is marked `COMPLETED`; its output row
-count is validated against `data_transform_min_row_count`/`data_transform_max_row_count` before
-it replaces the stored rows — a failure at either step leaves the original rows untouched and
-sets `sta_cd=FAILED_TRANSFORM`.
+`data_transform_query` is optional — see section 8. Real BigQuery Standard SQL, run beneath a
+`WITH data AS (...)` CTE that the framework always prepends — unconditionally, not contingent on
+the query referencing any placeholder token — reunifying every DaRec page for this run into a flat
+rowset of JSON row strings; the operator's query just does `FROM data` like any other table, then
+extracts fields with `JSON_VALUE(row_json, '$.field')`. Runs after storage integrity checks pass
+and before the checkpoint is marked `COMPLETED`; its output row count is validated against
+`data_transform_min_row_count`/`data_transform_max_row_count` before it replaces the stored rows —
+a failure at either step leaves the original rows untouched and sets `sta_cd=FAILED_TRANSFORM`.
 
 `bq_schema_json` is optional and BQ-only. When present, it is the authoritative schema —
 `DataSourcePipelineFactory.fetchBqSchema()` uses it directly (no `bigquery.tables.get` call at

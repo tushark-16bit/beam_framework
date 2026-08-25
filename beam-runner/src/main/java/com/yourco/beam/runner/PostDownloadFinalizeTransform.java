@@ -42,10 +42,12 @@ import java.util.Map;
  * <h2>Phase order inside {@link FinalizeDoFn#runValidation}</h2>
  * <ol>
  *   <li>row_count_mismatch (always-on) + min/max row bounds (optional) against the raw stored rows</li>
- *   <li>{@code data_transform_query} (optional) — only attempted if phase 1 passed; runs against
- *       a reunified view of this run's stored rows, validates the output row count, and only
- *       then replaces the stored rows. A bounds failure or query error leaves the original rows
- *       untouched.</li>
+ *   <li>{@code data_transform_query} (optional) — only attempted if phase 1 passed; a {@code data}
+ *       CTE reunifying this run's stored rows is always prepended before the operator's query
+ *       runs (see {@link FinalizeDoFn#withDataCte}), so unnesting is never opt-in or skippable —
+ *       the operator's SQL just references {@code data} as a plain table. Validates the output
+ *       row count, and only then replaces the stored rows. A bounds failure or query error leaves
+ *       the original rows untouched.</li>
  *   <li>BnC sum rules (optional) — against whatever is now stored (raw or transformed)</li>
  *   <li>Checkpoint update. Only on {@code COMPLETED}: if {@code --manualOverrun} superseded a
  *       previous COMPLETED run, that previous run's DaRec rows are deleted here — DaRefer keeps
@@ -249,7 +251,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
          */
         private boolean applyDataTransform(DataTransformConfig transform,
                                            Map<String, Object> bncSummary, List<String> failures) {
-            String resolvedQuery = transform.query.replace("{data}", dataSubquery());
+            String resolvedQuery = withDataCte(transform.query);
             String tmpTable = datasetPrefix(daRecTableRef) + ".tmp_transform_" + daId;
             try {
                 bqJobService.runQueryToTable(resolvedQuery, tmpTable);
@@ -364,6 +366,25 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             return "(SELECT row_json FROM " + daRecTableRef
                 + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("row_da_json_tx") + ") AS row_json"
                 + " WHERE da_id = " + daId + ")";
+        }
+
+        /**
+         * Prepends a {@code data} CTE built from {@link #dataSubquery()} onto the operator's
+         * {@code data_transform_query}, so the reunified/un-nested row view is always computed
+         * and always available as a plain table reference named {@code data} — the operator's
+         * query just does {@code FROM data} (or joins it, etc.) like any other table; there is no
+         * placeholder token to remember to include, and unnesting is never skipped by omission.
+         *
+         * <p>If the operator's own query already starts with a {@code WITH} clause, {@code data}
+         * is inserted as its first CTE (comma-joined with theirs) rather than emitting a second,
+         * illegal {@code WITH} keyword.
+         */
+        private String withDataCte(String userQuery) {
+            String trimmed = userQuery.stripLeading();
+            if (trimmed.regionMatches(true, 0, "WITH", 0, 4)) {
+                return "WITH data AS " + dataSubquery() + ",\n" + trimmed.substring(4).stripLeading();
+            }
+            return "WITH data AS " + dataSubquery() + "\n" + userQuery;
         }
 
         /**

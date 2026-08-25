@@ -86,7 +86,7 @@ import java.util.Map;
  *   // Post-storage data transform (optional; see DataTransformConfig)
  *   "data_transform_query":          "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id,
  *                                     ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2)
- *                                     AS amount_with_tax FROM {data}",
+ *                                     AS amount_with_tax FROM data",
  *   "data_transform_min_row_count":  "1",
  *   "data_transform_max_row_count":  "100000"
  * }
@@ -116,9 +116,11 @@ import java.util.Map;
  * <p>Real BigQuery Standard SQL, run by {@code PostDownloadFinalizeTransform} after this run's
  * rows are written to {@code DaRec} and the row-count/BnC storage-integrity checks pass, but
  * before the checkpoint is marked {@code COMPLETED} — see
- * {@link com.yourco.beam.model.DataTransformConfig}. Written against a single {@code {data}}
- * token that resolves to a subquery reunifying every paginated {@code DaRec} page for this run
- * into one flat rowset of JSON row strings, so pagination is invisible to the query. The
+ * {@link com.yourco.beam.model.DataTransformConfig}. A {@code WITH data AS (...)} CTE reunifying
+ * every paginated {@code DaRec} page for this run into one flat rowset of JSON row strings is
+ * always prepended before this query runs — unconditionally, not contingent on the query text
+ * referencing any placeholder — so pagination is invisible to the query and unnesting can never
+ * be skipped by omission; the query just does {@code FROM data} like any other table. The
  * transform's output row count is validated against {@code data_transform_min_row_count} /
  * {@code data_transform_max_row_count} before it replaces the stored rows — on failure, the
  * original rows are left untouched and the run fails with {@code FAILED_TRANSFORM}.
