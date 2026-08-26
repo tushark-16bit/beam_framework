@@ -45,7 +45,9 @@ Read it fully before making any changes. Written for any capable language model 
 ---
 
 For human-readable documentation, see [`README.md`](README.md), [`WALKTHROUGH.md`](WALKTHROUGH.md),
-and the per-module `README.md` files.
+and the per-module `README.md` files. [`docs/field-guide.html`](docs/field-guide.html) is a
+browsable, narrative walkthrough of the same material — open it in a browser rather than reading
+it as markdown.
 
 ---
 

@@ -4,6 +4,10 @@ A configurable, plug-and-play Apache Beam ETL pipeline framework for GCP Dataflo
 triggered by Apache Airflow (Cloud Composer). Supports BigQuery, GCS, and Pub/Sub.
 Written in Java 17.
 
+New to this codebase? [`docs/field-guide.html`](docs/field-guide.html) is a guided, browsable
+walkthrough of how each process type runs end to end, the checks in place, and the trade-offs
+behind how the framework is built — open it directly in a browser.
+
 ---
 
 ## Architecture
