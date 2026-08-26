@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptDaMap` (
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptStageDa` (
   stage_id        INT64     NOT NULL,   -- surrogate PK (base + ROW_NUMBER per bulk INSERT)
   map_id          INT64     NOT NULL,   -- FK → RptDaMap.map_id
-  stage_da_json_tx STRING,              -- one source row's JSON (un-nested from a DaRec page's array)
+  stage_ds_json_tx STRING,              -- one source row's JSON (un-nested from a DaRec page's array)
   query_config_tx  STRING,              -- JSON metadata: {da_id, map_id}
   load_dt         DATE      NOT NULL,
   lst_updt_ts     DATETIME  NOT NULL
@@ -235,7 +235,7 @@ VALUES (
         "step_name":       "aggregate_by_currency",
         "input_alias":     "raw_trades",
         "output_alias":    "summary",
-        "query_template":  "SELECT JSON_VALUE(stage_da_json_tx, ''$.currency'') AS currency, SUM(CAST(JSON_VALUE(stage_da_json_tx, ''$.amount'') AS FLOAT64)) AS total_amount, COUNT(*) AS trade_count FROM {raw_trades} GROUP BY currency ORDER BY total_amount DESC",
+        "query_template":  "SELECT JSON_VALUE(stage_ds_json_tx, ''$.currency'') AS currency, SUM(CAST(JSON_VALUE(stage_ds_json_tx, ''$.amount'') AS FLOAT64)) AS total_amount, COUNT(*) AS trade_count FROM {raw_trades} GROUP BY currency ORDER BY total_amount DESC",
         "output_bq_table": "my-gcp-project.reports.daily_trades_summary",
         "query_params_json": {}
       }
@@ -361,8 +361,8 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 3 | Run preprocessing steps in `step_order` (BQ_QUERY or API_ENRICHMENT), if any | — |
 | 4 | For each required datasource ref: `isCompleted(srce_nm, 202401)` via DaRefer — fail if not COMPLETED | — |
 | 5 | For each datasource ref: `fetchLatestCompletedDaId()` → `addDaMapping(rpt_id, da_id)` → RptDaMap row | — |
-| 6 | `stageFromDaRec(map_id, da_id)` — CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to un-nest every DaRec page for that da_id into individual source rows, bulk-inserted into RptStageDa (one stage_da_json_tx row per source row, page boundaries invisible from here on) | — |
-| 7 | Register alias: `raw_trades` → `(SELECT stage_da_json_tx FROM RptStageDa WHERE map_id=X)` | — |
+| 6 | `stageFromDaRec(map_id, da_id)` — CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to un-nest every DaRec page for that da_id into individual source rows, bulk-inserted into RptStageDa (one stage_ds_json_tx row per source row, page boundaries invisible from here on) | — |
+| 7 | Register alias: `raw_trades` → `(SELECT stage_ds_json_tx FROM RptStageDa WHERE map_id=X)` | — |
 | 8 | Run transform chain in `step_order`: resolve alias + period tokens → `runQueryToTable(sql, output_bq_table)` | — |
 | 9 | Route each output: BQ export job → GCS CSV or JSON | — |
 | 10 | `writeOutput(rpt_id, outpt_cd, output_ds, ...)` — inserts one RptOutput row per output step | — |
@@ -587,11 +587,11 @@ UPDATE `my-gcp-project.dw.parameter_store`
 SET parameters_val_json = JSON_SET(
   parameters_val_json,
   '$.transforms[0].query_template',
-  'SELECT JSON_VALUE(stage_da_json_tx, \'$.currency\') AS currency, '
-  || 'SUM(CAST(JSON_VALUE(stage_da_json_tx, \'$.amount\') AS FLOAT64)) AS total_amount, '
+  'SELECT JSON_VALUE(stage_ds_json_tx, \'$.currency\') AS currency, '
+  || 'SUM(CAST(JSON_VALUE(stage_ds_json_tx, \'$.amount\') AS FLOAT64)) AS total_amount, '
   || 'COUNT(*) AS trade_count '
   || 'FROM {raw_trades} '
-  || 'WHERE JSON_VALUE(stage_da_json_tx, \'$.desk\') = \'{desk}\' '
+  || 'WHERE JSON_VALUE(stage_ds_json_tx, \'$.desk\') = \'{desk}\' '
   || 'GROUP BY currency ORDER BY total_amount DESC'
 )
 WHERE parameter_group_name = 'TRADING' AND parameter_data_source = 'eod'

@@ -53,7 +53,7 @@ io/checkpoint/
     ReportCheckpointAdapter             — interface for 4 report tables: RptRefer (createCheckpoint/updateStatus/isCompleted), RptDaMap (addDaMapping), RptStageDa (stageFromDaRec/stagedDataSubquery/clearStagedData), RptOutput (writeOutput).
     BigQueryReportCheckpointAdapter     — BQ DML impl for all 4 report tables. All timestamps DATETIME. Stage_id generated via MAX+ROW_NUMBER() OVER().
                                           stageFromDaRec uses CROSS JOIN UNNEST(FileHeaderLegend.dataArrayExpr(...)) to un-nest
-                                          DaRec pages into individual source-row JSON objects in stage_da_json_tx — this handles
+                                          DaRec pages into individual source-row JSON objects in stage_ds_json_tx — this handles
                                           both a plain array page and a FILE source's {"Data":[...],"DataHeaders":[...]} page.
                                           The header legend, when present, lives in the separate DataHeaders array, so it's
                                           never unnested and never staged into a report's input data.

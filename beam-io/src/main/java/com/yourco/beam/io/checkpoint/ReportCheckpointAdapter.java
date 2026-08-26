@@ -82,7 +82,7 @@ public interface ReportCheckpointAdapter {
     /**
      * Returns the BQ subquery that exposes staged data for {@code mapId}.
      * The result is used as the alias value in the transform chain SQL:
-     * {@code (SELECT stage_da_json_tx FROM RptStageDa WHERE map_id = X)}.
+     * {@code (SELECT stage_ds_json_tx FROM RptStageDa WHERE map_id = X)}.
      */
     String stagedDataSubquery(long mapId);
 

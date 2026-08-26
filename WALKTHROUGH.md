@@ -659,7 +659,7 @@ erDiagram
     RptStageDa {
         INT64 stage_id PK
         INT64 map_id FK
-        STRING stage_da_json_tx
+        STRING stage_ds_json_tx
         STRING query_config_tx
         DATE load_dt
         DATETIME lst_updt_ts

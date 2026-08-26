@@ -141,13 +141,13 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
         // FILE source with a header row, {"Data":[...],"DataHeaders":[...]}.
         // FileHeaderLegend.dataArrayExpr() extracts just the row array either way, so
         // CROSS JOIN UNNEST un-nests each page into individual source-row JSON objects so that
-        // RptStageDa.stage_da_json_tx holds exactly one source row per staging row —
-        // consistent with what report transform SQL expects (JSON_VALUE(stage_da_json_tx, '$.field')).
+        // RptStageDa.stage_ds_json_tx holds exactly one source row per staging row —
+        // consistent with what report transform SQL expects (JSON_VALUE(stage_ds_json_tx, '$.field')).
         // stage_id is computed via ROW_NUMBER() to avoid per-row MAX lookups.
         // The header legend, when present, lives in DataHeaders — structurally separate from
         // Data, so it's never unnested and never staged into a report's input data.
         String sql = "INSERT INTO " + rptStageDaTable
-            + " (stage_id, map_id, stage_da_json_tx, query_config_tx, load_dt, lst_updt_ts)"
+            + " (stage_id, map_id, stage_ds_json_tx, query_config_tx, load_dt, lst_updt_ts)"
             + " SELECT"
             + "   IFNULL((SELECT MAX(stage_id) FROM " + rptStageDaTable + "), 0)"
             + "     + ROW_NUMBER() OVER (),"
@@ -172,7 +172,7 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
 
     @Override
     public String stagedDataSubquery(long mapId) {
-        return "(SELECT stage_da_json_tx FROM " + rptStageDaTable
+        return "(SELECT stage_ds_json_tx FROM " + rptStageDaTable
                + " WHERE map_id = " + mapId + ")";
     }
 

@@ -167,7 +167,7 @@ model/ReportOutputConfig.java         File output: CSV/JSON, GCS path, prefix, s
 model/ReportEmailConfig.java          Email: to, cc, subject/body templates with tokens.
 model/ReportCheckpoint.java           RptRefer row: rptId, rptNm, perId (int), rptDs, staCd, creatTs, lstUpdtTs. sta_cd: LOADING → COMPLETED / FAILED.
 model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtTs. Links a report run to a data source da_id.
-model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDaJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
+model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDsJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
 model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
 model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces FrameworkOptions flags for source, sink, transforms, and retry/DLQ. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, etc.) + generic get(key)/get(key, default) escape hatch. Calendar (--calendarName) and per-source failure email (SourceFailureEmailConfig) are configured elsewhere, not here.
 ```
@@ -555,7 +555,7 @@ Main.runReportProcessing(options)
     │       ├─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId(srceNm, perId) → da_id
     │       ├─ BigQueryReportCheckpointAdapter.addDaMapping(rptId, daId)   → map_id (RptDaMap row)
     │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → un-nests DaRec JSON array pages into individual source-row JSON objects in RptStageDa
-    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT stage_da_json_tx FROM RptStageDa WHERE map_id=X)
+    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT stage_ds_json_tx FROM RptStageDa WHERE map_id=X)
     │
     ├─ Phase 4: Transformation chain
     │   └─ for each ReportTransformStep (by step_order):

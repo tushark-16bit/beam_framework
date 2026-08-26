@@ -268,7 +268,7 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setRptDaMapTable(String value);
 
     @Description("BigQuery table name for the RptStageDa staging table. "
-                 + "Schema: stage_id INT64, map_id INT64, stage_da_json_tx STRING, "
+                 + "Schema: stage_id INT64, map_id INT64, stage_ds_json_tx STRING, "
                  + "query_config_tx STRING, load_dt DATE, lst_updt_ts DATETIME. "
                  + "Transient: rows are inserted before the transform chain and deleted after.")
     @Default.String("RptStageDa")
