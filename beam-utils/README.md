@@ -9,37 +9,37 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 
 | Class | Purpose |
 |---|---|
-| `BigQuerySchemaUtils` | Fetch real BQ table schema at pipeline-assembly time; table existence check; row count |
+| `BigQuerySchemaUtils` | Fetch real BQ table schema at pipeline-assembly time (table metadata or an operator-declared `bq_schema_json` list) |
 | `GcsUtils` | Pre-flight path checks, read/write small files, list objects, delete prefixes |
 | `SecretManagerUtils` | Fetch secrets from GCP Secret Manager by secret ID (never by value) |
 | `RowValidationUtils` | Stateless row-level validators: required fields, patterns, ranges, allowed values |
 | `MetricsUtils` | Factory for consistently-named Beam counters, distributions, and gauges |
 | `CalendarUtils` | Business calendar stubs: `isBusinessDay`, `nextBusinessDay`, `applyOffset`, etc. |
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
+| `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens, then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
 
-### DB adapter sub-package (`db/`)
-
-| Class | Purpose |
-|---|---|
-| `DatabaseAdapter` | Interface for relational DB operations: `query`, `queryOne`, `update`, `close` |
-| `JdbcDatabaseAdapter` | JDBC + HikariCP implementation. One pool per instance; always use try-with-resources |
-| `DatabaseAdapterFactory` | Static factory: reads `--paramDb*` options, fetches password from Secret Manager |
-| `ParameterRepository` | Business queries: validate required params, fetch `SourceConfig` list with full per-source config |
-| `ReportRepository` | Report queries: fetch `ReportConfig` (all report tables), look up datasource output BQ table |
-| `DatabaseException` | Unchecked wrapper for `SQLException` — callers don't need to declare checked exceptions |
-| `QueryParameterResolver` | Resolves `{periodStart}`, `{periodEnd}`, `{periodId}`, `{runDate}` tokens in query templates |
+There is no JDBC / relational-DB adapter in this module — the framework has no JDBC dependency
+anywhere (see `CLAUDE.md` §12). All configuration lives in BigQuery, fetched via
+`BigQuerySourceConfigRepository` (source configs) and `BigQueryReportRepository` (report configs)
+in `beam-io`.
 
 ```java
-// Pattern for parameter DB access (always try-with-resources):
-try (DatabaseAdapter db = DatabaseAdapterFactory.create(options)) {
-    ParameterRepository repo = new ParameterRepository(db, options);
-    if (!repo.allRequiredParametersExist(datasource, period, subprocess)) {
-        List<String> missing = repo.getMissingParameters(datasource, period, subprocess);
-        throw new RuntimeException("Missing: " + missing);
-    }
-    List<SourceConfig> configs = repo.fetchSourceConfigs(datasource, period, subprocess);
-}
+// Pattern for fetching source config from BigQuery parameter_store:
+BigQuerySourceConfigRepository repo = new BigQuerySourceConfigRepository(options);
+// fetchSourceConfigs throws IllegalStateException if the row is missing — no separate check needed
+List<SourceConfig> configs = repo.fetchSourceConfigs(
+    options.getParentId(), options.getDatasourceName(),
+    options.getSubprocessName(), options.getPeriodId());
 ```
+
+---
+
+## Unit tests
+
+`src/test/java` — `QueryParameterResolverTest.java`: standard-token resolution, step-level
+`query_params_json` resolution, `--customParamsJson` resolution and its override of a
+same-named step-level key, standard-token references inside a custom value, and malformed/
+non-object `--customParamsJson` rejection. Run with `mvn -pl beam-utils -am test`.
 
 **Required DB tables** (must be created before first run):
 
@@ -130,27 +130,45 @@ Schema schema = BigQuerySchemaUtils.fetchBeamSchema("my-project:my-dataset.order
 
 // Now pass schema into BigQuerySourceTransform so it produces typed Rows:
 // order_id STRING, customer_email STRING, amount DOUBLE, ...
-// instead of the generic _row_json STRING schema
+// instead of the generic name-only fallback (see BigQuerySourceTransform's own
+// SELECT * LIMIT 1 preview query, or Schemas.RAW_JSON as a last resort)
 ```
 
 **Never call inside a DoFn** — each worker would make a BQ API call.
+
+### toBeamSchema(declaredFields) — from an operator-declared schema, not BQ metadata
+
+Builds a `Schema` from a `List<SourceSchemaField>` — the parsed `bq_schema_json` column list
+on `BqFetchConfig.schema` — instead of querying BigQuery table metadata at all:
+
+```java
+Schema schema = BigQuerySchemaUtils.toBeamSchema(bqFetchConfig.schema);
+```
+
+No BQ API call, so no `bigquery.tables.get` permission needed — the schema is exactly what
+the operator declared in `parameter_store`. Unlike `fetchBeamSchema()` (which defaults an
+unrecognised BQ-reported type to STRING), an unrecognised `bqType` here throws
+`IllegalArgumentException` immediately — a typo in a human-entered schema should fail loudly,
+not silently produce wrong data. See `DataSourcePipelineFactory.fetchBqSchema()` for where
+this is preferred over `fetchBeamSchema()` when a source declares a schema.
 
 ---
 
 ## SecretManagerUtils — secrets pattern
 
 ```
-❌ BAD — secret in plaintext in Airflow DAG / pipeline options:
---smtpPassword=MyS3cr3tP@ss
+❌ BAD — secret in plaintext in Airflow DAG / pipeline options / parameter_store:
+smtp_password = MyS3cr3tP@ss
 
 ✅ GOOD — only the secret ID travels; value fetched at runtime:
---smtpPasswordSecretId=projects/my-project/secrets/smtp-password/versions/latest
+smtp_password_secret_id = projects/my-project/secrets/smtp-password/versions/latest
 ```
 
 ```java
-// In PipelineFactory (driver JVM, not in a DoFn):
-String smtpPassword = SecretManagerUtils.fetchSecret(options.getSmtpPasswordSecretId());
-// Pass smtpPassword directly to your code — never log it, never store it
+// In PipelineFactory or PostDownloadFinalizeTransform's @Setup (driver JVM, not per-element):
+String smtpPassword = SecretManagerUtils.fetchSecret(emailConfig.smtpPasswordSecretId);
+// emailConfig is a SourceFailureEmailConfig (or similar). Pass smtpPassword directly to
+// your code — never log it, never store it.
 ```
 
 IAM requirement: grant `roles/secretmanager.secretAccessor` to the Dataflow and

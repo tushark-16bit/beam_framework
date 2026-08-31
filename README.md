@@ -4,6 +4,10 @@ A configurable, plug-and-play Apache Beam ETL pipeline framework for GCP Dataflo
 triggered by Apache Airflow (Cloud Composer). Supports BigQuery, GCS, and Pub/Sub.
 Written in Java 17.
 
+New to this codebase? [`docs/field-guide.html`](docs/field-guide.html) is a guided, browsable
+walkthrough of how each process type runs end to end, the checks in place, and the trade-offs
+behind how the framework is built — open it directly in a browser.
+
 ---
 
 ## Architecture
@@ -218,8 +222,9 @@ combines `--runDate`, `--businessDayOffset`, and `--calendarName` automatically.
 ```
 ✅ Correct pattern:
   1. Store secret in GCP Secret Manager
-  2. Pass only the secret ID: --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
-  3. Fetch at runtime: SecretManagerUtils.fetchSecret(options.getSmtpPasswordSecretId())
+  2. Store only the secret ID in parameter_store, e.g. smtp_password_secret_id =
+     projects/p/secrets/smtp/versions/latest (SourceFailureEmailConfig reads this key)
+  3. Fetch at runtime: SecretManagerUtils.fetchSecret(emailConfig.smtpPasswordSecretId)
 ```
 
 Grant `roles/secretmanager.secretAccessor` to the Dataflow + Cloud Composer service accounts.
@@ -316,18 +321,22 @@ substitutions:
 
 | `--processType` | What runs | Source config from |
 |---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer` | BQ `source_config` table (keyed by `parent_id`, `subprocess_name`, `datasource_name`, `period_id`) |
-| `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, runs BQ transform chain, routes output to GCS/BQ/API, writes `COM_CmnRptDtl`, sends email | BQ `report_config` + 5 related tables |
+| `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer` | BQ `parameter_store` table (keyed by `parameter_group_name`, `parameter_data_source`, `parameter_name`) |
+| `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, stages data into `RptStageDa`, runs BQ transform chain, writes `RptOutput`, sends email | BQ `parameter_store` (nested JSON config) |
 | `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
+| `PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. Runs whichever datasources the report's own `datasources[]` declares (batched into **one** Dataflow job, skipping any already `COMPLETED`), then the report | Reuses the report's `datasources[]`/`is_required` — same BQ `parameter_store` row REPORT_PROCESSING already reads |
 
-The two process types are designed to be scheduled as **separate, sequential Airflow DAGs**:
-first `DATA_SOURCE_DOWNLOAD`, then `REPORT_PROCESSING` once all sources are `COMPLETED`.
+`DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` can still be scheduled as **separate, sequential
+Airflow DAGs** — first the download, then the report once all sources are `COMPLETED` — exactly
+as before. `PIPELINE` is an additional option for when a fixed sequence should run as a single
+JAR invocation instead: it composes the other two process types (reusing their existing factories
+unchanged) rather than replacing either.
 
 ## DATA_SOURCE_DOWNLOAD — per-source independent pipelines
 
-Sources are **never merged**. Each source in `source_config` produces its own independent
-Beam branch: read → transform chain → rows written as JSON blobs to `DaRec` (keyed by `DaId` from `DaRefer`).
-Adding a new datasource requires only a BQ row in `source_config` — no code change.
+Sources are **never merged**. Each source in `parameter_store` produces its own independent
+Beam branch: read → transform chain → rows written as JSON blobs to `DaRec` (keyed by `da_id` from `DaRefer`).
+Adding a new datasource requires only a BQ row in `parameter_store` — no code change.
 
 ### Supported source types
 
@@ -343,11 +352,11 @@ Pass `--periodStart=2024-01-01` and `--periodEnd=2024-01-31` as pipeline options
 injected into the `bq_query` template at runtime via `QueryParameterResolver`:
 
 ```sql
--- In source_config.bq_query:
+-- In parameter_store.parameters_val_json bq_query value:
 SELECT * FROM trades WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'
 ```
 
-Additional named params go in `source_config.query_params_json`:
+Additional named params go in the `parameters_val_json` `query_params_json` field:
 ```json
 {"startDate": "{periodStart}", "exchange": "NYSE"}
 ```
@@ -369,14 +378,14 @@ After the pipeline writes rows to `DaRec`, the driver JVM validates:
 | Check | Configuration | Result on failure |
 |---|---|---|
 | Header check | `required_headers_json` | Logged at pipeline-assembly time |
-| Row count | `min_row_count`, `max_row_count` | `DaRefer.StaCd = FAILED_BNC` |
-| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `DaRefer.StaCd = FAILED_BNC` |
+| Row count | `min_row_count`, `max_row_count` | `DaRefer.sta_cd = FAILED_BNC` |
+| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `DaRefer.sta_cd = FAILED_BNC` |
 
 ### Run tracking (DaRefer)
 
 Every run writes one row to `DaRefer` (configured via `--daReferTable`, default `DaRefer`):
 
-| `StaCd` | Written when |
+| `sta_cd` | Written when |
 |---|---|
 | `LOADING` | Before `pipeline.run()` — always |
 | `COMPLETED` | Pipeline succeeded + all row-count and BnC checks passed |
@@ -384,7 +393,7 @@ Every run writes one row to `DaRefer` (configured via `--daReferTable`, default 
 | `FAILED` | Pipeline threw an exception |
 
 All source rows are written to `DaRec` (configured via `--daRecTable`, default `DaRec`),
-keyed by `DaId` from the `DaRefer` row. See `EXAMPLE.md` for full DDL.
+keyed by `da_id` from the `DaRefer` row. See `EXAMPLE.md` for full DDL.
 
 ## REPORT_PROCESSING — DB-configured reports
 
@@ -394,55 +403,75 @@ When `--reportName` is set alongside `--processType=REPORT_PROCESSING`, the
 ### Execution flow
 
 ```
- 1. Resolve MSTR_Per for --periodId            (validate period exists)
- 2. Fetch ReportConfig from BQ                 (report_config + 5 related tables)
- 3. Insert DaRefer row StaCd=LOADING
- 4. Run preprocessing steps                    (BQ jobs — BQ_QUERY or API_ENRICHMENT)
- 5. Check datasource availability              (all required DSes must have DaRefer StaCd=COMPLETED)
- 6. Build alias registry                       (alias → SELECT RowDaJsonTx FROM DaRec WHERE DaId=X)
- 7. Run transformation chain                   (BQ jobs; each step materialises to a BQ table)
- 8. Route each output via ReportOutputSinkRouter:
-      GCS  → BQ extract job → CSV or JSON file
-      BQ   → SELECT * INTO destination table (WRITE_TRUNCATE)
-      API  → POST JSON array to external endpoint (auth via Secret Manager)
- 9. Insert COM_CmnRptDtl row per output        (all sink types)
-10. Send email                                 (GCS outputs as attachments; if configured)
-11. Update DaRefer StaCd → COMPLETED / FAILED
+ 1. Fetch ReportConfig from BQ                 (parameter_store nested JSON)
+ 2. Insert RptRefer row sta_cd=LOADING         → rpt_id
+ 3. Run preprocessing steps                    (BQ jobs — BQ_QUERY)
+ 4. Check datasource availability              (all required DSes must have DaRefer sta_cd=COMPLETED)
+ 5. Add RptDaMap rows                          (rpt_id → da_id from DaRefer, one per datasource)
+ 6. Stage data into RptStageDa                 (copy DaRec's pages per map_id, batched — un-nested back to individual records on read)
+ 7. Build alias registry                       (alias → staged-data subquery or BQ table ref)
+ 8. Run transformation chain                   (BQ jobs; each step materialises to a BQ table)
+ 9. Export outputs to GCS / BQ
+10. Insert RptOutput row per output; clear RptStageDa rows
+11. Send email                                 (GCS outputs as attachments; if configured)
+12. Update RptRefer sta_cd → COMPLETED / FAILED
 ```
 
-### BQ config tables required
+### BQ tracking tables
 
-All report config tables live in the BQ dataset specified by `--paramBqProject` and `--paramBqDataset`.
-See `EXAMPLE.md` for full DDL. Summary:
+All report tracking tables live in the BQ dataset specified by `--checkpointBqProject` and `--checkpointBqDataset`. Table names are CLI-configurable (defaults shown).
+
+| Table | CLI flag (default) | Purpose |
+|---|---|---|
+| `RptRefer` | `--rptReferTable` | Report run lifecycle: one row per run, `sta_cd` = LOADING → COMPLETED / FAILED |
+| `RptDaMap` | `--rptDaMapTable` | Maps each report run (`rpt_id`) to the datasource runs it consumed (`da_id` from `DaRefer`) |
+| `RptStageDa` | `--rptStageDaTable` | Transient staging area: `DaRec`'s pages copied verbatim before transforms (batched, not per-record — un-nested back to individual records on read); deleted after export |
+| `RptOutput` | `--rptOutputTable` | One row per output step: output code, report date, version, balance amount, type |
 
 ```sql
--- report_config: one row per (report_name, report_subprocess, period_id)
--- report_datasource_ref: which DaRec datasources are needed and under what alias
--- report_preprocessing_config: optional BQ/API enrichment before transforms
--- report_transformation_config: ordered BQ jobs; each materialises to a BQ table
--- report_email_config: SMTP recipients and message templates
+-- RptRefer: report run checkpoint
+CREATE TABLE RptRefer (
+  rpt_id       INT64    NOT NULL,   -- MAX(rpt_id)+1 sequence
+  rpt_nm       STRING   NOT NULL,   -- report name
+  per_id       INT64    NOT NULL,   -- period id (integer, e.g. 202401)
+  rpt_ds       STRING,              -- report description
+  sta_cd       STRING   NOT NULL,   -- LOADING | COMPLETED | FAILED
+  creat_ts     DATETIME NOT NULL,
+  lst_updt_ts  DATETIME NOT NULL
+);
 
--- report_output_config: one row per output — sink_type drives where the result goes
-CREATE TABLE IF NOT EXISTS `my-project.pipeline_config.report_output_config` (
-  report_name        STRING NOT NULL,
-  report_subprocess  STRING NOT NULL,
-  period_id          STRING NOT NULL,
-  output_order       INT64  NOT NULL,
-  input_alias        STRING NOT NULL,   -- alias whose BQ table to export
-  sink_type          STRING,            -- GCS (default) | BQ | API
-  -- GCS sink
-  output_format      STRING,            -- CSV | JSON
-  gcs_path           STRING,            -- gs://bucket/reports/
-  file_prefix        STRING,
-  file_suffix        STRING,
-  include_header     BOOL,
-  -- BQ sink
-  bq_sink_table      STRING,            -- project.dataset.table to WRITE_TRUNCATE into
-  -- API sink
-  api_endpoint       STRING,            -- target URL
-  api_method         STRING,            -- POST | PUT (default POST)
-  api_auth_secret_id STRING,            -- Secret Manager ID for Bearer token
-  api_headers_json   STRING             -- {"X-Custom-Header": "value"}
+-- RptDaMap: links a report run to datasource da_ids
+CREATE TABLE RptDaMap (
+  map_id       INT64    NOT NULL,   -- MAX(map_id)+1 sequence
+  rpt_id       INT64    NOT NULL,   -- FK → RptRefer.rpt_id
+  da_id        INT64    NOT NULL,   -- FK → DaRefer.da_id
+  lst_updt_ts  DATETIME NOT NULL
+);
+
+-- RptStageDa: transient staged pages (deleted after export). One row per DaRec page (batched
+-- like DaRec, ≤250 records/JSON array), not one row per source record — un-nested back into
+-- individual records on read by stagedDataSubquery(), so report SQL is unaffected.
+CREATE TABLE RptStageDa (
+  stage_id          INT64    NOT NULL,
+  map_id            INT64    NOT NULL,   -- FK → RptDaMap.map_id
+  stage_ds_json_tx  STRING   NOT NULL,   -- one DaRec page's JSON, copied verbatim
+  query_config_tx   STRING,
+  load_dt           DATE     NOT NULL,
+  lst_updt_ts       DATETIME NOT NULL
+);
+
+-- RptOutput: one row per output per run
+CREATE TABLE RptOutput (
+  outpt_cd      STRING   NOT NULL,
+  rpt_dt        DATETIME NOT NULL,
+  vsn_no        INT64    NOT NULL,   -- increments per (rpt_id, outpt_cd) on reruns
+  output_ds     STRING,
+  line_refer_cd STRING,
+  sched_tx      STRING,
+  bal_am        FLOAT64,
+  rpt_type_cd   STRING,
+  rpt_id        INT64    NOT NULL,   -- FK → RptRefer.rpt_id
+  lst_updt_ts   DATETIME NOT NULL
 );
 ```
 
@@ -467,22 +496,72 @@ They resolve to `` `project.dataset.table` `` BQ standard SQL references at runt
 ```python
 options={
     "--processType":          "REPORT_PROCESSING",
-    "--parentId":             "TRADING",          # → ParameterGroupName in parameter_store
+    "--parentId":             "TRADING",          # → parameter_group_name in parameter_store
     "--reportName":           "daily_trades_summary",
     "--reportSubprocess":     "eod",
-    "--periodId":             "202401",           # MONTHLY format YYYYMM (must exist in MSTR_Per)
+    "--periodId":             "202401",           # integer, e.g. YYYYMM or YYYYMMDD
     "--periodStart":          "2024-01-01",
     "--periodEnd":            "2024-01-31",
     "--runDate":              "{{ ds }}",
     "--paramBqProject":       "my-gcp-project",
-    "--paramBqDataset":       "pipeline_config",
+    "--paramBqDataset":       "dw",
+    "--checkpointBqProject":  "my-gcp-project",
     "--checkpointBqDataset":  "pipeline_metadata",
     "--daReferTable":         "DaRefer",
     "--daRecTable":           "DaRec",
-    "--cmnRptDtlTable":       "COM_CmnRptDtl",
-    # --sinkType is NOT required — output routing comes from report_output_config.sink_type
+    "--rptReferTable":        "RptRefer",
+    "--rptDaMapTable":        "RptDaMap",
+    "--rptStageDaTable":      "RptStageDa",
+    "--rptOutputTable":       "RptOutput",
+    # --sinkType is NOT required — output routing comes from report output config
 }
 ```
+
+## PIPELINE — run a report's own required data sources first
+
+`PIPELINE` takes the exact same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` —
+**there is no separate pipeline config.** A report already declares which datasources feed it,
+and whether each one is mandatory, in its own `datasources[]`:
+
+```json
+{
+  "datasources": [
+    {"datasource_name": "trades",   "datasource_subprocess": "eod", "is_required": true},
+    {"datasource_name": "fx_rates", "datasource_subprocess": "eod", "is_required": false}
+  ],
+  "...": "the rest of the report config, unchanged"
+}
+```
+
+`PIPELINE` reads that same `datasources[]` and runs whichever aren't already `COMPLETED` for the
+period, batched into **one** Dataflow job (never one job per datasource — sources stay
+independent branches within it, the same "never merged" rule as standalone
+`DATA_SOURCE_DOWNLOAD`), before running the report. Once that job finishes, a still-incomplete
+datasource only aborts the whole run if its own `is_required` says so — the exact same flag
+`REPORT_PROCESSING` already enforces (`checkDatasourceAvailability()`), so there's nothing
+PIPELINE-specific to keep in sync. `PIPELINE` differs from plain `REPORT_PROCESSING` only in what
+happens when a declared datasource isn't ready yet: `REPORT_PROCESSING` fails immediately;
+`PIPELINE` runs it first. See `CLAUDE.md` section 10 for the full config shape and
+`beam-runner/README.md`'s `PipelineSequenceFactory` section for the execution flow.
+
+```bash
+java -jar beam-runner-bundled.jar \
+  --processType=PIPELINE \
+  --parentId=TRADING \
+  --reportName=daily_trades_report \
+  --reportSubprocess=eod \
+  --periodId=202401 \
+  --periodStart=2024-01-01 \
+  --periodEnd=2024-01-31 \
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=dw
+```
+
+**`--manualOverrun` works exactly as it does standalone**, uniformly across the whole run — no
+separate PIPELINE-specific flag. Every declared datasource bypasses its own `COMPLETED` guard
+and re-downloads, superseding its previous run's `DaRec` rows once complete, same as standalone
+`DATA_SOURCE_DOWNLOAD`. The report itself needs no flag at all: it has no `COMPLETED` guard of
+its own and always re-runs fresh, pipeline or standalone.
 
 ## Built-in transforms reference
 
@@ -497,4 +576,3 @@ options={
 | Class | Produces | Use for |
 |---|---|---|
 | `SideEffectEmailTransform` | `PDone` | SMTP notifications (success/failure summary emails) |
-| `SideEffectDbWriteTransform` | `PDone` | Writing audit logs or status updates back to the parameter DB |

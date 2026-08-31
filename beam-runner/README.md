@@ -9,11 +9,13 @@ You should rarely need to edit this module.
 
 | Class | Purpose |
 |---|---|
-| `Main` | Parses CLI args, routes by `--processType` and `--reportName`, delegates to the right factory |
-| `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, assembles per-source Beam branches |
-| `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; no Beam pipeline submitted |
-| `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` |
+| `Main` | Parses CLI args, routes by `--processType` (and `--reportName` for REPORT_PROCESSING), delegates to the right factory |
+| `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, creates LOADING checkpoints, assembles per-source Beam branches. `assemble(options)` (single `--datasourceName`) delegates to public `assembleForConfigs(options, List<SourceConfig>)`, which `PipelineSequenceFactory` also calls directly with several explicitly-fetched configs to batch them into one job |
+| `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: row/BnC validation, optional `data_transform_query` (replaces stored rows once validated, via an atomic DELETE+INSERT transaction), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), `--manualOverrun` cleanup of the superseded previous run's DaRec rows, and failure email — all running in the Beam worker |
+| `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted |
+| `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` and `PostDownloadFinalizeTransform` |
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline |
+| `PipelineSequenceFactory` | `PIPELINE`: same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, no separate config — runs whichever datasources the report's own `datasources[]` declares (batched into one Dataflow job via `DataSourcePipelineFactory.assembleForConfigs`), then the report (via the unchanged `ReportPipelineFactory`). Composes both existing factories — see its own section below |
 
 ---
 
@@ -25,34 +27,60 @@ that reads, transforms, validates, and writes to its own output table.
 ```
 DataSourcePipelineFactory.assemble(options)
     │
-    ├─ 1. BigQuerySourceConfigRepository.getMissingParameters()  fail fast if config missing
-    ├─ 2. BigQuerySourceConfigRepository.fetchSourceConfigs()
+    ├─ 1. BigQuerySourceConfigRepository.fetchSourceConfigs()  (throws if row missing)
     │       Each SourceConfig carries: queryConfig, sourceTransforms, validationConfig
     │
-    ├─ 3. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources
+    ├─ 2. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources
+    │       (bypassed entirely when --manualOverrun=true or --overrideDownload=true)
     │
-    ├─ 4. BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId per source
+    ├─ 2b. Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE the new
+    │        checkpoint is created — captured so PostDownloadFinalizeTransform can delete this
+    │        superseded run's DaRec rows once the new run reaches COMPLETED
     │
-    ├─ 5. For each SourceConfig independently (no merge!):
-    │       a. SourceRouter.routeFromConfig()         read raw data
-    │       b. QueryParameterResolver                 inject {periodStart}/{periodEnd}
-    │       c. SourceTransformChainAssembler.assemble()
-    │              ├─ LOOKUP: BQ side input → LookupEnrichTransform
-    │              ├─ GROUP_BY:  GroupByTransform
-    │              └─ SORT_BY:   SortByTransform (per-bundle, not global)
-    │       d. DataSourceRecordSinkTransform(dataSourceId) — rows → JSON blobs → data_source_records
+    ├─ 3. BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId per source (LOADING row)
+    │       Always a fresh INSERT — DaRefer only ever gains new rows, never overwritten
     │
-    └─ 6. Return pipeline (run() called by Main)
-
-After pipeline.run() + waitUntilFinish():
-    DataSourcePipelineFactory.runPostPipelineSteps()
-    ├─ On success: for each source
-    │    ├─ BigQueryDataSourceRecordAdapter.countRecords(dataSourceId)
-    │    ├─ BigQueryDataSourceRecordAdapter.sumField(dataSourceId, field) per BnC rule
-    │    ├─ Compare against ValidationConfig bounds
-    │    └─ updateStatus(dataSourceId, COMPLETED/FAILED_BNC, bncJson)
-    └─ On failure: updateStatus(dataSourceId, FAILED, null)
+    └─ 4. For each SourceConfig independently (no merge!):
+            a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query
+            b. fetchBqSchema()                        1. BqFetchConfig.schema (operator-declared bq_schema_json)
+                                                          via BigQuerySchemaUtils.toBeamSchema() — no BQ call
+                                                       2. else BigQuerySchemaUtils.fetchBeamSchema() (table metadata)
+                                                       3. else null → BigQuerySourceTransform resolves column names
+                                                          itself via a preview query (see beam-io/README.md)
+            c. SourceRouter.routeFromConfig(schema)   read raw data (typed if schema non-null)
+            d. SourceTransformChainAssembler.assemble()
+                   ├─ LOOKUP: BQ side input → LookupEnrichTransform
+                   ├─ GROUP_BY:  GroupByTransform
+                   └─ SORT_BY:   SortByTransform (per-bundle, not global)
+            e. DataSourceRecordSinkTransform(daId)    rows → streaming inserts → DaRec
+                   → returns PCollection<Long> (count after all inserts commit)
+            f. PostDownloadFinalizeTransform(daId)    [runs in Beam worker, not driver JVM]
+                   ├─ BigQueryDataSourceRecordAdapter.countRecords(daId) → storedRowCount
+                   ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on)
+                   ├─ min/max row count bounds check (optional, from config)
+                   ├─ data_transform_query (optional; only if the checks above passed):
+                   │     a `WITH data AS (...)` UNNEST(DaRec) CTE is always prepended — never
+                   │     opt-in, the operator's query just references `data` as a plain table —
+                   │     then BigQueryJobService.runQueryToTable() runs it; validates output row
+                   │     count; only then replaceStoredRows() runs
+                   │     DELETE + INSERT (re-paginated at 250 rows/page) as ONE atomic BigQuery
+                   │     multi-statement transaction (BEGIN TRANSACTION...COMMIT, ROLLBACK on
+                   │     error) — retried as a whole with backoff (~30s) since this run's rows were
+                   │     just streamed in and can still be in BigQuery's streaming buffer
+                   │     (DML-ineligible despite being SELECT-visible); on any failure — query
+                   │     error, bounds failure, or exhausted retries — the original rows are
+                   │     completely untouched, never partially deleted or duplicated
+                   ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional;
+                   │     runs against transformed rows if the transform above applied)
+                   ├─ updateStatus(daId, COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED, bncJson)
+                   ├─ manualOverrun cleanup (only on COMPLETED, only if this run superseded a
+                   │     previous COMPLETED da_id): BigQueryDataSourceRecordAdapter.deleteRecords()
+                   │     on the previous da_id's DaRec rows — DaRefer itself is untouched, it only
+                   │     ever gains new rows
+                   └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```
+
+The terminal checkpoint update and failure email are part of the pipeline itself. When the job reaches DONE state in Dataflow, the checkpoint has already been updated. No post-pipeline driver-JVM step is needed.
 
 ## SourceTransformChainAssembler
 
@@ -68,13 +96,80 @@ For global ordering, use an `ORDER BY` clause in the downstream BQ view instead 
 
 ```
 PipelineFactory.assemble(options)
-    ├─ 1. SourceRouter.route()          reads --sourceType
-    ├─ 2. TransformRegistry + chain loop
-    ├─ 3. SinkRouter.route()
-    └─ 4. Flatten DLQ → DeadLetterSinkTransform
+    ├─ 1. fetchBqSchema()               BQ table sources: BigQuerySchemaUtils.fetchBeamSchema()
+    │       null for query-only or failed fetch → BigQuerySourceTransform resolves
+    │       column names itself via a preview query (see beam-io/README.md)
+    ├─ 2. SourceRouter.route(schema)    reads --sourceType; typed if schema non-null
+    ├─ 3. TransformRegistry + chain loop
+    ├─ 4. SinkRouter.route()
+    └─ 5. Flatten DLQ → DeadLetterSinkTransform
 ```
 
 No data moves during assembly — it only describes the computation graph.
+
+---
+
+## PipelineSequenceFactory — PIPELINE
+
+Composes `DataSourcePipelineFactory` and `ReportPipelineFactory` — it does not reimplement
+either. Only decides which data sources to batch together and whether an incomplete one should
+stop the sequence before the report runs.
+
+**There is no separate pipeline config.** `PIPELINE` takes the exact same `--reportName`/
+`--reportSubprocess` as `REPORT_PROCESSING`, and the report's own `ReportConfig.datasources[]`
+(with each entry's `is_required`) IS the pipeline — it already declares which datasources feed
+the report and which are mandatory, so nothing redeclares that as a second, separately-maintained
+sequence. `PIPELINE` differs from plain `REPORT_PROCESSING` only in what happens when a declared
+datasource isn't `COMPLETED` yet: `REPORT_PROCESSING` fails immediately
+(`checkDatasourceAvailability()`); `PIPELINE` runs it first.
+
+```
+PipelineSequenceFactory.execute(options)
+    ├─ 1. BigQueryReportRepository.fetchReportConfig(reportName, reportSubprocess, periodId)
+    │       → ReportConfig.datasources[] (List<ReportDatasourceRef>)
+    │
+    ├─ 2. For every declared datasource: BigQuerySourceConfigRepository.fetchSourceConfigs()
+    │       (one call per named datasource — each returns exactly one SourceConfig)
+    │
+    ├─ 3. DataSourcePipelineFactory.assembleForConfigs(options, allFetchedConfigs)
+    │       ONE Dataflow job for every declared datasource — never one job per datasource.
+    │       Internally skips any already COMPLETED, same as standalone
+    │       DATA_SOURCE_DOWNLOAD (DaRefer skip-logic, unchanged).
+    │       pipeline.run().waitUntilFinish()
+    │
+    ├─ 4. Re-check each declared datasource's checkpoint status (isCompleted()).
+    │       Still incomplete + is_required=true
+    │           → abort: PipelineSequenceFactory.PipelineAbortedException
+    │             (report never runs)
+    │       Still incomplete + is_required=false
+    │           → log and continue
+    │
+    └─ 5. ReportPipelineFactory.execute(options)   [unchanged — options.reportName/
+            reportSubprocess were never touched, they're the operator's original values]
+```
+
+**Why no separate required/optional flag anywhere else**: the terminal report already declares
+which of its datasources are required, via the pre-existing `ReportDatasourceRef.required` —
+enforced on every report run (`ReportPipelineFactory.checkDatasourceAvailability()`), pipeline or
+standalone. A second, independently-set flag anywhere in a pipeline-specific config could
+disagree with the first about the same datasource; instead there is exactly one place that
+decision is declared, and `PipelineSequenceFactory` reads it directly rather than duplicating it.
+
+**Why batch instead of one job per datasource**: sources are independent Beam branches (the
+"never merged" rule still holds — no `Flatten.pCollections()` across sources), so submitting
+every declared datasource in this run as one Dataflow job is just `DataSourcePipelineFactory`'s
+existing multi-source behavior, reused rather than reinvented.
+
+**`--manualOverrun` applies uniformly across the whole sequence** — no PIPELINE-specific flag or
+logic needed, because `PipelineSequenceFactory` passes the exact same `options` instance straight
+into both `DataSourcePipelineFactory.assembleForConfigs()` and `ReportPipelineFactory.execute()`:
+- Every declared datasource bypasses its own `COMPLETED` skip-guard and re-downloads, superseding
+  its previous run's `DaRec` rows once the new run completes — identical to standalone
+  `DATA_SOURCE_DOWNLOAD` under `--manualOverrun`, since it's the same `filterByCheckpoint` check
+  reading the same flag off the same options object.
+- The terminal `REPORT` step needs no equivalent handling: `ReportPipelineFactory` has no
+  `COMPLETED`-skip guard of its own to begin with — every invocation already inserts a fresh
+  `RptRefer` row and re-runs, `--manualOverrun` or not.
 
 ---
 

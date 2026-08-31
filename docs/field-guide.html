@@ -1,0 +1,935 @@
+<title>Beam Framework Field Guide</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --bg:#f4f6f8; --panel:#ffffff; --panel-2:#eef1f5; --border:#dbe1e8;
+  --ink:#171b21; --muted:#5b6472; --muted-2:#828d9c;
+  --accent:#0f8f83; --accent-ink:#ffffff; --accent-soft:#e3f4f1;
+  --amber:#a5690a; --amber-soft:#faf0dd;
+  --danger:#c1443a; --danger-soft:#fbeae8;
+  --good:#2f8f52; --good-soft:#e9f5ec;
+  --code-bg:#0f1319; --code-ink:#dbe4ee; --code-accent:#7fd8cd;
+  --shadow: 0 1px 2px rgba(20,25,35,.04), 0 8px 24px -12px rgba(20,25,35,.12);
+  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1218; --panel:#151a22; --panel-2:#1a212b; --border:#2a3242;
+    --ink:#e7ecf2; --muted:#9aa6b7; --muted-2:#6f7c8e;
+    --accent:#5fd6c9; --accent-ink:#06201d; --accent-soft:#132824;
+    --amber:#e8ac4d; --amber-soft:#2a2313;
+    --danger:#f0857b; --danger-soft:#2c1917;
+    --good:#7ed69a; --good-soft:#132a1c;
+    --code-bg:#080b0f; --code-ink:#d8e2ee; --code-accent:#7fd8cd;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.55);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1218; --panel:#151a22; --panel-2:#1a212b; --border:#2a3242;
+  --ink:#e7ecf2; --muted:#9aa6b7; --muted-2:#6f7c8e;
+  --accent:#5fd6c9; --accent-ink:#06201d; --accent-soft:#132824;
+  --amber:#e8ac4d; --amber-soft:#2a2313;
+  --danger:#f0857b; --danger-soft:#2c1917;
+  --good:#7ed69a; --good-soft:#132a1c;
+  --code-bg:#080b0f; --code-ink:#d8e2ee; --code-accent:#7fd8cd;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.55);
+}
+:root[data-theme="light"]{
+  --bg:#f4f6f8; --panel:#ffffff; --panel-2:#eef1f5; --border:#dbe1e8;
+  --ink:#171b21; --muted:#5b6472; --muted-2:#828d9c;
+  --accent:#0f8f83; --accent-ink:#ffffff; --accent-soft:#e3f4f1;
+  --amber:#a5690a; --amber-soft:#faf0dd;
+  --danger:#c1443a; --danger-soft:#fbeae8;
+  --good:#2f8f52; --good-soft:#e9f5ec;
+  --code-bg:#0f1319; --code-ink:#dbe4ee; --code-accent:#7fd8cd;
+}
+
+*{box-sizing:border-box;}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:var(--font-sans); line-height:1.6; font-size:16px;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4{font-weight:600; text-wrap:balance; line-height:1.25; margin:0;}
+p{margin:0 0 .9em; color:var(--ink);}
+code, .mono{font-family:var(--font-mono);}
+a{color:var(--accent);}
+::selection{background:var(--accent-soft); color:var(--ink);}
+
+.shell{display:grid; grid-template-columns:272px minmax(0,1fr); min-height:100vh;}
+@media (max-width:920px){ .shell{grid-template-columns:1fr;} .side{display:none;} }
+
+/* ---------- Sidebar ---------- */
+.side{
+  position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+  border-right:1px solid var(--border); padding:28px 18px 40px;
+  background:var(--panel);
+}
+.brand{display:flex; align-items:center; gap:10px; padding:0 6px 22px; border-bottom:1px solid var(--border); margin-bottom:16px;}
+.brand-mark{
+  width:34px; height:34px; border-radius:8px; flex:none;
+  background:linear-gradient(155deg, var(--accent), var(--good));
+  display:flex; align-items:center; justify-content:center;
+  font-family:var(--font-mono); font-weight:600; color:var(--accent-ink); font-size:13px;
+}
+.brand-text .t1{font-size:13px; font-weight:600; letter-spacing:.02em;}
+.brand-text .t2{font-size:11.5px; color:var(--muted-2); font-family:var(--font-mono);}
+
+.nav-group{margin-bottom:6px;}
+.nav-label{
+  font-family:var(--font-mono); font-size:10.5px; letter-spacing:.11em; text-transform:uppercase;
+  color:var(--muted-2); padding:14px 10px 6px;
+}
+.nav-link{
+  display:flex; align-items:baseline; gap:8px; padding:7px 10px; border-radius:7px;
+  font-size:13.5px; color:var(--muted); text-decoration:none; cursor:pointer;
+}
+.nav-link .n{font-family:var(--font-mono); font-size:11px; color:var(--muted-2); min-width:16px;}
+.nav-link:hover{background:var(--panel-2); color:var(--ink);}
+.nav-link.active{background:var(--accent-soft); color:var(--ink); font-weight:500;}
+.nav-link.active .n{color:var(--accent);}
+
+/* ---------- Main ---------- */
+.main{padding:56px clamp(20px,5vw,72px) 120px; max-width:900px;}
+.eyebrow{
+  font-family:var(--font-mono); font-size:11.5px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--accent); margin-bottom:10px;
+}
+h1.title{font-size:clamp(28px,4vw,38px); margin-bottom:14px;}
+.lede{font-size:17px; color:var(--muted); max-width:62ch; margin-bottom:8px;}
+.hero-meta{display:flex; gap:18px; flex-wrap:wrap; margin:22px 0 8px; font-size:12.5px; color:var(--muted-2); font-family:var(--font-mono);}
+
+section.block{padding-top:64px; margin-top:0; border-top:1px solid var(--border);}
+section.block:first-of-type{border-top:none;}
+.block-head{margin-bottom:22px;}
+.block-num{font-family:var(--font-mono); font-size:12px; color:var(--accent); margin-bottom:6px;}
+h2.block-title{font-size:26px;}
+.block-sub{color:var(--muted); font-size:15px; max-width:66ch; margin-top:8px;}
+
+h3.sub{font-size:18px; margin:34px 0 12px;}
+h4.subsub{font-size:15px; margin:22px 0 8px; color:var(--ink);}
+
+/* ---------- Diagram: module map ---------- */
+.modmap{
+  display:grid; gap:10px; margin:20px 0 6px;
+  grid-template-columns:repeat(5,1fr);
+}
+@media (max-width:760px){ .modmap{grid-template-columns:repeat(2,1fr);} }
+.mod{
+  border:1px solid var(--border); border-radius:10px; padding:12px 12px 13px; background:var(--panel);
+  font-size:12.5px;
+}
+.mod .name{font-family:var(--font-mono); font-weight:600; font-size:12.5px; margin-bottom:4px;}
+.mod .desc{color:var(--muted); font-size:11.5px; line-height:1.4;}
+.mod.core{border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset;}
+.arrowrow{display:flex; justify-content:center; align-items:center; gap:6px; color:var(--muted-2); font-family:var(--font-mono); font-size:11px; margin:2px 0;}
+
+/* ---------- Timeline / flow steps ---------- */
+.flow{position:relative; margin:26px 0 8px; padding-left:34px;}
+.flow::before{content:""; position:absolute; left:13px; top:6px; bottom:6px; width:2px; background:var(--border);}
+.step{position:relative; padding-bottom:26px;}
+.step:last-child{padding-bottom:0;}
+.step::before{
+  content:attr(data-n); position:absolute; left:-34px; top:0; width:28px; height:28px;
+  border-radius:50%; background:var(--panel); border:2px solid var(--accent); color:var(--accent);
+  display:flex; align-items:center; justify-content:center; font-family:var(--font-mono); font-size:12px; font-weight:600;
+}
+.step.driver::before{border-color:var(--muted-2); color:var(--muted-2);}
+.step.worker::before{border-color:var(--good); color:var(--good);}
+.step-title{font-weight:600; font-size:15px; margin-bottom:4px;}
+.step-title .tag{
+  font-family:var(--font-mono); font-size:10px; letter-spacing:.06em; text-transform:uppercase;
+  padding:2px 7px; border-radius:5px; margin-left:8px; vertical-align:1px; font-weight:500;
+}
+.tag.driver{background:var(--panel-2); color:var(--muted);}
+.tag.worker{background:var(--good-soft); color:var(--good);}
+.step-body{color:var(--muted); font-size:13.8px; max-width:64ch;}
+.step-body code{background:var(--panel-2); padding:1px 5px; border-radius:4px; font-size:.92em; color:var(--ink);}
+
+/* ---------- Callouts ---------- */
+.callout{
+  border:1px solid var(--border); border-left:3px solid var(--accent); background:var(--panel);
+  border-radius:0 10px 10px 0; padding:14px 16px; margin:14px 0; font-size:13.8px;
+}
+.callout .lbl{
+  font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--accent); margin-bottom:6px; display:block;
+}
+.callout.check{border-left-color:var(--amber);}
+.callout.check .lbl{color:var(--amber);}
+.callout.tradeoff{border-left-color:var(--muted-2); background:var(--panel-2);}
+.callout.tradeoff .lbl{color:var(--muted-2);}
+.callout p:last-child{margin-bottom:0;}
+
+/* ---------- Trade-off cards ---------- */
+.tocard{
+  border:1px solid var(--border); border-radius:12px; padding:18px 20px; margin:16px 0; background:var(--panel);
+}
+.tocard-head{display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:10px; flex-wrap:wrap;}
+.tocard-head h4{font-size:15.5px;}
+.tocard .verdict{font-family:var(--font-mono); font-size:11px; color:var(--muted-2); white-space:nowrap;}
+.pro-con{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:10px;}
+@media (max-width:640px){ .pro-con{grid-template-columns:1fr;} }
+.pro-con .col{font-size:13px;}
+.pro-con .col .h{font-family:var(--font-mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.07em; margin-bottom:6px;}
+.pro-con .win .h{color:var(--good);}
+.pro-con .cost .h{color:var(--danger);}
+.pro-con ul{margin:0; padding-left:18px; color:var(--muted);}
+.pro-con li{margin-bottom:4px;}
+
+/* ---------- Tables ---------- */
+.twrap{overflow-x:auto; border:1px solid var(--border); border-radius:10px; margin:16px 0;}
+table{border-collapse:collapse; width:100%; font-size:13px; min-width:560px;}
+thead th{
+  text-align:left; font-family:var(--font-mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--muted-2); background:var(--panel-2); padding:10px 14px; border-bottom:1px solid var(--border);
+}
+tbody td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top; color:var(--muted);}
+tbody tr:last-child td{border-bottom:none;}
+td code, th code{font-family:var(--font-mono); font-size:.9em; color:var(--ink);}
+td strong{color:var(--ink);}
+.badge{
+  display:inline-block; font-family:var(--font-mono); font-size:10.5px; padding:2px 8px; border-radius:20px; font-weight:500;
+}
+.badge.ok{background:var(--good-soft); color:var(--good);}
+.badge.warn{background:var(--amber-soft); color:var(--amber);}
+.badge.fail{background:var(--danger-soft); color:var(--danger);}
+
+/* ---------- Code blocks ---------- */
+pre{
+  background:var(--code-bg); color:var(--code-ink); border-radius:10px; padding:16px 18px; overflow-x:auto;
+  font-family:var(--font-mono); font-size:12.6px; line-height:1.65; margin:14px 0;
+}
+pre .c1{color:var(--code-accent);}
+pre .c2{color:#e8ac4d;}
+
+/* ---------- Misc ---------- */
+.divider-note{font-size:12.5px; color:var(--muted-2); font-family:var(--font-mono); margin:22px 0;}
+.chip-row{display:flex; gap:8px; flex-wrap:wrap; margin:14px 0;}
+.chip{font-family:var(--font-mono); font-size:11.5px; padding:5px 11px; border-radius:20px; border:1px solid var(--border); color:var(--muted);}
+.footer{margin-top:80px; padding-top:24px; border-top:1px solid var(--border); color:var(--muted-2); font-size:12.5px;}
+ul.plain{padding-left:20px; color:var(--muted); font-size:14px;}
+ul.plain li{margin-bottom:6px;}
+.kbd{font-family:var(--font-mono); background:var(--panel-2); border:1px solid var(--border); border-radius:5px; padding:1px 6px; font-size:.85em;}
+</style>
+
+<div class="shell">
+  <nav class="side" id="side">
+    <div class="brand">
+      <div class="brand-mark">BF</div>
+      <div class="brand-text">
+        <div class="t1">Field Guide</div>
+        <div class="t2">beam-framework</div>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-label">Foundations</div>
+      <a class="nav-link" href="#overview"><span class="n">01</span>Architecture at a glance</a>
+      <a class="nav-link" href="#config"><span class="n">02</span>Where configuration lives</a>
+      <a class="nav-link" href="#checkpoints"><span class="n">03</span>Checkpoints &amp; tracking tables</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">The three flows</div>
+      <a class="nav-link" href="#flow-download"><span class="n">04</span>DATA_SOURCE_DOWNLOAD</a>
+      <a class="nav-link" href="#flow-report"><span class="n">05</span>REPORT_PROCESSING</a>
+      <a class="nav-link" href="#flow-pipeline"><span class="n">06</span>PIPELINE</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Going deeper</div>
+      <a class="nav-link" href="#tradeoffs"><span class="n">07</span>Trade-offs we made</a>
+      <a class="nav-link" href="#checks"><span class="n">08</span>Every check, in one table</a>
+      <a class="nav-link" href="#reading"><span class="n">09</span>Reading order &amp; file map</a>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="eyebrow">Engineering field guide</div>
+    <h1 class="title">How the pipeline framework actually runs</h1>
+    <p class="lede">
+      A guided walkthrough of the codebase for someone who wants to drive it, not just read about it:
+      what each flow does from the moment it starts, which checks stand guard along the way, and the
+      trade-offs behind decisions that aren't obvious just from reading the code.
+    </p>
+    <div class="hero-meta">
+      <span>3 process types</span><span>·</span>
+      <span>5 modules</span><span>·</span>
+      <span>BigQuery-only config &amp; storage</span><span>·</span>
+      <span>Java 17 / Apache Beam</span>
+    </div>
+
+    <!-- ===================== 01 ARCHITECTURE ===================== -->
+    <section class="block" id="overview">
+      <div class="block-head">
+        <div class="block-num">01 — Foundations</div>
+        <h2 class="block-title">Architecture at a glance</h2>
+        <p class="block-sub">Five modules, one direction of dependency, one wire type. Almost every
+          confusing question about "why is this class here and not there" traces back to this shape.</p>
+      </div>
+
+      <div class="modmap">
+        <div class="mod core"><div class="name">beam-core</div><div class="desc">Contracts only. Options, enums, SPI interfaces, model classes. Zero deps on siblings.</div></div>
+        <div class="mod"><div class="name">beam-io</div><div class="desc">Source/sink connectors, BQ config repos, checkpoint adapters. → core only.</div></div>
+        <div class="mod"><div class="name">beam-utils</div><div class="desc">Stateless helpers: schema fetch, GCS, secrets, calendars, token resolution. → core only.</div></div>
+        <div class="mod"><div class="name">beam-transforms</div><div class="desc">Pluggable BeamTransform SPI impls + per-source transforms. → core, utils.</div></div>
+        <div class="mod"><div class="name">beam-runner</div><div class="desc">Entry point &amp; orchestration factories. → everything else.</div></div>
+      </div>
+      <div class="divider-note">beam-orchestrator (standalone Airflow-fanout JAR) depends on none of the above — a deliberate island, see the trade-off below.</div>
+
+      <h3 class="sub">The rule that matters most</h3>
+      <p><code>beam-io</code> never imports from <code>beam-utils</code> or <code>beam-transforms</code>. That's not
+      an aesthetic preference — <code>SmtpReportEmailAdapter</code> lives in <code>beam-runner</code> instead of
+      <code>beam-io</code> for exactly this reason: it needs <code>SecretManagerUtils</code> (beam-utils) and
+      angus-mail (beam-transforms), and <code>beam-io</code> isn't allowed to reach for either. If you ever
+      need an I/O adapter that wants a utils-only helper, that's the signal it belongs in beam-runner, not beam-io.</p>
+
+      <h3 class="sub">One wire type, everywhere</h3>
+      <p>Every Beam transform passes <code>PCollection&lt;Row&gt;</code> with an explicit <code>Schema</code>
+      via <code>.setRowSchema()</code>. No raw bytes, no bare Strings, no Avro-specific types leaking into
+      transform boundaries. This is what lets <code>SourceTransformChainAssembler</code> chain LOOKUP →
+      GROUP_BY → SORT_BY without any transform needing to know what came before it.</p>
+
+      <div class="callout tradeoff">
+        <span class="lbl">Trade-off — no JDBC, anywhere</span>
+        <p>All configuration and all data live in BigQuery. There is no relational database adapter in this
+        framework at all (an earlier JDBC <code>db/</code> package was fully removed). That buys one system to
+        secure, scale, and back up — but it also means the framework inherits BigQuery's specific quirks as
+        <em>architectural</em> constraints, not incidental ones. The clearest example: rows written via
+        streaming insert are immediately visible to <code>SELECT</code> but can sit in BigQuery's internal
+        streaming buffer for a while, during which <code>DELETE</code>/<code>UPDATE</code>/<code>MERGE</code>
+        simply refuse to touch them. <code>PostDownloadFinalizeTransform.replaceStoredRows()</code> exists
+        specifically to work around that (see §07).</p>
+      </div>
+    </section>
+
+    <!-- ===================== 02 CONFIG ===================== -->
+    <section class="block" id="config">
+      <div class="block-head">
+        <div class="block-num">02 — Foundations</div>
+        <h2 class="block-title">Where configuration lives</h2>
+        <p class="block-sub">One BigQuery table, <code>parameter_store</code>, holds every pipeline's config —
+        as two different JSON shapes depending on what's asking.</p>
+      </div>
+
+      <div class="twrap">
+        <table>
+          <thead><tr><th>Shape</th><th>Used by</th><th>Fetched via</th><th>Key columns</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Flat JSON</strong></td>
+              <td>DATA_SOURCE_DOWNLOAD</td>
+              <td><code>BigQuerySourceConfigRepository</code></td>
+              <td><code>parameter_group_name</code> (parentId), <code>parameter_data_source</code>
+                  (subprocessName), <code>parameter_name</code> (datasourceName)</td>
+            </tr>
+            <tr>
+              <td><strong>Nested JSON</strong></td>
+              <td>REPORT_PROCESSING <em>and</em> PIPELINE</td>
+              <td><code>BigQueryReportRepository</code></td>
+              <td>same three columns, keyed by <code>reportName</code> / <code>reportSubprocess</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>PIPELINE has no config shape of its own — see §06 for why that's a deliberate, recent simplification
+      rather than an oversight.</p>
+
+      <h3 class="sub">Token resolution — three layers, always in this order</h3>
+      <p>Any query template (a BQ source query, a report transform step, a post-storage transform) resolves
+      tokens in a fixed sequence. Getting the order wrong is the single easiest way to introduce a subtle bug here.</p>
+      <div class="twrap">
+        <table>
+          <thead><tr><th>Layer</th><th>Applies to</th><th>Example</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr><td>1 — Alias</td><td>REPORT_PROCESSING only</td><td><code>{trades}</code> → staged subquery or table ref</td><td>the alias registry built during staging</td></tr>
+            <tr><td>2 — Standard</td><td>Both process types</td><td><code>{periodStart}</code>, <code>{periodEnd}</code>, <code>{periodId}</code>, <code>{runDate}</code></td><td><code>FrameworkOptions</code></td></tr>
+            <tr><td>3 — Custom</td><td>Both process types</td><td><code>{exchange}</code>, <code>{threshold}</code></td><td>step's own <code>query_params_json</code>, merged with <code>--customParamsJson</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Layer 3 has one wrinkle worth internalizing: <code>--customParamsJson</code> (a CLI flag, meant for
+      Airflow DAG conf or an ad-hoc run) is merged <em>on top of</em> the step's stored <code>query_params_json</code>,
+      and wins on any key collision. See §07 for why that's useful and what it costs.</p>
+    </section>
+
+    <!-- ===================== 03 CHECKPOINTS ===================== -->
+    <section class="block" id="checkpoints">
+      <div class="block-head">
+        <div class="block-num">03 — Foundations</div>
+        <h2 class="block-title">Checkpoints &amp; tracking tables</h2>
+        <p class="block-sub">Every run — of either process type — leaves a durable trail in BigQuery <em>before</em>
+        it starts doing anything, not after. That's what makes skip-logic, retries, and cross-process
+        availability checks possible.</p>
+      </div>
+
+      <div class="twrap">
+        <table>
+          <thead><tr><th>Table</th><th>Tracks</th><th>Written by</th><th>Read by</th></tr></thead>
+          <tbody>
+            <tr><td><code>DaRefer</code></td><td>Start/end of one DATA_SOURCE_DOWNLOAD run</td>
+                <td><code>DataSourcePipelineFactory</code></td>
+                <td>itself (skip logic), <code>ReportPipelineFactory</code> (availability + latest da_id), <code>PipelineSequenceFactory</code> (required/optional gate)</td></tr>
+            <tr><td><code>DaRec</code></td><td>Every downloaded row, paginated (≤250/page)</td>
+                <td><code>DataSourceRecordSinkTransform</code>; replaced by <code>PostDownloadFinalizeTransform</code> when a transform applies</td>
+                <td><code>BigQueryDataSourceRecordAdapter</code> (BnC), staged into <code>RptStageDa</code></td></tr>
+            <tr><td><code>RptRefer</code></td><td>Start/end of one REPORT_PROCESSING run</td>
+                <td><code>ReportPipelineFactory</code></td><td>—</td></tr>
+            <tr><td><code>RptDaMap</code></td><td>Report run → datasource mapping</td>
+                <td><code>ReportPipelineFactory</code></td><td>used to clear staged data afterward</td></tr>
+            <tr><td><code>RptStageDa</code></td><td>Staged data, batched like DaRec (one row per page) — transient</td>
+                <td><code>stageFromDaRec()</code></td><td>the transform chain, as an alias subquery un-nested back to individual records by <code>stagedDataSubquery()</code>; then deleted</td></tr>
+            <tr><td><code>RptOutput</code></td><td>One row per output step produced</td>
+                <td><code>ReportPipelineFactory</code></td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="chip-row">
+        <span class="chip">DaRefer: LOADING → COMPLETED / FAILED_BNC / FAILED_TRANSFORM / FAILED</span>
+        <span class="chip">RptRefer: LOADING → COMPLETED / FAILED</span>
+      </div>
+      <p>Two invariants worth memorizing because several other decisions depend on them: <strong>DaRefer only
+      ever gains rows</strong> (a re-run under <code>--manualOverrun</code> is always a fresh <code>INSERT</code>,
+      never an overwrite), and <strong><code>vsn_no</code> increments per <code>(srce_nm, per_id)</code></strong> —
+      so the history of every re-run of the same source/period stays queryable forever, even though the bulk
+      <code>DaRec</code> data for superseded runs eventually gets cleaned up.</p>
+    </section>
+
+    <!-- ===================== 04 FLOW: DATA_SOURCE_DOWNLOAD ===================== -->
+    <section class="block" id="flow-download">
+      <div class="block-head">
+        <div class="block-num">04 — Flow</div>
+        <h2 class="block-title">DATA_SOURCE_DOWNLOAD</h2>
+        <p class="block-sub">Fetch raw data from an API, file, or BigQuery; run per-source transforms;
+        validate what landed; write it once, durably. This is the only flow that submits an actual
+        Dataflow job — everything else runs in the driver JVM.</p>
+      </div>
+
+      <div class="chip-row">
+        <span class="chip driver">● driver JVM</span>
+        <span class="chip">● Dataflow / DirectRunner</span>
+        <span class="chip">● Beam worker</span>
+      </div>
+
+      <div class="flow">
+        <div class="step driver" data-n="1">
+          <div class="step-title">CLI invocation <span class="tag driver">driver</span></div>
+          <div class="step-body"><code>Main.runDataSourceDownload(options)</code> routes here based on
+          <code>--processType=DATA_SOURCE_DOWNLOAD</code>.</div>
+        </div>
+        <div class="step driver" data-n="2">
+          <div class="step-title">Load config, check for a free pass</div>
+          <div class="step-body"><code>BigQuerySourceConfigRepository.fetchSourceConfigs()</code> loads the
+          source's flat JSON (throws immediately if the row is missing). Then
+          <code>isCompleted(srceNm, perId)</code> checks <code>DaRefer</code> — if the latest run already shows
+          <code>COMPLETED</code>, the source is skipped entirely, unless <code>--manualOverrun</code> or the
+          legacy <code>--overrideDownload</code> bypasses the guard.</div>
+        </div>
+        <div class="step driver" data-n="3">
+          <div class="step-title">Capture what's being superseded <em>(manualOverrun only)</em></div>
+          <div class="step-body"><code>fetchLatestCompletedDaId()</code> runs <em>before</em> the new checkpoint
+          is created, capturing the old <code>da_id</code> so its rows can be cleaned up later — but only after
+          the new run proves itself.</div>
+        </div>
+        <div class="step driver" data-n="4">
+          <div class="step-title"><code>createCheckpoint()</code> — always a fresh insert</div>
+          <div class="step-body">A new <code>DaRefer</code> row is inserted with <code>sta_cd=LOADING</code> and a
+          new <code>da_id</code>. This never overwrites a prior row, by design.</div>
+        </div>
+        <div class="step driver" data-n="5">
+          <div class="step-title">Assemble the Beam graph — no data moves yet</div>
+          <div class="step-body">Per source: resolve query tokens, fetch/derive a <code>Schema</code> (three
+          fallback tiers — see the check below), route to the right connector
+          (<code>SourceRouter.routeFromConfig()</code>), run the per-source transform chain
+          (LOOKUP → GROUP_BY → SORT_BY, via <code>SourceTransformChainAssembler</code>), then wire
+          <code>DataSourceRecordSinkTransform</code> and <code>PostDownloadFinalizeTransform</code> into the graph.</div>
+        </div>
+        <div class="step" data-n="6">
+          <div class="step-title">Submit &amp; wait</div>
+          <div class="step-body"><code>pipeline.run()</code>, then <code>result.waitUntilFinish()</code> blocks
+          the driver JVM until Dataflow (or DirectRunner) reaches a terminal state.</div>
+        </div>
+        <div class="step worker" data-n="7">
+          <div class="step-title">Rows land, paginated <span class="tag worker">worker</span></div>
+          <div class="step-body"><code>DataSourceRecordSinkTransform</code> collects all rows globally,
+          paginates at 250 rows/page, and streams one <code>DaRec</code> row per page. It returns a
+          <code>PCollection&lt;Long&gt;</code> — held until every streaming insert commits — which is the input
+          <code>PostDownloadFinalizeTransform</code> waits on. That's what guarantees finalization never starts
+          before every row is actually visible in BigQuery.</div>
+        </div>
+        <div class="step worker" data-n="8">
+          <div class="step-title">Finalize, entirely inside the worker <span class="tag worker">worker</span></div>
+          <div class="step-body">No external post-pipeline step, no second DAG task. All of §checks below runs
+          right here, then the checkpoint is updated and a failure email goes out if one is configured.</div>
+        </div>
+      </div>
+
+      <h3 class="sub">The four checks inside finalization, in order</h3>
+      <p>Each one only runs if the previous one passed — a failure short-circuits the rest and leaves
+      whatever was already stored untouched.</p>
+
+      <div class="callout check">
+        <span class="lbl">Check 1 — row count match (always on)</span>
+        <p><code>countRecords(daId)</code> un-nests every page and counts individual rows; it must equal the
+        row count the pipeline itself produced. No config flag turns this off.</p>
+      </div>
+      <div class="callout check">
+        <span class="lbl">Check 2 — min/max row bounds (optional)</span>
+        <p>From <code>min_row_count</code> / <code>max_row_count</code> in the source config. Skipped entirely
+        if absent.</p>
+      </div>
+      <div class="callout check">
+        <span class="lbl">Check 3 — data_transform_query output bounds (optional)</span>
+        <p>If <code>data_transform_query</code> is configured, it now always runs beneath an automatically
+        prepended <code>WITH data AS (...)</code> CTE that reunifies every paginated row — the operator's SQL
+        just does <code>FROM data</code>. The transform's output row count is checked against
+        <code>data_transform_min_row_count</code> / <code>_max_row_count</code> <em>before</em> it's allowed to
+        replace anything already stored.</p>
+      </div>
+      <div class="callout check">
+        <span class="lbl">Check 4 — Balance-and-Control (BnC) sum rules (optional)</span>
+        <p>From <code>bnc_rules_json</code>: each rule sums a field and compares it to an expected total within
+        tolerance. Runs against the transformed rows if check 3 applied, otherwise the raw ones.</p>
+      </div>
+
+      <p>Whatever combination fails, the checkpoint lands on the matching status —
+      <code>FAILED_BNC</code>, <code>FAILED_TRANSFORM</code>, or plain <code>FAILED</code> — and, only on the
+      happy path (<code>COMPLETED</code>), any superseded previous run's <code>DaRec</code> rows get deleted.
+      <code>DaRefer</code> itself is never touched by that cleanup.</p>
+    </section>
+
+    <!-- ===================== 05 FLOW: REPORT_PROCESSING ===================== -->
+    <section class="block" id="flow-report">
+      <div class="block-head">
+        <div class="block-num">05 — Flow</div>
+        <h2 class="block-title">REPORT_PROCESSING</h2>
+        <p class="block-sub">Turns already-downloaded data into a report: a chain of real BigQuery jobs,
+        file exports, and an email. Runs entirely in the driver JVM — <strong>no Beam pipeline, no
+        Dataflow job</strong>, which is why it starts fast and is fine for small aggregated outputs.</p>
+      </div>
+
+      <div class="flow">
+        <div class="step driver" data-n="1">
+          <div class="step-title">Load config, open the checkpoint</div>
+          <div class="step-body"><code>ReportPipelineFactory.execute()</code> calls
+          <code>BigQueryReportRepository.fetchReportConfig()</code>, then
+          <code>BigQueryReportCheckpointAdapter.createCheckpoint()</code> inserts a <code>RptRefer</code>
+          <code>LOADING</code> row.</div>
+        </div>
+        <div class="step driver" data-n="2">
+          <div class="step-title">Preprocessing (optional)</div>
+          <div class="step-body">Each <code>BQ_QUERY</code> step just runs; <code>API_ENRICHMENT</code> is
+          declared in the model but not implemented yet — it logs a warning and does nothing. Worth knowing
+          before you configure one and wonder why nothing happened.</div>
+        </div>
+        <div class="step driver" data-n="3">
+          <div class="step-title">Check datasource availability</div>
+          <div class="step-body">For every <em>required</em> <code>ReportDatasourceRef</code>,
+          <code>DataSourceCheckpointAdapter.isCompleted()</code> must return true against <code>DaRefer</code>.
+          This is the only coupling between the two flows — a checkpoint status, not a pipeline wiring.</div>
+        </div>
+        <div class="step driver" data-n="4">
+          <div class="step-title">Stage each datasource's rows</div>
+          <div class="step-body">For each ref: <code>fetchLatestCompletedDaId()</code> →
+          <code>addDaMapping()</code> (a <code>RptDaMap</code> row) →
+          <code>stageFromDaRec(mapId, daId)</code>, which copies every <code>DaRec</code> page for that
+          <code>da_id</code> into <code>RptStageDa</code> verbatim — one <code>RptStageDa</code> row per page,
+          batched like <code>DaRec</code> itself, not one row per record. The alias registered for this
+          datasource (<code>stagedDataSubquery()</code>) un-nests those pages back into individual records on
+          every read, so a transform's SQL always sees one row per record regardless — this batching-and-unnest
+          always runs, it's plain, unconditional SQL, not something an operator's query can opt out of, forget,
+          or even needs to know about.</div>
+        </div>
+        <div class="step driver" data-n="5">
+          <div class="step-title">Run the transformation chain</div>
+          <div class="step-body">Each step's SQL is resolved through all three token layers (§02), then
+          <code>BigQueryJobService.runQueryToTable()</code> materializes it to a real table. The step's
+          <code>outputAlias</code> is registered pointing at that table, so later steps can chain off it by name.</div>
+        </div>
+        <div class="step driver" data-n="6">
+          <div class="step-title">Optional: write the designated output table</div>
+          <div class="step-body">If <code>output_bq_table</code> is set, one more query copies from
+          <code>output_bq_input_alias</code> (or the last transform's alias, or the first datasource's) into it —
+          a third, independent "final result" mechanism, separate from any per-output BQ sink below.</div>
+        </div>
+        <div class="step driver" data-n="7">
+          <div class="step-title">Route outputs, write records, clean up</div>
+          <div class="step-body"><code>ReportOutputSinkRouter</code> exports each output to GCS, copies to a BQ
+          table, or (not yet implemented) POSTs to an API. A <code>RptOutput</code> row is written per output,
+          then <code>clearStagedData()</code> deletes this run's <code>RptStageDa</code> rows — they're
+          intentionally transient.</div>
+        </div>
+        <div class="step driver" data-n="8">
+          <div class="step-title">Email &amp; close out</div>
+          <div class="step-body">GCS outputs are downloaded and attached; the checkpoint is updated to
+          <code>COMPLETED</code> — or <code>FAILED</code> if any phase above threw.</div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <span class="lbl">Where does the report's SQL actually read from?</span>
+        <p>Never <code>DaRec</code> directly. <code>RptStageDa</code> itself is batched exactly like
+        <code>DaRec</code> — one row per page, not per record — but <code>stagedDataSubquery()</code> un-nests
+        those pages back into individual records the moment a transform's <code>{alias}</code> is substituted,
+        so the chain's SQL always does <code>JSON_VALUE(stage_ds_json_tx, '$.field')</code> against a flat,
+        one-row-per-record view — never against a raw page, and never against the still-paginated download
+        directly.</p>
+      </div>
+    </section>
+
+    <!-- ===================== 06 FLOW: PIPELINE ===================== -->
+    <section class="block" id="flow-pipeline">
+      <div class="block-head">
+        <div class="block-num">06 — Flow</div>
+        <h2 class="block-title">PIPELINE</h2>
+        <p class="block-sub">Not a third system — a thin composition of the two flows above. It takes the
+        <strong>exact same</strong> <code>--reportName</code>/<code>--reportSubprocess</code> as
+        REPORT_PROCESSING. There is no separate pipeline config to look up.</p>
+      </div>
+
+      <div class="flow">
+        <div class="step driver" data-n="1">
+          <div class="step-title">Read the report's own datasource list</div>
+          <div class="step-body"><code>PipelineSequenceFactory</code> calls the same
+          <code>BigQueryReportRepository.fetchReportConfig()</code> REPORT_PROCESSING uses, and reads
+          <code>ReportConfig.datasources[]</code> — the same <code>List&lt;ReportDatasourceRef&gt;</code>, each
+          already carrying <code>is_required</code>.</div>
+        </div>
+        <div class="step driver" data-n="2">
+          <div class="step-title">Batch every declared datasource into <em>one</em> Dataflow job</div>
+          <div class="step-body">Each ref's <code>SourceConfig</code> is fetched, then all of them go into a
+          single call to <code>DataSourcePipelineFactory.assembleForConfigs()</code> — never one job per
+          datasource. Anything already <code>COMPLETED</code> is skipped, same as standalone
+          DATA_SOURCE_DOWNLOAD.</div>
+        </div>
+        <div class="step" data-n="3">
+          <div class="step-title">Submit, wait, then re-check</div>
+          <div class="step-body">After <code>waitUntilFinish()</code>, each ref's checkpoint is re-checked. An
+          incomplete <em>required</em> datasource throws <code>PipelineAbortedException</code> and the whole run
+          stops before the report ever starts. An incomplete <em>optional</em> one just logs a warning.</div>
+        </div>
+        <div class="step driver" data-n="4">
+          <div class="step-title">Run the report, unchanged</div>
+          <div class="step-body"><code>ReportPipelineFactory.execute(options)</code> runs exactly as it would
+          under plain REPORT_PROCESSING — same object, same options, no PIPELINE-specific branch inside it.</div>
+        </div>
+      </div>
+
+      <div class="callout tradeoff">
+        <span class="lbl">Why this is worth understanding, not just using</span>
+        <p>This used to be a real, separate system: its own <code>{"steps":[...]}</code> JSON shape, its own
+        <code>PipelineConfig</code>/<code>PipelineStepConfig</code>/<code>DataSourceStep</code>/<code>ReportStep</code>
+        sealed model hierarchy, its own repository class. It was removed in favor of what you see above, because
+        a report's <code>datasources[]</code> already said everything a pipeline needed to say — which
+        datasources feed it, and which are mandatory. Maintaining both would have meant two places that could
+        silently drift out of sync. See §07 for the fuller trade-off.</p>
+      </div>
+
+      <div class="callout">
+        <span class="lbl">A detail that's easy to miss</span>
+        <p><code>--manualOverrun</code> applies to the whole sequence with <em>zero</em> PIPELINE-specific code.
+        The same <code>options</code> instance flows unchanged into both
+        <code>assembleForConfigs()</code> and <code>ReportPipelineFactory.execute()</code>, so every declared
+        datasource gets the same bypass-and-supersede treatment it would standalone — nothing had to be
+        re-threaded by hand.</p>
+      </div>
+    </section>
+
+    <!-- ===================== 07 TRADE-OFFS ===================== -->
+    <section class="block" id="tradeoffs">
+      <div class="block-head">
+        <div class="block-num">07 — Going deeper</div>
+        <h2 class="block-title">Trade-offs we made, and why</h2>
+        <p class="block-sub">Decisions that look arbitrary from the outside but weren't. Each one traded
+        something real for something else real.</p>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>Config-as-BigQuery-rows, not code</h4><span class="verdict">chosen deliberately</span></div>
+        <p>New sources and new reports are a BigQuery row, not a deploy.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Zero-deploy onboarding for new sources/reports</li>
+            <li>One place (parameter_store) to audit all config</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>No compile-time safety on config — a typo is a runtime failure</li>
+            <li>Mitigated by fail-loud validation: e.g. <code>bq_schema_json</code> with a bad type name throws
+              <code>IllegalArgumentException</code> immediately, rather than silently defaulting</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>DaRec pagination at 250 rows/page</h4><span class="verdict">write-time vs. read-time</span></div>
+        <p>One DaRec row holds up to 250 source rows as a JSON array, instead of one DaRec row per source row.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Far fewer streaming-insert calls and stored rows for large downloads</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>Every reader (row counts, BnC sums, staging, the transform CTE) must
+              <code>CROSS JOIN UNNEST(...)</code> before it can see individual rows</li>
+            <li>Solved once, centrally, in <code>FileHeaderLegend.dataArrayExpr()</code> — every caller uses the
+              same expression instead of re-deriving it</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>Atomic transaction for the transform's row-replace</h4><span class="verdict">forced by BigQuery, not chosen</span></div>
+        <p>Replacing a run's stored rows after <code>data_transform_query</code> validates runs as one
+        <code>BEGIN TRANSACTION ... COMMIT</code> script (DELETE + re-paginated INSERT), not two separate jobs.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Never a partial state: either both statements land, or neither does</li>
+            <li>Safe to retry blindly on failure — a failed attempt is guaranteed to have changed nothing</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>Rows just streamed in can still be in BigQuery's DML-ineligible streaming buffer, so the whole
+              transaction needs backoff retries (~30s total) before it's allowed to give up</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>data_transform_query: opt-in token → always-on CTE</h4><span class="verdict">recent change, this session</span></div>
+        <p>Used to be: unnesting only happened if the operator's SQL happened to contain the literal
+        <code>{data}</code> placeholder — a silent no-op otherwise. Now: a <code>WITH data AS (...)</code> CTE is
+        unconditionally prepended before every run.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Removes an entire footgun — forgetting the token used to mean silently querying
+              still-paginated JSON with no error</li>
+            <li>Handles an operator's own <code>WITH</code> clause by merging CTEs instead of emitting invalid
+              double-<code>WITH</code> SQL</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>The CTE always computes, even if a query somehow never references <code>data</code> — BigQuery
+              optimizes this away in practice, so it's a cost mostly on paper</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>RptStageDa batched like DaRec — unnest moved from write to read</h4><span class="verdict">recent change, this session</span></div>
+        <p>Used to be: <code>stageFromDaRec()</code> un-nested every DaRec page into individual RptStageDa rows at
+        write time — one RptStageDa row per source record. Now: it copies DaRec's pages across verbatim (one
+        RptStageDa row per page), and <code>stagedDataSubquery()</code> un-nests them back into individual
+        records on every read instead.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Same ~250x reduction in streaming-insert/DML volume on RptStageDa that DaRec's own pagination
+              already gets — cheaper and faster staging</li>
+            <li>Zero report-facing change: <code>{alias}</code> still resolves to one row per record, column
+              <code>stage_ds_json_tx</code> — no <code>query_template</code> anywhere has to change, because the
+              unnest lives entirely inside <code>BigQueryReportCheckpointAdapter</code>, not in the alias
+              resolution layer or the operator's SQL</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>Ad-hoc diagnostic queries against RptStageDa change meaning — <code>SELECT COUNT(*)</code> now
+              counts pages, not records, so debugging by eye needs to remember to <code>UNNEST</code> first</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>--customParamsJson wins on collision</h4><span class="verdict">recent addition</span></div>
+        <p>A CLI-supplied JSON blob merges on top of a step's stored <code>query_params_json</code>, and beats it
+        on any key collision.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Airflow DAG conf or an ad-hoc run can override one token without touching stored config</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>A silent override — an operator debugging unexpected output has to know to check the CLI args,
+              not just the parameter_store row</li>
+            <li>Malformed or non-object JSON throws immediately rather than resolving to nothing, specifically
+              so a broken override fails loudly instead of quietly changing nothing</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>PIPELINE simplification — reuse, don't re-model</h4><span class="verdict">walked back a design</span></div>
+        <p>The first version built a whole parallel config shape for pipelines. It was removed once it became
+        clear a report's own <code>datasources[]</code>/<code>is_required</code> already said the same thing.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>One less config shape, one less model hierarchy, one less repository class to keep in sync</li>
+            <li><code>--manualOverrun</code> propagation came for free instead of needing its own logic</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>None found — this is the rare case where the simpler design was strictly better; the lesson is
+              more about not building the bespoke shape too early in the first place</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>Retry policy capped at 200ms</h4><span class="verdict">a real limitation, by design</span></div>
+        <p><code>RetryingDoFn</code>'s delay is capped at 200ms regardless of policy (fixed or exponential).</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Predictable worker-thread behavior — a retry never blocks a Beam worker thread for long</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>Not suitable for anything needing real back-off. The documented answer for that is a
+              retry-topic pattern (write failures to Pub/Sub, reprocess on a schedule) — this framework doesn't
+              build that for you</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>FILE sources: column letters, not header names</h4><span class="verdict">stability over ergonomics</span></div>
+        <p>CSV/Excel rows are stored keyed by Excel-style column letters (<code>A</code>, <code>B</code>, ...),
+        with real header names carried separately as a "header legend" when a header row exists.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Config referencing a FILE source's fields is stable even if a header gets renamed upstream</li>
+            <li>Headerless files work identically — there's simply no legend</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>Every BnC rule, transform, and lookup config written against a FILE source must use column
+              letters, not the names a human would expect</li>
+            <li>The legend has to be threaded through the pipeline without being mistaken for a data row —
+              solved with a marker-wrapping convention (<code>FileHeaderLegend</code>) rather than a second
+              PCollection</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>Dead-code cleanup: "zero callers" isn't automatically "delete it"</h4><span class="verdict">a judgment call, this session</span></div>
+        <p>A read-only sweep flagged several classes with no real callers anywhere. Some were removed; some weren't.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Removed</div><ul>
+            <li>6 unused <code>PipelineRunConfig</code> email/calendar getters — genuinely superseded by
+              <code>SourceFailureEmailConfig</code> and <code>--calendarName</code></li>
+            <li><code>BigQuerySchemaUtils.fetchRowCount()</code>/<code>tableExists()</code>, an unused
+              <code>DataSourceRecord</code> model, and stale docs for already-deleted JDBC code</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Kept</div><ul>
+            <li><code>RowValidationUtils</code>, <code>MetricsUtils</code>, <code>SideInputFactory</code>,
+              <code>SideEffectEmailTransform</code> — extensively documented, intentional extension points a
+              future transform is meant to opt into directly, not leftover cruft</li>
+          </ul></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 08 CHECKS TABLE ===================== -->
+    <section class="block" id="checks">
+      <div class="block-head">
+        <div class="block-num">08 — Going deeper</div>
+        <h2 class="block-title">Every check, in one table</h2>
+        <p class="block-sub">A consolidated reference — where each guard lives, what turns it on, and what
+        happens when it fails.</p>
+      </div>
+
+      <div class="twrap">
+        <table>
+          <thead><tr><th>Check</th><th>Lives in</th><th>Turned on by</th><th>On failure</th></tr></thead>
+          <tbody>
+            <tr><td>Row count match</td><td><code>PostDownloadFinalizeTransform</code></td><td>always-on</td><td><span class="badge fail">FAILED</span></td></tr>
+            <tr><td>Min/max row bounds</td><td><code>PostDownloadFinalizeTransform</code></td><td><code>min_row_count</code>/<code>max_row_count</code></td><td><span class="badge fail">FAILED</span></td></tr>
+            <tr><td>Transform output bounds</td><td><code>PostDownloadFinalizeTransform</code></td><td><code>data_transform_min/max_row_count</code></td><td><span class="badge warn">FAILED_TRANSFORM</span> (original rows untouched)</td></tr>
+            <tr><td>BnC sum rules</td><td><code>PostDownloadFinalizeTransform</code></td><td><code>bnc_rules_json</code></td><td><span class="badge warn">FAILED_BNC</span></td></tr>
+            <tr><td>Required headers present</td><td><code>ValidationConfig</code> / file parsing</td><td><code>required_headers_json</code></td><td>configured validation failure path</td></tr>
+            <tr><td>Declared schema type strictness</td><td><code>BigQuerySchemaUtils.toBeamSchema()</code></td><td><code>bq_schema_json</code> present</td><td>run fails immediately — a bad type name or mismatched value throws, naming the column</td></tr>
+            <tr><td>Datasource availability (required)</td><td><code>ReportPipelineFactory</code></td><td><code>ReportDatasourceRef.required</code></td><td><code>IllegalStateException</code>, run aborts before staging</td></tr>
+            <tr><td>Datasource availability (PIPELINE)</td><td><code>PipelineSequenceFactory</code></td><td>same <code>required</code> flag</td><td><code>PipelineAbortedException</code> if required, warning-only if optional</td></tr>
+            <tr><td>Config row exists</td><td><code>fetchSourceConfigs()</code> / <code>fetchReportConfig()</code></td><td>always-on</td><td>throws immediately — no separate "is it there" check needed</td></tr>
+            <tr><td>Idempotency / skip-already-done</td><td><code>isCompleted(srceNm, perId)</code></td><td>DaRefer status</td><td>source is skipped, not re-run — bypassable via <code>--manualOverrun</code></td></tr>
+            <tr><td>Atomic replace never partial</td><td><code>replaceStoredRows()</code></td><td>always-on when a transform applies</td><td>whole transaction rolls back; retried up to ~30s, then throws</td></tr>
+            <tr><td>Serialization rules (DoFns, TupleTags)</td><td>convention, not code</td><td>code review / <code>CLAUDE.md</code></td><td><em>not enforced by the compiler</em> — violating it fails at runtime on a worker, often cryptically</td></tr>
+            <tr><td>Docs stay in sync with code</td><td>git pre-commit hook</td><td>always-on for staged <code>.java</code> files</td><td>commit is blocked unless a README/CLAUDE.md is staged alongside</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="lbl">The one check that's a convention, not code</span>
+        <p>Serialization rules — named static DoFns, <code>Serializable</code> fields, <code>transient</code> +
+        <code>@Setup</code>/<code>@Teardown</code> for non-serializable resources, <code>static final</code>
+        TupleTags — are the one category nothing in this codebase actually enforces mechanically. Get one wrong
+        and Beam will tell you, but only when it tries to ship a DoFn to a worker, and the resulting error is
+        rarely obviously about serialization. Worth reading §6 of <code>CLAUDE.md</code> before writing a new
+        DoFn, not after debugging one.</p>
+      </div>
+    </section>
+
+    <!-- ===================== 09 READING ORDER ===================== -->
+    <section class="block" id="reading">
+      <div class="block-head">
+        <div class="block-num">09 — Going deeper</div>
+        <h2 class="block-title">Reading order &amp; where to look</h2>
+        <p class="block-sub">If you're about to make a change, this is the fastest path to enough context to
+        make it safely.</p>
+      </div>
+
+      <ul class="plain">
+        <li><strong>WALKTHROUGH.md</strong> — UML diagrams and execution flows; read this first, before any code.</li>
+        <li><strong>EXAMPLE.md</strong> — a full end-to-end BQ param-store example with DDL and a real run command.</li>
+        <li><strong>FrameworkOptions.java</strong> (beam-core) — every CLI flag; the actual config contract.</li>
+        <li><strong>Main.java</strong> (beam-runner) — the entry point; how <code>processType</code> routes.</li>
+        <li><strong>DataSourcePipelineFactory.java</strong> — DATA_SOURCE_DOWNLOAD orchestration.</li>
+        <li><strong>ReportPipelineFactory.java</strong> — REPORT_PROCESSING orchestration.</li>
+        <li><strong>PipelineSequenceFactory.java</strong> — how PIPELINE composes the two above.</li>
+        <li><strong>BeamTransform.java</strong> — the SPI interface; the extension contract for new transforms.</li>
+      </ul>
+
+      <h3 class="sub">If you're adding something new</h3>
+      <div class="twrap">
+        <table>
+          <thead><tr><th>You want to add</th><th>Touch these</th></tr></thead>
+          <tbody>
+            <tr><td>A new data source type</td><td>Row in <code>source_config</code> + <code>SourceType</code> enum + adapter/transform pair in <code>beam-io/source/</code> + a case in <code>SourceRouter</code></td></tr>
+            <tr><td>A new per-source transform</td><td>Class in <code>beam-transforms/source/</code> + a case in <code>SourceTransformChainAssembler</code></td></tr>
+            <tr><td>A new report transform step</td><td>Nothing — it's raw SQL in <code>parameter_store</code>, no Java change needed</td></tr>
+            <tr><td>A new pluggable <code>BeamTransform</code></td><td>Implement the interface + register in <code>META-INF/services/...BeamTransform</code></td></tr>
+            <tr><td>A new CLI flag</td><td><code>FrameworkOptions.java</code> + <code>beam-core/README.md</code> + root <code>README.md</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout tradeoff">
+        <span class="lbl">One more convention worth knowing before your first PR</span>
+        <p>This repo's <code>CLAUDE.md</code> treats documentation as part of every change, not an
+        afterthought — a pre-commit hook literally blocks a commit that touches <code>.java</code> files without
+        touching a README/CLAUDE.md/WALKTHROUGH.md alongside it. It's mechanical, not optional, and it's the
+        reason the docs above stay trustworthy enough to build this guide from.</p>
+      </div>
+    </section>
+
+    <div class="footer">Generated as a working reference — the source of truth is always the code and
+      <code>CLAUDE.md</code>; this guide should be re-derived, not hand-patched, if the two drift.</div>
+  </main>
+</div>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('.nav-link'));
+  var sections = links.map(function(l){ return document.querySelector(l.getAttribute('href')); });
+  function onScroll(){
+    var y = window.scrollY + 140;
+    var active = 0;
+    for (var i=0;i<sections.length;i++){
+      if (sections[i] && sections[i].offsetTop <= y) active = i;
+    }
+    links.forEach(function(l,i){ l.classList.toggle('active', i===active); });
+  }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+  links.forEach(function(l){
+    l.addEventListener('click', function(e){
+      e.preventDefault();
+      var t = document.querySelector(l.getAttribute('href'));
+      if (t) t.scrollIntoView({behavior:'smooth', block:'start'});
+    });
+  });
+})();
+</script>

@@ -1,13 +1,13 @@
-# End-to-End Example: Parameter Store → DaRefer → Sink
+# End-to-End Example: Parameter Store → RptRefer / RptDaMap / RptStageDa / RptOutput
 
 This walkthrough shows the full lifecycle for both pipeline types.
 
 Two ways to run a report:
 
-| Path | Class | DaRefer tracking? | Use when |
-|------|-------|-------------------|----------|
+| Path | Class | Lifecycle tracking? | Use when |
+|------|-------|---------------------|----------|
 | **ExampleWorkflow** | `ExampleWorkflow` | No | Smoke-test parameter-store plumbing directly |
-| **Full pipeline** | `Main` via `ReportPipelineFactory` | Yes | Production run with LOADING → COMPLETED tracking |
+| **Full pipeline** | `Main` via `ReportPipelineFactory` | Yes — RptRefer LOADING → COMPLETED | Production run with full checkpoint tracking |
 
 ---
 
@@ -16,74 +16,19 @@ Two ways to run a report:
 ### Config tables (pre-populated externally, read-only at runtime)
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS `my-gcp-project.pipeline_config`;
+CREATE SCHEMA IF NOT EXISTS `my-gcp-project.dw`;
 
 -- Parameter store: one row per named parameter group.
--- Three-identifier key: ParameterGroupName (parent) / ParameterDataSource (child) / ParameterName (name).
-CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.parameter_store` (
-  ParameterName       STRING    NOT NULL,   -- report or parameter name
-  ParameterGroupName  STRING    NOT NULL,   -- top-level business group (--parentId)
-  ParameterDataSource STRING    NOT NULL,   -- subprocess / variant (--reportSubprocess)
-  SchemaOfJson        STRING,               -- {"field": {"required": true, "type": "string"}}
-  ParametersValJson   STRING,               -- {"field": "value", ...}
-  EditGrpNm           STRING,
-  LastUpdtTs          TIMESTAMP,
-  LstUpdateUserId     STRING
-);
-
--- Period master: one row per period. Pre-populated; framework reads only.
--- PerId encoding:
---   YYYYMM       → MONTHLY    (203012 = Dec 2030)
---   YYYYMMDD     → DAILY      (20301112 = 12 Nov 2030)
---   YYYYMMDDQQ   → QUARTERLY  (2030111201 = 12 Nov 2030 Q1)
-CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.MSTR_Per` (
-  PerId      STRING    NOT NULL,
-  PerDt      DATE      NOT NULL,   -- the specific date for this period
-  MoNo       INT64     NOT NULL,   -- calendar month (1–12)
-  YrNo       STRING    NOT NULL,   -- fiscal year label e.g. "25-26"
-  PerTypeCd  STRING    NOT NULL,   -- MONTHLY | DAILY | ANNUALLY | QUARTERLY
-  LstUpdtTs  TIMESTAMP NOT NULL
-);
-
--- Source config: one row per (parent_id, datasource_name, subprocess_name, period_id).
--- Three-identifier key: parent_id (parent) / subprocess_name (child) / datasource_name (name).
-CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_config.source_config` (
-  parent_id           STRING    NOT NULL,   -- business group (--parentId)
-  datasource_name     STRING    NOT NULL,   -- data source name (--datasourceName)
-  subprocess_name     STRING    NOT NULL,   -- variant e.g. EOD, INTRADAY (--subprocessName)
-  period_id           STRING    NOT NULL,   -- period (--periodId, from MSTR_Per)
-  source_type         STRING    NOT NULL,   -- BQ | API | FILE
-  -- BQ source
-  bq_project_id       STRING,
-  bq_dataset          STRING,
-  bq_table            STRING,
-  bq_query            STRING,
-  query_params_json   STRING,               -- {"key": "value"} token overrides
-  -- API source
-  api_endpoint        STRING,
-  api_auth_type       STRING,
-  api_auth_secret_id  STRING,
-  api_headers_json    STRING,
-  api_query_params_json STRING,
-  api_pagination_enabled BOOL,
-  api_pagination_strategy STRING,
-  api_page_size       INT64,
-  api_next_page_field STRING,
-  api_data_array_field STRING,
-  -- FILE source
-  file_type           STRING,
-  file_location       STRING,
-  file_prefix         STRING,
-  file_suffix         STRING,
-  file_delimiter      STRING,
-  file_has_header     BOOL,
-  file_sheet_index    INT64,
-  -- Transform + validation
-  source_transforms_json STRING,
-  min_row_count       INT64,
-  max_row_count       INT64,
-  required_headers_json STRING,
-  bnc_rules_json      STRING                -- [{"field":"amount","expectedTotal":5000000}]
+-- Three-identifier key: parameter_group_name (parent) / parameter_data_source (child) / parameter_name (name).
+CREATE TABLE IF NOT EXISTS `my-gcp-project.dw.parameter_store` (
+  parameter_name        STRING    NOT NULL,   -- report or parameter name
+  parameter_group_name  STRING    NOT NULL,   -- top-level business group (--parentId)
+  parameter_data_source STRING    NOT NULL,   -- subprocess / variant (--reportSubprocess)
+  schema_of_json        STRING,               -- {"field": {"required": true, "type": "string"}}
+  parameters_val_json   STRING,               -- {"field": "value", ...}
+  edit_grp_nm           STRING,
+  last_updt_ts          DATETIME,
+  lst_update_user_id    STRING
 );
 
 -- Raw trades source data (example source for DATA_SOURCE_DOWNLOAD)
@@ -108,43 +53,82 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.reports.daily_trades_summary` (
 ```sql
 CREATE SCHEMA IF NOT EXISTS `my-gcp-project.pipeline_metadata`;
 
--- DaRefer: one row per pipeline run (DATA_SOURCE_DOWNLOAD or REPORT_PROCESSING).
--- Created LOADING before the run; updated to COMPLETED / FAILED_BNC / FAILED after.
+-- DaRefer: one row per DATA_SOURCE_DOWNLOAD run.
+-- Created LOADING before pipeline.run(); updated to COMPLETED / FAILED_BNC / FAILED after.
+-- Also READ by ReportPipelineFactory to check datasource availability.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.DaRefer` (
-  DaId              INT64     NOT NULL,   -- surrogate PK: MAX(DaId)+1 per run
-  SrceNm            STRING    NOT NULL,   -- data source name or report name
-  VsnNo             INT64     NOT NULL,   -- rerun counter per (SrceNm, PerId): 1, 2, 3 …
-  PerId             STRING    NOT NULL,   -- period identifier (from MSTR_Per)
-  FlNm              STRING,               -- source location: BQ table, GCS path, or API endpoint
-  BalAndCntlSmryTx  STRING,               -- JSON BnC summary: {status, srcCount, dstCount, …}
-  StaCd             STRING    NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED
-  CreatedTs         TIMESTAMP NOT NULL,
-  LstUpdtTs         TIMESTAMP NOT NULL
+  da_id                INT64     NOT NULL,   -- surrogate PK: MAX(da_id)+1 per run
+  srce_nm              STRING    NOT NULL,   -- data source name (--datasourceName)
+  vsn_no               INT64     NOT NULL,   -- rerun counter per (srce_nm, per_id): 1, 2, 3 …
+  per_id               INT64     NOT NULL,   -- period integer (--periodId): 202401, 20240115
+  fl_nm                STRING,               -- source location: BQ table, GCS path, or API endpoint
+  bal_and_cntl_smry_tx STRING,              -- JSON BnC summary: {status, srcCount, dstCount, …}
+  sta_cd               STRING    NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED
+  creat_ts             DATETIME  NOT NULL,
+  lst_updt_ts          DATETIME  NOT NULL
 );
 
--- DaRec: all data rows from every DATA_SOURCE_DOWNLOAD run, stored as JSON blobs.
--- Filter by DaId (FK → DaRefer) to retrieve all rows for one run.
+-- DaRec: all source rows from every DATA_SOURCE_DOWNLOAD run, stored as paginated JSON blobs.
+-- One DaRec row = one PAGE of up to 250 source rows (row_da_json_tx is a JSON ARRAY, e.g.
+-- [{"currency":"USD",...},{"currency":"EUR",...}]), not one row per DaRec row. An 8-row source
+-- like the trades example below produces a single page (1 DaRec row, page_no=1).
+-- Filter by da_id (FK → DaRefer) and UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to retrieve
+-- individual source rows across all pages of a run.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.DaRec` (
-  RecId        STRING    NOT NULL,   -- UUID per row
-  DaId         INT64     NOT NULL,   -- FK → DaRefer.DaId
-  RowDaJsonTx  STRING,               -- source row serialised as JSON after transforms
-  LoadDt       DATE      NOT NULL,   -- partition column; set once per run
-  LstUpdtTs    TIMESTAMP NOT NULL
+  rec_id         STRING    NOT NULL,   -- UUID per page
+  da_id          INT64     NOT NULL,   -- FK → DaRefer.da_id
+  page_no        INT64     NOT NULL,   -- 1-based page number within this da_id (≤250 rows/page)
+  row_da_json_tx STRING,               -- JSON array of source rows in this page, after transforms
+  load_dt        DATE      NOT NULL,   -- partition column; set once per run
+  lst_updt_ts    DATETIME  NOT NULL
 )
-PARTITION BY LoadDt;
+PARTITION BY load_dt;
 
--- COM_CmnRptDtl: one row per output file written by REPORT_PROCESSING.
--- Written for every sink type (GCS, BQ, API) after the output step completes.
-CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.COM_CmnRptDtl` (
-  SrceSysNm      STRING    NOT NULL,   -- report name (matches SrceNm in DaRefer)
-  FlNm           STRING    NOT NULL,   -- output file name, BQ table ref, or API endpoint
-  SrceFlCreateTs TIMESTAMP NOT NULL,   -- when this output was generated
-  FlDaJsonTx     STRING,               -- output data as JSON (populated by future enhancements)
-  RecCt          INT64,                -- row count written to this output
-  CreatTs        TIMESTAMP NOT NULL,
-  CreateUserId   STRING,
-  LstUpdtTs      TIMESTAMP NOT NULL,
-  LstUpdtUserId  STRING
+-- RptRefer: one row per REPORT_PROCESSING run.
+-- Created LOADING before transforms; updated to COMPLETED / FAILED after.
+CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptRefer` (
+  rpt_id      INT64     NOT NULL,   -- surrogate PK: MAX(rpt_id)+1 per run
+  rpt_nm      STRING    NOT NULL,   -- report name (--reportName)
+  per_id      INT64     NOT NULL,   -- period integer (--periodId)
+  rpt_ds      STRING,               -- report subprocess (--reportSubprocess)
+  sta_cd      STRING    NOT NULL,   -- LOADING | COMPLETED | FAILED
+  creat_ts    DATETIME  NOT NULL,
+  lst_updt_ts DATETIME  NOT NULL
+);
+
+-- RptDaMap: links each REPORT_PROCESSING run to the DaRefer.da_id(s) it consumed.
+CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptDaMap` (
+  map_id      INT64     NOT NULL,   -- surrogate PK
+  rpt_id      INT64     NOT NULL,   -- FK → RptRefer.rpt_id
+  da_id       INT64     NOT NULL,   -- FK → DaRefer.da_id
+  lst_updt_ts DATETIME  NOT NULL
+);
+
+-- RptStageDa: transient staging table — DaRec's pages are copied here verbatim (one RptStageDa
+-- row per DaRec page, batched like DaRec itself, not one row per source record), then deleted via
+-- clearStagedData() at the end of every successful run. stagedDataSubquery() un-nests pages back
+-- into individual source-row JSON objects on read, so this batching is invisible to report SQL.
+CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptStageDa` (
+  stage_id        INT64     NOT NULL,   -- surrogate PK (base + ROW_NUMBER per bulk INSERT), one per page
+  map_id          INT64     NOT NULL,   -- FK → RptDaMap.map_id
+  stage_ds_json_tx STRING,              -- one DaRec page's JSON, copied verbatim (≤250 records)
+  query_config_tx  STRING,              -- JSON metadata: {da_id, map_id}
+  load_dt         DATE      NOT NULL,
+  lst_updt_ts     DATETIME  NOT NULL
+);
+
+-- RptOutput: one row per output step of a REPORT_PROCESSING run.
+CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptOutput` (
+  outpt_cd      STRING    NOT NULL,   -- output identifier (file name or destination ref)
+  rpt_dt        DATETIME  NOT NULL,   -- when this output was produced
+  vsn_no        INT64     NOT NULL,   -- rerun counter per (rpt_id, outpt_cd): 1, 2, 3 …
+  output_ds     STRING,               -- destination: GCS URI, BQ table, or API endpoint
+  line_refer_cd STRING,
+  sched_tx      STRING,
+  bal_am        FLOAT64,
+  rpt_type_cd   STRING,
+  rpt_id        INT64     NOT NULL,   -- FK → RptRefer.rpt_id
+  lst_updt_ts   DATETIME  NOT NULL
 );
 ```
 
@@ -153,14 +137,6 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.COM_CmnRptDtl` (
 ## 2. Seed sample data
 
 ```sql
--- Period master rows
-INSERT INTO `my-gcp-project.pipeline_config.MSTR_Per`
-  (PerId, PerDt, MoNo, YrNo, PerTypeCd, LstUpdtTs)
-VALUES
-  ('202401',   DATE '2024-01-31', 1,  '23-24', 'MONTHLY',   CURRENT_TIMESTAMP()),
-  ('20240115', DATE '2024-01-15', 1,  '23-24', 'DAILY',     CURRENT_TIMESTAMP()),
-  ('20240101', DATE '2024-01-01', 1,  '23-24', 'DAILY',     CURRENT_TIMESTAMP());
-
 -- Raw trades
 INSERT INTO `my-gcp-project.raw_data.trades` VALUES
   ('T001', 'USD', 150000.00, DATE '2024-01-05', 'FX'),
@@ -173,9 +149,9 @@ INSERT INTO `my-gcp-project.raw_data.trades` VALUES
   ('T008', 'GBP',  35000.00, DATE '2024-01-28', 'RATES');
 
 -- Parameter store — three-identifier key: TRADING / eod / daily_trades_summary
-INSERT INTO `my-gcp-project.pipeline_config.parameter_store`
-  (ParameterName, ParameterGroupName, ParameterDataSource,
-   SchemaOfJson, ParametersValJson, EditGrpNm, LastUpdtTs, LstUpdateUserId)
+INSERT INTO `my-gcp-project.dw.parameter_store`
+  (parameter_name, parameter_group_name, parameter_data_source,
+   schema_of_json, parameters_val_json, edit_grp_nm, last_updt_ts, lst_update_user_id)
 VALUES (
   'daily_trades_summary',
   'TRADING',          -- ← --parentId
@@ -194,40 +170,98 @@ VALUES (
     "output_gcs_path":        "gs://my-bucket/reports/daily_trades/",
     "output_file_name":       "daily_trades_summary_{periodId}.csv"
   }',
-  'TRADING', CURRENT_TIMESTAMP(), 'setup_script'
+  'TRADING', CURRENT_DATETIME(), 'setup_script'
 );
 
--- report_output_config — one row per output step.
--- sink_type drives where the result goes after the transform completes.
--- Example A: GCS output (default)
-INSERT INTO `my-gcp-project.pipeline_config.report_output_config`
-  (report_name, report_subprocess, period_id, output_order, input_alias,
-   sink_type, output_format, gcs_path, file_prefix, file_suffix, include_header)
+-- Source config for DATA_SOURCE_DOWNLOAD — stored in parameter_store alongside report params.
+-- Key: parameter_group_name=parentId, parameter_data_source=subprocessName, parameter_name=datasourceName.
+-- Period-specific filtering is handled by {periodStart}/{periodEnd} tokens inside bq_query.
+INSERT INTO `my-gcp-project.dw.parameter_store`
+  (parameter_name, parameter_group_name, parameter_data_source,
+   schema_of_json, parameters_val_json, edit_grp_nm, last_updt_ts, lst_update_user_id)
 VALUES (
-  'daily_trades_summary', 'eod', '202401', 1, 'transform_result',
-  'GCS', 'CSV', 'gs://my-bucket/reports/daily_trades/', '', '', true
+  'trades',           -- ← --datasourceName
+  'TRADING',          -- ← --parentId
+  'eod',              -- ← --subprocessName
+  JSON '{
+    "source_type": {"required": true,  "type": "string"},
+    "bq_query":    {"required": true,  "type": "string"}
+  }',
+  JSON '{
+    "source_type":    "BQ",
+    "bq_project_id":  "my-gcp-project",
+    "bq_dataset":     "raw_data",
+    "bq_table":       "trades",
+    "bq_query":       "SELECT trade_id, currency, amount, trade_date, desk FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\"",
+    "min_row_count":  "1",
+    "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":1170000,\"tolerancePct\":0.01}]",
+
+    "failure_email_to":      "ops-team@example.com,data-owner@example.com",
+    "failure_email_cc":      "manager@example.com",
+    "failure_email_subject": "FAILED: {datasourceName} download for period {periodId}",
+    "failure_email_body":    "Data source download has failed.\n\nDatasource : {datasourceName}\nPeriod     : {periodId}\nStatus     : {staCd}\n\nError:\n{errorMessage}\n\nBnC Summary:\n{bncSummary}",
+    "email_smtp_host":       "smtp.gmail.com",
+    "email_smtp_port":       "587",
+    "smtp_password_secret_id": "projects/my-gcp-project/secrets/smtp-password/versions/latest",
+    "from_address":          "pipeline-alerts@example.com"
+  }',
+  'TRADING', CURRENT_DATETIME(), 'setup_script'
 );
 
--- Example B: BQ output — copies result to a downstream analytics dataset
-INSERT INTO `my-gcp-project.pipeline_config.report_output_config`
-  (report_name, report_subprocess, period_id, output_order, input_alias,
-   sink_type, bq_sink_table)
+-- Report config for REPORT_PROCESSING (ReportPipelineFactory) — stored in parameter_store as nested JSON.
+-- Key: parameter_group_name=parentId / parameter_data_source=reportSubprocess / parameter_name=reportName.
+-- parameters_val_json holds the full report config: datasources, transforms, outputs, and email.
+-- periodId is NOT a lookup key — configs are period-agnostic.
+INSERT INTO `my-gcp-project.dw.parameter_store`
+  (parameter_name, parameter_group_name, parameter_data_source,
+   schema_of_json, parameters_val_json, edit_grp_nm, last_updt_ts, lst_update_user_id)
 VALUES (
-  'daily_trades_summary', 'eod', '202401', 2, 'transform_result',
-  'BQ', 'my-analytics-project.shared_reports.daily_trades_summary'
-);
-
--- Example C: API output — POSTs result rows as JSON to an external service
-INSERT INTO `my-gcp-project.pipeline_config.report_output_config`
-  (report_name, report_subprocess, period_id, output_order, input_alias,
-   sink_type, api_endpoint, api_method, api_auth_secret_id, api_headers_json)
-VALUES (
-  'daily_trades_summary', 'eod', '202401', 3, 'transform_result',
-  'API',
-  'https://api.downstream.example.com/v1/reports/trades',
-  'POST',
-  'projects/my-gcp-project/secrets/downstream-api-key/versions/latest',
-  '{"X-Report-Source": "pipeline-framework"}'
+  'daily_trades_summary',   -- ← --reportName
+  'TRADING',                -- ← --parentId
+  'eod',                    -- ← --reportSubprocess
+  JSON '{"override_key": {"required": false, "type": "boolean"}}',
+  JSON '{
+    "override_key": false,
+    "datasources": [
+      {
+        "datasource_name":       "trades",
+        "datasource_subprocess": "eod",
+        "transform_alias":       "raw_trades",
+        "is_required":           true
+      }
+    ],
+    "preprocessing": [],
+    "transforms": [
+      {
+        "step_order":      1,
+        "step_name":       "aggregate_by_currency",
+        "input_alias":     "raw_trades",
+        "output_alias":    "summary",
+        "query_template":  "SELECT JSON_VALUE(stage_ds_json_tx, ''$.currency'') AS currency, SUM(CAST(JSON_VALUE(stage_ds_json_tx, ''$.amount'') AS FLOAT64)) AS total_amount, COUNT(*) AS trade_count FROM {raw_trades} GROUP BY currency ORDER BY total_amount DESC",
+        "output_bq_table": "my-gcp-project.reports.daily_trades_summary",
+        "query_params_json": {}
+      }
+    ],
+    "outputs": [
+      {
+        "output_order":   1,
+        "input_alias":    "summary",
+        "sink_type":      "GCS",
+        "output_format":  "CSV",
+        "gcs_path":       "gs://my-bucket/reports/daily_trades/",
+        "file_prefix":    "",
+        "file_suffix":    ".csv",
+        "include_header": true
+      }
+    ],
+    "email": {
+      "to_list": ["analyst@example.com"],
+      "cc_list": [],
+      "subject_template": "Daily Trades Report {periodId}",
+      "body_template":    "Please find the daily trades summary attached for period {periodId}."
+    }
+  }',
+  'TRADING', CURRENT_DATETIME(), 'setup_script'
 );
 ```
 
@@ -236,26 +270,25 @@ VALUES (
 ## 3. Verify setup
 
 ```sql
--- Check period master
-SELECT PerId, PerDt, MoNo, YrNo, PerTypeCd
-FROM `my-gcp-project.pipeline_config.MSTR_Per`
-WHERE PerId = '202401';
-
 -- Check parameter store row
-SELECT ParameterGroupName, ParameterDataSource, ParameterName,
-       JSON_QUERY(SchemaOfJson, '$')      AS schema,
-       JSON_QUERY(ParametersValJson, '$') AS params
-FROM `my-gcp-project.pipeline_config.parameter_store`
-WHERE ParameterGroupName  = 'TRADING'
-  AND ParameterDataSource = 'eod'
-  AND ParameterName       = 'daily_trades_summary';
+SELECT parameter_group_name, parameter_data_source, parameter_name,
+       JSON_QUERY(schema_of_json, '$')      AS schema,
+       JSON_QUERY(parameters_val_json, '$') AS params
+FROM `my-gcp-project.dw.parameter_store`
+WHERE parameter_group_name  = 'TRADING'
+  AND parameter_data_source = 'eod'
+  AND parameter_name        = 'daily_trades_summary';
 
--- Check output config rows
-SELECT output_order, input_alias, sink_type,
-       gcs_path, bq_sink_table, api_endpoint
-FROM `my-gcp-project.pipeline_config.report_output_config`
-WHERE report_name = 'daily_trades_summary'
-ORDER BY output_order;
+-- Inspect nested JSON sections inside the report's parameter_store row
+SELECT
+  JSON_QUERY(parameters_val_json, '$.datasources')  AS datasources,
+  JSON_QUERY(parameters_val_json, '$.transforms')   AS transforms,
+  JSON_QUERY(parameters_val_json, '$.outputs')      AS outputs,
+  JSON_QUERY(parameters_val_json, '$.email')        AS email
+FROM `my-gcp-project.dw.parameter_store`
+WHERE parameter_group_name  = 'TRADING'
+  AND parameter_data_source = 'eod'
+  AND parameter_name        = 'daily_trades_summary';
 ```
 
 ---
@@ -273,7 +306,7 @@ mvn -pl beam-runner exec:java \
     --project=my-gcp-project
     --parentId=TRADING
     --paramBqProject=my-gcp-project
-    --paramBqDataset=pipeline_config
+    --paramBqDataset=dw
     --paramStoreTable=parameter_store
     --reportName=daily_trades_summary
     --reportSubprocess=eod
@@ -287,8 +320,8 @@ mvn -pl beam-runner exec:java \
 
 | Step | Action | Where |
 |------|--------|-------|
-| 1 | `SELECT ParametersValJson, SchemaOfJson FROM parameter_store WHERE ParameterGroupName='TRADING' AND ...` | BigQuery |
-| 2 | Parse `SchemaOfJson` → required fields; parse `ParametersValJson` → `Map<String,String>` | Driver JVM |
+| 1 | `SELECT parameters_val_json, schema_of_json FROM parameter_store WHERE parameter_group_name='TRADING' AND ...` | BigQuery |
+| 2 | Parse `schema_of_json` → required fields; parse `parameters_val_json` → `Map<String,String>` | Driver JVM |
 | 3 | Validate all required fields present — throws if any missing | Driver JVM |
 | 4 | Token substitution: `{periodStart}` → `2024-01-01`, `{source_bq_table}` → actual table | Driver JVM |
 | 5 | BQ query job: aggregation SQL → `reports.daily_trades_summary` (WRITE_TRUNCATE) | BigQuery |
@@ -296,9 +329,9 @@ mvn -pl beam-runner exec:java \
 
 ---
 
-## 4b. Run with Main (full lifecycle — DaRefer + DaRec + COM_CmnRptDtl)
+## 4b. Run with Main (full lifecycle — RptRefer + RptDaMap + RptStageDa + RptOutput)
 
-`Main` drives `ReportPipelineFactory`, which adds the full run lifecycle.
+`Main` drives `ReportPipelineFactory`, which adds the full checkpoint and output tracking lifecycle.
 
 ```bash
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
@@ -311,30 +344,34 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
   --paramBqProject=my-gcp-project \
-  --paramBqDataset=pipeline_config \
+  --paramBqDataset=dw \
   --paramStoreTable=parameter_store \
   --checkpointBqProject=my-gcp-project \
-  --checkpointBqDataset=pipeline_metadata \
-  --daReferTable=DaRefer \
-  --daRecTable=DaRec \
-  --cmnRptDtlTable=COM_CmnRptDtl
+  --checkpointBqDataset=pipeline_metadata
 ```
+
+All four runtime table names default to `DaRefer`, `DaRec`, `RptRefer`, `RptDaMap`, `RptStageDa`,
+and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTable`,
+`--rptDaMapTable`, `--rptStageDaTable`, `--rptOutputTable` if your table names differ.
 
 ### What ReportPipelineFactory does step-by-step
 
-| Step | Action | DaRefer state |
-|------|--------|---------------|
-| 1 | Look up `MSTR_Per` for PerId=`202401` → resolve PerDt, MoNo, YrNo | — |
-| 2 | Load `ReportConfig` from `report_config` + related tables | — |
-| 3 | `createCheckpoint('daily_trades_summary', '202401', ...)` → inserts DaRefer row | → **LOADING** |
-| 4 | Check all required datasources have `StaCd = COMPLETED` in DaRefer for this PerId | — |
-| 5 | Build alias registry: datasource alias → `(SELECT RowDaJsonTx FROM DaRec WHERE DaId = X)` | — |
-| 6 | Run transform chain: BQ SQL → intermediate BQ tables | — |
-| 7 | Route each output via `ReportOutputSinkRouter` (GCS / BQ / API) | — |
-| 8 | Insert one row into `COM_CmnRptDtl` per output step | — |
-| 9 | Send email with GCS outputs as attachments (if email configured) | — |
-| 10a | Success → `updateStatus(DaId, COMPLETED, null)` | → **COMPLETED** |
-| 10b | Any failure → `updateStatus(DaId, FAILED, null)` | → **FAILED** |
+| Step | Action | RptRefer state |
+|------|--------|----------------|
+| 1 | Load `ReportConfig` from `parameter_store` (nested JSON in `parameters_val_json`) | — |
+| 2 | `createCheckpoint('daily_trades_summary', 202401, ...)` → inserts RptRefer row → returns `rpt_id` | → **LOADING** |
+| 3 | Run preprocessing steps in `step_order` (BQ_QUERY or API_ENRICHMENT), if any | — |
+| 4 | For each required datasource ref: `isCompleted(srce_nm, 202401)` via DaRefer — fail if not COMPLETED | — |
+| 5 | For each datasource ref: `fetchLatestCompletedDaId()` → `addDaMapping(rpt_id, da_id)` → RptDaMap row | — |
+| 6 | `stageFromDaRec(map_id, da_id)` — copies every DaRec page for that da_id into RptStageDa verbatim (one RptStageDa row per DaRec page, batched like DaRec itself — not one row per source record) | — |
+| 7 | Register alias: `raw_trades` → `stagedDataSubquery(map_id)`, which un-nests RptStageDa's pages back into individual source rows on read (`SELECT row_json AS stage_ds_json_tx FROM RptStageDa CROSS JOIN UNNEST(...) AS row_json WHERE map_id=X`) — page boundaries invisible from here on, same as before batching | — |
+| 8 | Run transform chain in `step_order`: resolve alias + period tokens → `runQueryToTable(sql, output_bq_table)` | — |
+| 9 | Route each output: BQ export job → GCS CSV or JSON | — |
+| 10 | `writeOutput(rpt_id, outpt_cd, output_ds, ...)` — inserts one RptOutput row per output step | — |
+| 11 | `clearStagedData(rpt_id)` — DELETE all RptStageDa rows linked to this run's map_id(s) | — |
+| 12 | Send email with GCS outputs as attachments (if email configured) | — |
+| 13a | Success → `updateStatus(rpt_id, COMPLETED)` | → **COMPLETED** |
+| 13b | Any failure → `updateStatus(rpt_id, FAILED)` | → **FAILED** |
 
 ### Output routing (step 7 detail)
 
@@ -349,33 +386,52 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 ## 5. Inspect runtime state
 
 ```sql
--- DaRefer: check run lifecycle for this report
-SELECT DaId, SrceNm, VsnNo, PerId, FlNm, StaCd, BalAndCntlSmryTx, LstUpdtTs
+-- DaRefer: check download run lifecycle for the 'trades' source (DATA_SOURCE_DOWNLOAD)
+SELECT da_id, srce_nm, vsn_no, per_id, fl_nm, sta_cd, bal_and_cntl_smry_tx, lst_updt_ts
 FROM `my-gcp-project.pipeline_metadata.DaRefer`
-WHERE SrceNm = 'daily_trades_summary'
-ORDER BY LstUpdtTs DESC
+WHERE srce_nm = 'trades' AND per_id = 202401
+ORDER BY lst_updt_ts DESC
 LIMIT 5;
 
--- DaRec: count rows written by a specific run (replace 42 with actual DaId)
-SELECT COUNT(*) AS row_count,
-       MIN(LoadDt) AS load_dt
+-- DaRec: how many pages a download run wrote (replace 42 with actual da_id) — NOT the source
+-- row count, since each page can hold up to 250 rows; see the next query for that.
+SELECT COUNT(*) AS page_count, MIN(load_dt) AS load_dt
 FROM `my-gcp-project.pipeline_metadata.DaRec`
-WHERE DaId = 42;
+WHERE da_id = 42;
 
--- DaRec: sample a few rows for a run
-SELECT RecId, JSON_VALUE(RowDaJsonTx, '$.currency') AS currency,
-       CAST(JSON_VALUE(RowDaJsonTx, '$.amount') AS FLOAT64) AS amount,
-       LoadDt
+-- DaRec: count and sample individual source rows for a run — un-nest every page first
+SELECT COUNT(*) AS row_count
 FROM `my-gcp-project.pipeline_metadata.DaRec`
-WHERE DaId = 42
+CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json
+WHERE da_id = 42;
+
+SELECT
+  JSON_VALUE(row_json, '$.currency')                   AS currency,
+  CAST(JSON_VALUE(row_json, '$.amount') AS FLOAT64)    AS amount,
+  load_dt
+FROM `my-gcp-project.pipeline_metadata.DaRec`
+CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) AS row_json
+WHERE da_id = 42
 LIMIT 10;
 
--- COM_CmnRptDtl: outputs written by this report run
-SELECT SrceSysNm, FlNm, SrceFlCreateTs, RecCt, CreateUserId
-FROM `my-gcp-project.pipeline_metadata.COM_CmnRptDtl`
-WHERE SrceSysNm = 'daily_trades_summary'
-ORDER BY SrceFlCreateTs DESC
-LIMIT 10;
+-- RptRefer: check report run lifecycle
+SELECT rpt_id, rpt_nm, per_id, rpt_ds, sta_cd, creat_ts, lst_updt_ts
+FROM `my-gcp-project.pipeline_metadata.RptRefer`
+WHERE rpt_nm = 'daily_trades_summary' AND per_id = 202401
+ORDER BY lst_updt_ts DESC
+LIMIT 5;
+
+-- RptDaMap: which datasource runs were consumed by a report run (replace 1 with actual rpt_id)
+SELECT m.map_id, m.rpt_id, m.da_id, d.srce_nm, d.vsn_no, d.sta_cd
+FROM `my-gcp-project.pipeline_metadata.RptDaMap` m
+JOIN `my-gcp-project.pipeline_metadata.DaRefer`  d ON d.da_id = m.da_id
+WHERE m.rpt_id = 1;
+
+-- RptOutput: outputs written by a report run
+SELECT outpt_cd, rpt_dt, vsn_no, output_ds, rpt_id, lst_updt_ts
+FROM `my-gcp-project.pipeline_metadata.RptOutput`
+WHERE rpt_id = 1
+ORDER BY rpt_dt DESC;
 ```
 
 ---
@@ -393,8 +449,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --subprocessName=eod \
   --periodId=202401 \
   --paramBqProject=my-gcp-project \
-  --paramBqDataset=pipeline_config \
-  --paramSourceConfigTable=source_config \
+  --paramBqDataset=dw \
   --checkpointBqProject=my-gcp-project \
   --checkpointBqDataset=pipeline_metadata \
   --daReferTable=DaRefer \
@@ -407,17 +462,32 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 
 | Step | Action | DaRefer state |
 |------|--------|---------------|
-| 1 | Look up `MSTR_Per` for PerId=`202401` | — |
-| 2 | Fetch `source_config` row for (TRADING, trades, eod, 202401) | — |
+| 1 | Fetch source configs from `parameter_store` for (TRADING, trades, eod) | — |
+| 2 | Fetch `parameter_store` row for (TRADING, trades, eod) | — |
 | 3 | Validate required parameters present in BQ | — |
-| 4 | Check DaRefer — skip if `StaCd=COMPLETED` already exists (unless `--overrideDownload`) | — |
+| 4 | Check DaRefer — skip if `sta_cd=COMPLETED` already exists (unless `--overrideDownload`) | — |
 | 5 | `createCheckpoint('trades', '202401', '<bq-table-ref>')` → DaRefer row | → **LOADING** |
-| 6 | Dataflow: read source → apply transforms → write rows to DaRec as `RowDaJsonTx` JSON | — |
+| 6 | Dataflow: read source → apply transforms → paginate at ≤250 rows/page → write each page as one DaRec row (`row_da_json_tx` = JSON array) | — |
 | 7 | `waitUntilFinish()` | — |
-| 8 | `COUNT(*) FROM DaRec WHERE DaId = X` + BnC SUM checks | — |
+| 8 | Un-nest every page (`CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx))`) then `COUNT(*)` + BnC SUM checks against individual rows | — |
 | 9a | All checks pass → `updateStatus(COMPLETED, bncJson)` | → **COMPLETED** |
-| 9b | BnC mismatch → `updateStatus(FAILED_BNC, bncJson)` | → **FAILED_BNC** |
-| 9c | Infrastructure error → `updateStatus(FAILED, errorJson)` | → **FAILED** |
+| 9b | BnC mismatch → `updateStatus(FAILED_BNC, bncJson)` → send failure email if `failure_email_to` configured | → **FAILED_BNC** |
+| 9c | Infrastructure error → `updateStatus(FAILED, errorJson)` → send failure email if configured | → **FAILED** |
+
+### Failure email fields in `parameters_val_json` (optional — omit to disable)
+
+| Key | Example value | Notes |
+|-----|--------------|-------|
+| `failure_email_to` | `"ops@example.com,owner@example.com"` | Comma-separated. Required to enable email. |
+| `failure_email_cc` | `"manager@example.com"` | Optional. |
+| `failure_email_subject` | `"FAILED: {datasourceName} download for period {periodId}"` | Default used if absent. |
+| `failure_email_body` | `"Status: {staCd}\nError: {errorMessage}\n\nBnC:\n{bncSummary}"` | Default used if absent. |
+| `email_smtp_host` | `"smtp.gmail.com"` | Default `smtp.gmail.com`. |
+| `email_smtp_port` | `"587"` | Default `587`. |
+| `smtp_password_secret_id` | `"projects/my-project/secrets/smtp-pw/versions/latest"` | Secret Manager resource name. |
+| `from_address` | `"pipeline-alerts@example.com"` | Required to enable email. |
+
+Available body/subject tokens: `{datasourceName}`, `{periodId}`, `{staCd}`, `{errorMessage}`, `{bncSummary}`.
 
 ---
 
@@ -425,8 +495,8 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 
 ```
 currency,total_amount,trade_count
-USD,455000.0,3
 JPY,500000.0,1
+USD,455000.0,3
 EUR,120000.0,2
 GBP,95000.0,2
 ```
@@ -436,21 +506,17 @@ GBP,95000.0,2
 ## 8. Adding a second report
 
 ```sql
-INSERT INTO `my-gcp-project.pipeline_config.parameter_store`
-  (ParameterName, ParameterGroupName, ParameterDataSource,
-   SchemaOfJson, ParametersValJson, EditGrpNm, LastUpdtTs, LstUpdateUserId)
+INSERT INTO `my-gcp-project.dw.parameter_store`
+  (parameter_name, parameter_group_name, parameter_data_source,
+   schema_of_json, parameters_val_json, edit_grp_nm, last_updt_ts, lst_update_user_id)
 VALUES (
   'monthly_pnl_report',
   'TRADING',
   'monthly',
   JSON '{"pnl_source_table": {"required": true, "type": "string"}}',
   JSON '{"pnl_source_table": "my-gcp-project.raw_data.pnl"}',
-  'TRADING', CURRENT_TIMESTAMP(), 'setup_script'
+  'TRADING', CURRENT_DATETIME(), 'setup_script'
 );
-
-INSERT INTO `my-gcp-project.pipeline_config.MSTR_Per`
-  (PerId, PerDt, MoNo, YrNo, PerTypeCd, LstUpdtTs)
-VALUES ('202402', DATE '2024-02-29', 2, '23-24', 'MONTHLY', CURRENT_TIMESTAMP());
 ```
 
 ---
@@ -462,34 +528,36 @@ VALUES ('202402', DATE '2024-02-29', 2, '23-24', 'MONTHLY', CURRENT_TIMESTAMP())
 | Option | Default | Purpose |
 |--------|---------|---------|
 | `--processType` | required | `DATA_SOURCE_DOWNLOAD` or `REPORT_PROCESSING` |
-| `--parentId` | — | Business group. Maps to `ParameterGroupName` in `parameter_store` and `parent_id` in `source_config` |
-| `--periodId` | — | Period key — must exist in `MSTR_Per` |
-| `--jobRunId` | auto UUID | Correlation ID for logs and `COM_CmnRptDtl.CreateUserId` |
+| `--parentId` | — | Business group. Maps to `parameter_group_name` in `parameter_store` |
+| `--periodId` | — | Period integer e.g. `202401` (MONTHLY) or `20240115` (DAILY) |
+| `--jobRunId` | auto UUID | Correlation ID threaded through logs and checkpoint rows |
 
 ### Config tables (read-only)
 
 | Option | Default | Purpose |
 |--------|---------|---------|
 | `--paramBqProject` | `--project` | GCP project for config tables |
-| `--paramBqDataset` | `pipeline_config` | BQ dataset for `parameter_store`, `source_config`, `MSTR_Per`, `report_*` tables |
+| `--paramBqDataset` | `dw` | BQ dataset for `parameter_store` |
 | `--paramStoreTable` | `parameter_store` | Parameter store table |
-| `--paramSourceConfigTable` | `source_config` | Source config table (DATA_SOURCE_DOWNLOAD only) |
 
 ### Runtime tables (framework-managed)
 
 | Option | Default | Purpose |
 |--------|---------|---------|
 | `--checkpointBqProject` | `--project` | GCP project for runtime tables |
-| `--checkpointBqDataset` | `pipeline_metadata` | BQ dataset for DaRefer, DaRec, COM_CmnRptDtl |
-| `--daReferTable` | `DaRefer` | Run reference table (one row per pipeline run) |
-| `--daRecTable` | `DaRec` | Record table (all source rows as JSON blobs) |
-| `--cmnRptDtlTable` | `COM_CmnRptDtl` | Report output detail table (one row per output step) |
+| `--checkpointBqDataset` | `pipeline_metadata` | BQ dataset containing all runtime tables |
+| `--daReferTable` | `DaRefer` | One row per DATA_SOURCE_DOWNLOAD run: LOADING → COMPLETED / FAILED_BNC / FAILED |
+| `--daRecTable` | `DaRec` | All source rows as JSON blobs (Beam workers write here) |
+| `--rptReferTable` | `RptRefer` | One row per REPORT_PROCESSING run: LOADING → COMPLETED / FAILED |
+| `--rptDaMapTable` | `RptDaMap` | Maps each report run to the DaRefer.da_id(s) it consumed |
+| `--rptStageDaTable` | `RptStageDa` | Transient staging: DaRec rows copied here before transforms; deleted after |
+| `--rptOutputTable` | `RptOutput` | One row per output step produced by the report |
 
 ### DATA_SOURCE_DOWNLOAD flags
 
 | Option | Default | Purpose |
 |--------|---------|---------|
-| `--datasourceName` | required | Source name — child key in `source_config` |
+| `--datasourceName` | required | Source name — `parameter_name` key in `parameter_store` |
 | `--subprocessName` | `default` | Subprocess variant e.g. EOD, INTRADAY |
 | `--overrideDownload` | `false` | Re-download even if DaRefer shows COMPLETED |
 
@@ -497,7 +565,72 @@ VALUES ('202402', DATE '2024-02-29', 2, '23-24', 'MONTHLY', CURRENT_TIMESTAMP())
 
 | Option | Default | Purpose |
 |--------|---------|---------|
-| `--reportName` | required | Maps to `ParameterName`; also used as `SrceNm` in DaRefer |
-| `--reportSubprocess` | `default` | Maps to `ParameterDataSource` |
+| `--reportName` | required | Maps to `parameter_name`; also used as `srce_nm` in DaRefer |
+| `--reportSubprocess` | `default` | Maps to `parameter_data_source` |
 | `--periodStart` | — | Substituted into `{periodStart}` query tokens |
 | `--periodEnd` | — | Substituted into `{periodEnd}` query tokens |
+| `--customParamsJson` | — | Ad-hoc `{"key":"value"}` custom query tokens, resolved for both process types — see section 10 |
+
+---
+
+## 10. Custom query parameters (`--customParamsJson`)
+
+The transform step's `query_params_json` (section 2) already supports custom `{token}`s stored
+*in* the parameter_store row. `--customParamsJson` is the CLI-supplied equivalent, for a value
+that should come from the invocation itself instead of being edited into stored config —
+e.g. an Airflow DAG conf value, or an ad-hoc filter for a one-off run.
+
+The sample trades data has a `desk` column (`FX` / `RATES`) that the transform step doesn't
+currently filter on. To make it filterable per-run without editing `parameter_store`, add a
+`{desk}` token to the transform's `query_template` (one-time parameter_store edit):
+
+```sql
+UPDATE `my-gcp-project.dw.parameter_store`
+SET parameters_val_json = JSON_SET(
+  parameters_val_json,
+  '$.transforms[0].query_template',
+  'SELECT JSON_VALUE(stage_ds_json_tx, \'$.currency\') AS currency, '
+  || 'SUM(CAST(JSON_VALUE(stage_ds_json_tx, \'$.amount\') AS FLOAT64)) AS total_amount, '
+  || 'COUNT(*) AS trade_count '
+  || 'FROM {raw_trades} '
+  || 'WHERE JSON_VALUE(stage_ds_json_tx, \'$.desk\') = \'{desk}\' '
+  || 'GROUP BY currency ORDER BY total_amount DESC'
+)
+WHERE parameter_group_name = 'TRADING' AND parameter_data_source = 'eod'
+  AND parameter_name = 'daily_trades_summary';
+```
+
+Now every run of this report must supply `{desk}` or the query fails at BigQuery execution time
+(unresolved `{desk}` left as a literal string) — supply it via `--customParamsJson`:
+
+```bash
+java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
+  --processType=REPORT_PROCESSING \
+  --project=my-gcp-project \
+  --parentId=TRADING \
+  --reportName=daily_trades_summary \
+  --reportSubprocess=eod \
+  --periodId=202401 \
+  --periodStart=2024-01-01 \
+  --periodEnd=2024-01-31 \
+  --customParamsJson='{"desk":"FX"}' \
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=dw \
+  --paramStoreTable=parameter_store \
+  --checkpointBqProject=my-gcp-project \
+  --checkpointBqDataset=pipeline_metadata
+```
+
+With `--customParamsJson='{"desk":"FX"}'`, only the FX-desk trades (T001, T002, T004, T006,
+T007 — see the seed data in section 2) are aggregated:
+
+```
+currency,total_amount,trade_count
+JPY,500000.0,1
+USD,360000.0,2
+EUR,80000.0,1
+GBP,60000.0,1
+```
+
+Re-run with `--customParamsJson='{"desk":"RATES"}'` to get the RATES-desk-only breakdown instead
+— no `parameter_store` edit needed between runs, only the CLI flag changes.

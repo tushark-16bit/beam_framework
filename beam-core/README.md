@@ -12,18 +12,26 @@ Every other module depends on this one — it defines the language the whole fra
 | `options` | `FrameworkOptions`, `ProcessType`, `SourceType`, `SinkType`, `RetryPolicyType`, `WriteDispositionType` | Every CLI flag the framework understands |
 | `transform` | `BeamTransform` (SPI interface), `TransformRegistry` | The extension point for adding new transforms |
 | `retry` | `RetryPolicy`, `ExponentialRetryPolicy`, `FixedRetryPolicy`, `RetryingDoFn` | Retry logic and dead-letter routing |
-| `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig` | Shared data types — DATA_SOURCE_DOWNLOAD |
-| `model` | `DataSourceCheckpoint`, `DataSourceRecord`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint/record models, per-source transform and validation config |
+| `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig`, `SourceSchemaField` | Shared data types — DATA_SOURCE_DOWNLOAD. `SourceSchemaField` is one column of the optional explicit schema declared via `bq_schema_json`, carried on `BqFetchConfig.schema` |
+| `model` | `DataSourceCheckpoint`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint model, per-source transform and validation config. `DataSourceCheckpoint` status codes: `LOADING`, `COMPLETED`, `FAILED_BNC`, `FAILED_TRANSFORM`, `FAILED`. (`DaRec` record rows have no dedicated model class — `DataSourceRecordSinkTransform` builds each paginated JSON row directly.) |
+| `model` | `DataTransformConfig` | Optional post-storage SQL transform for one source's rows, run within the same `DATA_SOURCE_DOWNLOAD` run; carried on `SourceConfig.dataTransformConfig` |
+| `model` | `SourceFailureEmailConfig` | Optional failure-notification email config carried on `SourceConfig`; populated from `failure_email_*` keys in `parameters_val_json` |
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
+| `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
+| `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces CLI flags for source, sink, transform chain, and retry/DLQ. Typed getters + generic `get(key)` for extensibility. Calendar and per-source failure email are configured elsewhere — see `--calendarName` and `SourceFailureEmailConfig`. |
+There is no separate model for the `PIPELINE` process type — it reuses `ReportConfig.datasources`
+(`List<ReportDatasourceRef>`, row above) directly. See `beam-runner/README.md`'s
+`PipelineSequenceFactory` section.
 
 ---
 
-## ProcessType — two execution modes
+## ProcessType — execution modes
 
-| Value | CLI flag | Source config comes from | Use case |
-|---|---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Parameter DB (`source_config` table) | Fetch raw data from APIs/files/BQ |
-| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | `--sourceType` CLI flag | Transform downloaded data into reports |
+| Value | CLI flag | Use case |
+|---|---|---|
+| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Fetch raw data from APIs/files/BQ; creates LOADING checkpoint, runs workers, runs BnC post-pipeline |
+| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | Transform downloaded data into reports |
+| `PIPELINE` | `--processType=PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. Runs whichever datasources the report's own `datasources[]` declares (batched into one Dataflow job, skipping any already `COMPLETED`), then the report. Differs from plain `REPORT_PROCESSING` only in running a missing datasource first instead of failing immediately. |
 
 ```bash
 # Download raw trades from an external API
@@ -63,17 +71,17 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 --datasourceName=trades
 --periodId=2024-01-15
 --subprocessName=eod
---overrideDownload=false
+--overrideDownload=false    # legacy re-run bypass; prefer --manualOverrun
+--manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer.
+                            # DaRefer always gets a fresh row (never overwritten); once the new
+                            # run reaches COMPLETED, the superseded run's DaRec rows are deleted.
 ```
 
-### Parameter database
+### Parameter BigQuery store
 ```
---paramDbUrl=jdbc:postgresql://db-host:5432/pipeline_params
---paramDbUser=pipeline_svc
---paramDbCredentialSecretId=projects/p/secrets/db-pass/versions/latest
---paramDbSchema=public
---paramDbSourceConfigTable=source_config
---paramDbRequiredParamsTable=required_parameters
+--paramBqProject=my-gcp-project
+--paramBqDataset=dw
+--paramStoreTable=parameter_store
 ```
 
 ### Checkpoint storage
@@ -83,22 +91,39 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 --checkpointBqTable=pipeline_checkpoints
 ```
 
-### Source / transform / sink (REPORT_PROCESSING)
+### Run date (REPORT_PROCESSING)
 ```
---sourceType=BQ
---bqSourceTable=my-project:my-dataset.orders
---transformChain=filter-nulls,mask-pii
---sinkType=GCS
---gcsSinkPath=gs://bucket/output/
---writeDisposition=TRUNCATE
---retryPolicy=EXPONENTIAL
---maxRetries=3
---deadLetterSink=gs://bucket/dlq/
 --runDate=2024-01-15
---calendarName=NYSE
---businessEmail=reports@company.com
---devErrorEmail=oncall@company.com
+--businessDayOffset=0
+--calendarName=NYSE          # optional, default "DEFAULT" — used by CalendarUtils
 ```
+
+### Custom query parameters (DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING)
+```
+--customParamsJson={"exchange":"NASDAQ","threshold":"10000"}
+```
+The CLI-supplied equivalent of a step's own `query_params_json` in `parameter_store`, for a
+value that should come from the invocation itself (Airflow DAG conf, an ad-hoc CLI run) rather
+than be hard-coded into stored config. Resolved by `QueryParameterResolver` alongside any
+step-level `query_params_json` — on a key collision, `--customParamsJson` wins. Values may
+reference `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}`, resolved first. Malformed JSON
+or a non-object root fails the run immediately rather than silently resolving to nothing.
+
+### Pipeline selection (PIPELINE only)
+
+No separate flags — `PIPELINE` reuses the exact same `--reportName`/`--reportSubprocess` as
+`REPORT_PROCESSING` (see above). There is no separate pipeline config to look up: the report's
+own `datasources[]` (with each entry's `is_required`) already declares which datasources feed it
+and which are mandatory, so `PipelineSequenceFactory` reads that directly, runs whichever aren't
+`COMPLETED` yet (batched into one Dataflow job), then runs the report via the unchanged
+`ReportPipelineFactory`.
+
+> **Source, sink, transform chain, and retry/DLQ settings** are no longer CLI flags.
+> They are fetched per-datasource from `parameter_store` via `PipelineRunConfig`.
+> Add a row with the appropriate keys (e.g. `source_type`, `sink_type`, `transform_chain`, etc.) to `parameter_store`.
+> Per-source failure-notification email (SMTP host/port/secret, recipients) is separate — it lives
+> on `SourceConfig.failureEmailConfig` (`SourceFailureEmailConfig`, `failure_email_*` keys), not on
+> `PipelineRunConfig`. `--calendarName` is a whole-run CLI flag — see below.
 
 ### Adding a new flag
 
@@ -121,8 +146,8 @@ public final class MyTransform implements BeamTransform {
     public String name() { return "my-transform"; }
 
     @Override
-    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options) {
-        return new MyComposite(options.getSomeFlag());
+    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig) {
+        return new MyComposite(runConfig.get("my_config_key", "default"));
     }
 
     public static final class MyComposite

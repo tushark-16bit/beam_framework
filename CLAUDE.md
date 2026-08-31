@@ -45,7 +45,9 @@ Read it fully before making any changes. Written for any capable language model 
 ---
 
 For human-readable documentation, see [`README.md`](README.md), [`WALKTHROUGH.md`](WALKTHROUGH.md),
-and the per-module `README.md` files.
+and the per-module `README.md` files. [`docs/field-guide.html`](docs/field-guide.html) is a
+browsable, narrative walkthrough of the same material — open it in a browser rather than reading
+it as markdown.
 
 ---
 
@@ -61,7 +63,7 @@ triggered by Apache Airflow. It supports two process types:
 - **REPORT_PROCESSING** — reads downloaded data, applies a chained BigQuery transformation
   sequence, exports results to GCS files, and sends email with attachments. When `--reportName`
   is set, runs entirely in the driver JVM (no Dataflow job). All report configuration
-  (6 report config tables + key-value parameter store) is fetched from **BigQuery** — no JDBC.
+  (stored as a nested JSON blob in `parameter_store`) is fetched from **BigQuery** — no JDBC.
   Falls back to a generic source → transform chain → sink Beam pipeline when `--reportName` is blank.
 
 ---
@@ -101,7 +103,7 @@ Read in this order for a complete mental model:
 5.  beam-runner/.../runner/DataSourcePipelineFactory  — DATA_SOURCE_DOWNLOAD orchestration
 6.  beam-runner/.../runner/ReportPipelineFactory      — REPORT_PROCESSING orchestration (BQ-based)
 7.  beam-io/.../io/params/BigQueryParameterAdapter    — key-value BQ param store interface + impl
-8.  beam-io/.../io/config/BigQueryReportRepository    — report config tables fetched from BQ
+8.  beam-io/.../io/config/BigQueryReportRepository    — report config fetched from parameter_store nested JSON
 9.  beam-core/.../transform/BeamTransform.java        — SPI interface; the extension contract
 10. beam-runner/.../runner/PipelineFactory.java       — legacy REPORT_PROCESSING (transform chain)
 11. beam-io/.../io/config/BigQuerySourceConfigRepository — source config rows fetched from BQ (DATA_SOURCE_DOWNLOAD)
@@ -121,7 +123,9 @@ Every source file, one line each.
 
 ```
 options/FrameworkOptions.java         All CLI flags. Every pipeline option. Read this first.
-options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCESSING
+options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCESSING | PIPELINE. PIPELINE composes the
+                                       other two (ordered DATA_SOURCE steps batched into one job, then a terminal
+                                       REPORT step) rather than replacing either — see PipelineSequenceFactory.
 options/SourceType.java               Enum: GCS | BQ | PUBSUB | API | FILE
 options/SinkType.java                 Enum: GCS | BQ | PUBSUB
 options/RetryPolicyType.java          Enum: NONE | FIXED | EXPONENTIAL
@@ -137,76 +141,121 @@ retry/RetryingDoFn.java               Generic retry + DLQ routing via TupleTag.
 
 model/FailedRecord.java               DLQ envelope. @DefaultCoder(SerializableCoder.class).
 model/Schemas.java                    RAW_JSON schema constant.
-model/DataSourceCheckpoint.java       Checkpoint row: dataSourceId, srcName, vsnNo, PerId, DSNm, BalAndCntlSmryTx, StaCd.
-model/DataSourceRecord.java           Record row: RecId (UUID), dataSourceId, RowDSJsonTx (JSON blob), LoadDt.
+model/DataSourceCheckpoint.java       Checkpoint row: daId, srceNm, vsnNo, perId (int), flNm, balAndCntlSmryTx, staCd. BQ cols: da_id INT64, srce_nm, vsn_no, per_id INT64, fl_nm, bal_and_cntl_smry_tx, sta_cd. Timestamps: DATETIME (LocalDateTime).
 
 -- DATA_SOURCE_DOWNLOAD models --
 model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config.
 model/ApiSourceConfig.java            REST API config: endpoint, auth, pagination.
-model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header.
-model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map.
+model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header. firstRow (1-based, default 1)
+                                       skips leading rows before the header/first data row. lastColumn (Excel-style letter,
+                                       optional) fixes column width; unset auto-detects from the widest row seen.
+model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map, schema (List<SourceSchemaField>, optional, from bq_schema_json).
+model/SourceSchemaField.java          One declared column (columnName + bqType) for BqFetchConfig.schema. bqType is a real BQ SQL type name (STRING/INT64/FLOAT64/BOOLEAN/BYTES/DATE/DATETIME/TIME/TIMESTAMP/NUMERIC/BIGNUMERIC).
 model/QueryConfig.java                Query template + paramMappings for token injection.
 model/SourceTransformConfig.java      One transform step: GROUP_BY | SORT_BY | LOOKUP.
 model/AggregationConfig.java          SUM/COUNT/AVG/MIN/MAX per field (used by GROUP_BY).
 model/LookupConfig.java               Lookup table config: BQ source, key fields.
 model/ValidationConfig.java           Post-fetch validation: header check, row count, BnC rules.
 model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
+model/SourceFailureEmailConfig.java   Optional failure-notification email config on SourceConfig. Populated from failure_email_* keys in parameters_val_json. isPresent() guards send.
+model/DataTransformConfig.java        Optional post-storage SQL transform (query + min/max output row bounds), run within the same DATA_SOURCE_DOWNLOAD run by PostDownloadFinalizeTransform, before COMPLETED. A `WITH data AS (...)` UNNEST(DaRec) reunification CTE is always prepended to query before it runs — unconditional, not opt-in — so the operator's SQL just references `data` as a plain table. From data_transform_query/data_transform_min_row_count/data_transform_max_row_count.
 
 -- REPORT_PROCESSING models --
-model/ReportConfig.java               Full report config assembled from 6 DB tables.
+model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int.
 model/ReportDatasourceRef.java        Required DS for a report + transform alias.
 model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
 model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
 model/ReportOutputConfig.java         File output: CSV/JSON, GCS path, prefix, suffix.
 model/ReportEmailConfig.java          Email: to, cc, subject/body templates with tokens.
+model/ReportCheckpoint.java           RptRefer row: rptId, rptNm, perId (int), rptDs, staCd, creatTs, lstUpdtTs. sta_cd: LOADING → COMPLETED / FAILED.
+model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtTs. Links a report run to a data source da_id.
+model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDsJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. One row per DaRec page (batched, ≤250 records/JSON array — mirrors DaRec's own pagination), not one row per record; un-nested back to individual records on read by stagedDataSubquery(). Transient staging; deleted after transforms.
+model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
+model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces FrameworkOptions flags for source, sink, transforms, and retry/DLQ. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, etc.) + generic get(key)/get(key, default) escape hatch. Calendar (--calendarName) and per-source failure email (SourceFailureEmailConfig) are configured elsewhere, not here.
 ```
+
+There is no separate PIPELINE config model. `ProcessType.PIPELINE` reuses `ReportConfig.datasources[]`
+(`model/ReportDatasourceRef.java`, already listed above under REPORT_PROCESSING models) directly —
+see `runner/PipelineSequenceFactory.java` in the beam-runner section below.
 
 ### beam-io — connectors and I/O adapters
 
 ```
-source/SourceRouter.java              Stateless factory: routeByOptions() + routeFromConfig().
-source/BigQuerySourceTransform.java   BigQueryIO.read() with typed schema.
+source/SourceRouter.java              Stateless factory: route() (REPORT_PROCESSING) + routeFromConfig() (DATA_SOURCE_DOWNLOAD). Both have overloads with nullable Schema that pass a pre-fetched schema to BigQuerySourceTransform; schema fetched by caller in beam-runner.
+source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → custom TableRow conversion: INT64/DOUBLE/BOOLEAN as native types, temporal and STRING as String) and generic fallback (null schema → expand() runs a SELECT * LIMIT 1 preview query in the driver JVM to learn real column names — needs only query-execution rights, not bigquery.tables.get — builds one nullable-STRING field per column, applied consistently to setRowSchema() and every Row; falls back further to Schemas.RAW_JSON blob if even the preview query fails). Does NOT use BigQueryUtils.toBeamRow() — that assumes Avro encoding and throws NumberFormatException on ISO temporal strings.
 source/GcsSourceTransform.java        GCS glob → newline-delimited JSON rows.
 source/PubSubSourceTransform.java     Pub/Sub subscription → streaming rows.
 source/ApiSourceAdapter.java          Pure HTTP adapter: auth, PAGE_NUMBER/CURSOR/OFFSET pagination.
 source/ApiSourceTransform.java        Beam wrapper for ApiSourceAdapter. @Setup/@Teardown for HttpClient.
-source/FileSourceAdapter.java         CSV (Commons CSV) + Excel (Apache POI) from GCS bytes.
-source/FileSourceTransform.java       Beam wrapper for FileSourceAdapter.
+source/FileSourceAdapter.java         CSV (Commons CSV) + Excel (Apache POI) from GCS bytes. Each data row is keyed by Excel-style
+                                       column letters (A, B, ..., Z, AA, ...), never real header text. If the file has a header row,
+                                       the real names go into a separate header-legend content object (letter→name), wrapped via
+                                       FileHeaderLegend.wrapLegend() for transit, instead of being used as row keys; no legend when
+                                       there's no header. Returns FileParseResult(rows, headerLegendJson).
+                                       FileSourceConfig.firstRow skips leading rows before the header/first data row (1-based).
+                                       Column width (letters generated, and row padding/truncation) is FileSourceConfig.lastColumn
+                                       when set, else auto-detected as the widest row seen (header or data) — a data row wider than
+                                       the header is never truncated for lacking a header name. columnIndexFromLetter() is the
+                                       inverse of columnLetter(), used to resolve lastColumn. parseCsv/parseExcel share this
+                                       width logic via resolveColumnCount() rather than each computing it separately.
+source/FileSourceTransform.java       Beam wrapper for FileSourceAdapter. Emits one Row per data row, then one extra Row for the
+                                       marker-wrapped header-legend JSON if present (same Schemas.RAW_JSON schema either way).
 
 sink/SinkRouter.java                  Stateless factory: route(data, options).
 sink/BigQuerySinkTransform.java       Writes PCollection<Row> to BQ. Returns WriteResult.
 sink/GcsSinkTransform.java            Writes PCollection<Row> as newline-delimited JSON.
 sink/PubSubSinkTransform.java         Publishes each Row as JSON to Pub/Sub.
 sink/DeadLetterSinkTransform.java     Writes FailedRecord objects to GCS DLQ path.
-sink/DataSourceRecordSinkTransform.java  Writes PCollection<Row> to record table as JSON blobs (all sources).
+sink/DataSourceRecordSinkTransform.java  Collects all source rows globally, paginates at 250 rows/page, writes one DaRec row per page with row_da_json_tx = flat JSON array (BQ/API, headerless FILE) or {"Data":[...],"DataHeaders":[...]} (FILE source with a header). Streaming inserts. Returns PCollection<Long> = total source rows (held until all inserts commit) for PostDownloadFinalizeTransform Wait.on(). DaRec gains page_no INT64.
+                                          PaginateAndBuildDoFn detects a FILE-source header-legend element (marker-wrapped via
+                                          FileHeaderLegend.wrapLegend), unwraps it, excludes it from totalRows/page-size accounting,
+                                          and appends a copy of it into EVERY page's DataHeaders array.
 
-checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest().
-checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(dataSourceId)+1 sequence. MAX(vsnNo)+1 per (srcName,PerId).
+checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
+checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME. Has String-tableRef constructor for in-worker use.
+checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_PROCESSING tables: RptRefer, RptDaMap, RptStageDa, RptOutput.
+checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
+                                                     stageFromDaRec copies DaRec's pages into RptStageDa verbatim (one RptStageDa row per DaRec
+                                                     page, batched like DaRec itself — not one row per source record). stagedDataSubquery()
+                                                     un-nests those pages back into individual source-row JSON objects on read, via
+                                                     FileHeaderLegend.dataArrayExpr() (handles both a plain array page and a FILE source's
+                                                     {"Data":[...],"DataHeaders":[...]} page), aliasing the result back to stage_ds_json_tx —
+                                                     so report SQL always sees one row per record, same as before batching, and any FILE-source
+                                                     header legend — in the separate DataHeaders array — is never staged into a report's input data.
 
-records/DataSourceRecordAdapter.java          Interface: countRecords(dataSourceId), sumField(dataSourceId, field).
-records/BigQueryDataSourceRecordAdapter.java  BQ query using JSON_VALUE(RowDSJsonTx, '$.field') for BnC sums.
+records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field), deleteRecords(daId).
+records/BigQueryDataSourceRecordAdapter.java  countRecords: CROSS JOIN UNNEST(FileHeaderLegend.dataArrayExpr(row_da_json_tx)) then COUNT(*) individual rows — the expression extracts just the row array whether a page is a flat array or a FILE source's {"Data":[...],"DataHeaders":[...]}, so the header legend (in the separate DataHeaders array) is never counted as a row. sumField: same UNNEST then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)) — the legend is likewise never reached. deleteRecords: DELETE FROM DaRec WHERE da_id=@daId; best-effort (logs+swallows); used as-is for the --manualOverrun cleanup of an older, already-flushed run. For the data_transform_query replace (same-run, just-streamed rows), PostDownloadFinalizeTransform.replaceStoredRows() does NOT use this method — it runs DELETE+INSERT as a single atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with ROLLBACK on error) instead, since those rows can still be in BigQuery's streaming buffer (DML-ineligible despite being SELECT-visible) and two separate unverified statements could leave a partial delete (some pages gone, some not) or, worse, a successful delete followed by a failed insert with nothing to restore the originals.
 
 email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
 email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
 
-report/BigQueryJobService.java        Driver-JVM BQ jobs: runQueryToTable(), exportToCsv(), exportToJson().
+report/BigQueryJobService.java        BQ jobs: runQueryToTable(), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
 
 params/BigQueryParameterAdapter.java     Interface: fetchRequiredKeys(), fetchParameters(), fetchRequiredParameters().
 params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@key). Reads --paramBqProject/Dataset/StoreTable/RequiredTable.
                                          fetchRequiredParameters() = look up index → fetch values → validate all present.
 
-config/BigQueryReportRepository.java       Queries all 6 report config BQ tables using named params.
-                                           fetchReportConfig() and fetchDatasourceDataSourceId() (checkpoint lookup).
-config/BigQuerySourceConfigRepository.java Queries source_config BQ table for DATA_SOURCE_DOWNLOAD.
-                                           fetchSourceConfigs(), getMissingParameters(). Row → SourceConfig mapping.
+config/BigQueryReportRepository.java       Queries parameter_store for report config nested JSON.
+                                           fetchReportConfig() parses datasources/preprocessing/transforms/outputs/email,
+                                           plus top-level output_bq_table and output_bq_input_alias.
+config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOURCE_DOWNLOAD source configs.
+                                           fetchSourceConfigs(). Row → SourceConfig mapping. Also parses
+                                           data_transform_query/data_transform_min_row_count/
+                                           data_transform_max_row_count into DataTransformConfig.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
+util/FileHeaderLegend.java            Helpers for the FILE-source column-letter storage convention: wrapLegend()/isMarkerWrapped()/
+                                       unwrapLegend() thread a header-legend content object through the same PCollection<Row> as
+                                       data rows; buildPage() builds a FILE-with-header DaRec page as {"Data":[...],"DataHeaders":[...]};
+                                       dataArrayExpr() is the one SQL expression every DaRec reader uses to extract just the row array,
+                                       whether a page is that shape or a plain array.
 ```
 
 ### beam-utils — stateless helpers, no pipeline graph code
 
 ```
-BigQuerySchemaUtils.java    fetchBeamSchema(), tableExists(), fetchRowCount(). Call in driver JVM only.
+BigQuerySchemaUtils.java    fetchBeamSchema(). Call in driver JVM only. Type mapping: INTEGER/INT64→INT64, FLOAT/FLOAT64→DOUBLE, BOOLEAN/BOOL→BOOLEAN, BYTES→BYTES, TIMESTAMP/DATE/DATETIME/TIME→STRING (ISO strings preserved as-is from TableRow JSON encoding).
+                             toBeamSchema(List<SourceSchemaField>) builds a Schema from an operator-declared bq_schema_json list — no BQ call, no tables.get permission needed. Throws IllegalArgumentException on an unrecognised bqType (fail loudly on a config typo, unlike fetchBeamSchema()'s permissive STRING default for unmapped BQ-reported types).
 GcsUtils.java               pathHasFiles(), listFiles(), writeTextFile(), readTextFile(), readBytes(), deletePrefix().
 SecretManagerUtils.java     fetchSecret(secretId). Never log result. Never store in options value.
 RowValidationUtils.java     requireFields(), matchesPattern(), inRange(), oneOf(). Thread-safe.
@@ -214,6 +263,9 @@ MetricsUtils.java           transformCounter(), pipelineDlqTotal(). Consistent n
 CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyOffset(). Must be implemented.
 DateUtils.java              resolveRunDate(), partitionedPath(), shardedTable(), toDisplayString().
 QueryParameterResolver.java resolve(template, paramMappings, options). Two-pass: standard then custom tokens.
+                             Custom tokens merge paramMappings (a step's query_params_json) with
+                             options.getCustomParamsJson() (--customParamsJson CLI flag) — the CLI value
+                             wins on a key collision. Malformed/non-object --customParamsJson throws.
 
 ```
 
@@ -237,16 +289,83 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 
 ```
 Main.java                       Parses CLI → routes by processType + reportName.
-PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink.
-DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches, post-pipeline validation.
+PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink. fetchBqSchema() fetches typed Schema at driver-JVM time and passes it to SourceRouter.route().
+DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creates LOADING checkpoint per source in driver JVM, wires RecordSink → PostDownloadFinalizeTransform in graph. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time.
+                                fetchBqSchema() prefers BqFetchConfig.schema (operator-declared bq_schema_json) via
+                                BigQuerySchemaUtils.toBeamSchema() over table-metadata fetch when present — a bad
+                                declared type throws IllegalArgumentException uncaught, failing the run before any
+                                data moves.
+                                Under --manualOverrun, fetchLatestCompletedDaId() per source BEFORE createCheckpoint()
+                                captures the superseded previous da_id, passed into PostDownloadFinalizeTransform.
+                                createCheckpoint() is always a fresh INSERT — DaRefer only ever gains new rows.
+                                assemble(options) (single --datasourceName) now delegates to the public
+                                assembleForConfigs(options, List<SourceConfig>) — checkpoint filtering,
+                                manualOverrun capture, LOADING checkpoint creation, per-source branch assembly —
+                                so PipelineSequenceFactory can batch several explicitly-fetched SourceConfigs
+                                (one per PIPELINE DATA_SOURCE step) into the same single Dataflow job.
+PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional data_transform_query (post-storage SQL transform; a WITH data AS (...) UNNEST(DaRec) CTE is always prepended before it runs, unconditionally — the operator's SQL just references `data` as a plain table; validates output row count before replacing stored rows; original rows untouched on failure), optional BnC sum rules (against transformed rows if applied), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), manualOverrun cleanup (deletes the superseded previous da_id's DaRec rows, only on COMPLETED), failure email. Runs inside Beam worker.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
+                                After transform chain, writes final result to per-report BQ table
+                                (output_bq_table from config) if set; resolves source alias from
+                                output_bq_input_alias → last transform alias → first datasource alias.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
 SmtpReportEmailAdapter.java     SMTP impl of ReportEmailAdapter. MimeMultipart for attachments.
+PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSubprocess as REPORT_PROCESSING — no
+                                separate pipeline config. BigQueryReportRepository.fetchReportConfig() → the report's
+                                own datasources[] (List<ReportDatasourceRef>) IS the pipeline: it already declares
+                                which datasources feed the report and each one's is_required flag, so nothing
+                                redeclares that as a second, separately-maintained sequence.
+                                Every declared datasource's SourceConfig fetched by name (BigQuerySourceConfigRepository),
+                                then all of them batched into ONE Dataflow job via
+                                DataSourcePipelineFactory.assembleForConfigs() (skips any already COMPLETED, same
+                                as standalone DATA_SOURCE_DOWNLOAD) — never one job per datasource. After
+                                waitUntilFinish(), re-checks each datasource's checkpoint status; an incomplete one
+                                only aborts the whole PIPELINE (PipelineAbortedException) if its ReportDatasourceRef.required
+                                says so (this IS the report's own datasources[].is_required — nothing separate to
+                                keep in sync). options.reportName/reportSubprocess are never touched — PIPELINE differs
+                                from plain REPORT_PROCESSING only in running missing datasources first instead of
+                                failing immediately; the terminal report then runs via the unchanged
+                                ReportPipelineFactory.execute(). Composes both existing factories rather than
+                                reimplementing either.
+                                --manualOverrun applies uniformly across the whole sequence with no PIPELINE-specific
+                                code: the same options instance is passed straight into both assembleForConfigs()
+                                and ReportPipelineFactory.execute(), so every declared datasource gets the same
+                                bypass-COMPLETED-guard-and-supersede treatment DataSourcePipelineFactory already
+                                gives it standalone. The REPORT step needs nothing extra — it has no COMPLETED
+                                guard of its own and always re-runs, manualOverrun or not.
 
 example/ExampleWorkflow.java    Self-contained end-to-end example. Shows: BigQueryParameterAdapter
                                 → fetchRequiredParameters → resolve tokens → BigQueryJobService
                                 → exportToCsv → GCS. See EXAMPLE.md for BQ setup + run command.
+```
+
+### beam-orchestrator — standalone orchestration JAR (no Beam dependency)
+
+Triggered by an Airflow DAG. Reads parameter_store from BigQuery, creates task records in BQ,
+and writes a manifest JSON to GCS so the DAG can fan out to individual pipeline JAR invocations.
+Zero dependency on beam-core or any sibling beam-* module — it is a fully independent JAR.
+
+```
+OrchestratorMain.java           Entry point. Wires concrete impls → Orchestrator and runs it.
+OrchestratorOptions.java        --key=value CLI parser. No Beam PipelineOptions dependency.
+Orchestrator.java               Core logic: resolve period → schedule → build tasks → save → manifest.
+
+model/ResolvedPeriod.java       Period value: periodId (int), periodStart, periodEnd, runDate, frequency.
+model/RunSpec.java              One schedulable unit: runType, parentId, name, subprocess, period, runOrder, extraParams.
+model/TaskItem.java             Persisted task: taskId (UUID), runId, RunSpec, status, createdAt, metadata.
+
+period/PeriodResolver.java      @FunctionalInterface: resolve(runDate, frequency) → ResolvedPeriod.
+period/StandardPeriodResolver.java DAILY (YYYYMMDD), MONTHLY (YYYYMM), WEEKLY (YYYYWW ISO week).
+
+schedule/RunScheduleResolver.java  @FunctionalInterface: resolve(parentId, frequency, period) → List<RunSpec>.
+schedule/BigQueryRunScheduleResolver.java Queries parameter_store; opts in via run_type/enabled/frequency/run_order fields.
+
+task/TaskRepository.java        Interface: save(List<TaskItem>).
+task/BigQueryTaskRepository.java BQ streaming insert impl. taskId as deduplication key.
+
+manifest/ManifestWriter.java    @FunctionalInterface: write(runId, parentId, frequency, runDate, tasks) → location.
+manifest/GcsManifestWriter.java Writes JSON manifest to GCS. Default path: manifests/{runId}/tasks.json.
 ```
 
 ---
@@ -261,6 +380,7 @@ beam-transforms → beam-core, beam-utils
 beam-io → beam-core   (NOT beam-utils, NOT beam-transforms)
 beam-utils → beam-core
 beam-core → (nothing internal)
+beam-orchestrator → (nothing internal — standalone, no sibling module deps)
 ```
 
 **Violations**: if `beam-io` imports from `beam-utils`, it breaks this rule. The compiler will
@@ -323,8 +443,9 @@ Sources are **never merged**. Each `SourceConfig` is an independent Beam DAG bra
 ### Add a new report transformation step type
 
 The report transformation chain uses raw BQ SQL — no new Java code needed.
-Add a row to `report_transformation_config` with a new `query_template` referencing any alias
-in the registry. Custom tokens go in `query_params_json`.
+Add a new object to the `transforms` array in the `parameter_store` `parameters_val_json` for
+the report, with `query_template` referencing any alias in the registry. Custom tokens go in
+`query_params_json`.
 
 ### Add a new BeamTransform (pluggable, SPI-registered)
 
@@ -342,7 +463,9 @@ in the registry. Custom tokens go in `query_params_json`.
 
 ### Add a new report type
 
-1. Insert rows in the 6 report DB tables (see DDL in `README.md`)
+1. Insert one row in `parameter_store` with `parameter_name=reportName`, `parameter_data_source=reportSubprocess`,
+   `parameter_group_name=parentId`, and the full nested JSON config in `parameters_val_json`
+   (keys: `override_key`, `datasources`, `preprocessing`, `transforms`, `outputs`, `email`)
 2. No Java code changes needed unless a new preprocessing step type is required
 3. For new preprocessing types, add a `case` in `ReportPipelineFactory.runPreprocessing()`
 
@@ -350,31 +473,61 @@ in the registry. Custom tokens go in `query_params_json`.
 
 ## 8. DATA_SOURCE_DOWNLOAD — execution path
 
+**Flex Template / DirectRunner (inline post-pipeline):**
 ```
 Main.runDataSourceDownload(options)
 │
-├─ DataSourcePipelineFactory.assemble(options)
-│   ├─ BigQuerySourceConfigRepository.getMissingParameters()  fail fast if config missing
-│   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load all SourceConfig rows from BQ
+├─ DataSourcePipelineFactory.assemble(options)   [driver JVM]
+│   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load SourceConfig from BQ; throws if row missing
+│   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources (bypassed under
+│   │                                                          --manualOverrun / --overrideDownload)
+│   ├─ Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE createCheckpoint()
+│   │   → captured as previousDaId for PostDownloadFinalizeTransform's later cleanup
+│   ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id per source (LOADING row)
+│   │   Always a fresh INSERT — DaRefer only ever gains new rows, never overwritten
 │   │
-│   └─ for each SourceConfig:
-│       ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()  skip if COMPLETED
-│       ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → dataSourceId (LOADING row)
-│       ├─ SourceRouter.routeFromConfig()                     API / FILE / BQ → PCollection<Row>
-│       │   └─ QueryParameterResolver.resolve()               inject {periodStart}, custom tokens
+│   └─ for each SourceConfig (graph assembly — no data moves yet):
+│       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc.
+│       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ sources, in order:
+│       │   ├─ 1. BqFetchConfig.schema (operator-declared bq_schema_json) →
+│       │   │      BigQuerySchemaUtils.toBeamSchema() — no BQ call, throws on a bad type name
+│       │   ├─ 2. else BigQuerySchemaUtils.fetchBeamSchema() (table metadata)
+│       │   └─ 3. else null → BigQuerySourceTransform.expand() resolves real column names
+│       │          itself via a SELECT * LIMIT 1 preview query (no tables.get)
+│       ├─ SourceRouter.routeFromConfig(schema)               API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
-│       └─ DataSourceRecordSinkTransform(dataSourceId)        rows → JSON blobs → data_source_records
+│       ├─ DataSourceRecordSinkTransform(da_id)               rows → paginated JSON arrays → DaRec
+│       │   ├─ GroupByKey collects all rows, paginate at 250 rows/page, 1 DaRec row per page
+│       │   └─ returns PCollection<Long> = total source rows (after all streaming inserts commit)
+│       └─ PostDownloadFinalizeTransform(da_id)               [wired here; runs in Beam worker]
 │
-├─ Pipeline assembled. No data has moved.
-├─ pipeline.run()                                      submit to Dataflow (or DirectRunner)
-├─ result.waitUntilFinish()
-│
-└─ DataSourcePipelineFactory.runPostPipelineSteps(state, error)
-    └─ for each SourceConfig that ran:
-        ├─ BigQueryDataSourceRecordAdapter.countRecords(dataSourceId)
-        ├─ BigQueryDataSourceRecordAdapter.sumField(dataSourceId, field) per BnC rule
-        ├─ ValidationConfig checks (row count bounds, BnC SUM via JSON_VALUE)
-        └─ BigQueryDataSourceCheckpointAdapter.updateStatus(dataSourceId, COMPLETED/FAILED_BNC/FAILED, bncJson)
+├─ pipeline.run()                                submit to Dataflow (or DirectRunner)
+└─ result.waitUntilFinish()
+   (When the job reaches DONE, PostDownloadFinalizeTransform has already run in a worker:)
+       ├─ BigQueryDataSourceRecordAdapter.countRecords(daId)  → storedRowCount (UNNEST + COUNT(*), excludes any FILE header-legend row)
+       ├─ row_count_mismatch check: storedRowCount == pipelineRowCount (always-on, no config needed)
+       ├─ min/max row count bounds check (optional; from min_row_count / max_row_count config)
+       ├─ data_transform_query (optional; only if the checks above passed):
+       │   ├─ a `WITH data AS (...)` CTE — CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)),
+       │   │   reunifying every paginated DaRec page for this da_id into one flat rowset of JSON
+       │   │   row strings — is always prepended before the query runs; never opt-in, so the
+       │   │   operator's SQL just references `data` as a plain table, then
+       │   │   BigQueryJobService.runQueryToTable() runs the combined query
+       │   ├─ BigQueryJobService.countRows() validates the output against data_transform_min/max_row_count
+       │   └─ only if valid: replaceStoredRows() runs DELETE + INSERT (re-paginated at 250 rows/page)
+       │       as ONE atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with
+       │       ROLLBACK on error) — never as two separate jobs. Retried as a whole with backoff
+       │       (~30s total) since this run's own rows were just streamed in and can still be in
+       │       BigQuery's streaming buffer (DML-ineligible even though already SELECT-visible); a
+       │       failed attempt is guaranteed to have changed nothing, so retrying is always safe.
+       │       (query failure or bounds failure or exhausted retries → original stored rows
+       │       completely untouched — the delete and insert can never partially apply)
+       ├─ BigQueryDataSourceRecordAdapter.sumField(daId, field) per BnC rule (optional; skipped if bnc_rules_json
+       │   absent; runs against transformed rows if data_transform_query applied)
+       ├─ BigQueryDataSourceCheckpointAdapter.updateStatus(daId, COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED, bncJson)
+       ├─ Only on COMPLETED, only if previousDaId was captured: recordAdapter.deleteRecords(previousDaId)
+       │   — manualOverrun cleanup; DaRefer itself is never touched, only the superseded DaRec rows
+       └─ SmtpReportEmailAdapter.send() if SourceFailureEmailConfig.isPresent()
 ```
 
 ---
@@ -387,13 +540,13 @@ Triggered when `--reportName` is set. Runs entirely in driver JVM — **no Beam 
 Main.runReportProcessing(options)
 │
 └─ ReportPipelineFactory.execute(options)
-    ├─ BigQueryReportRepository.fetchReportConfig()    BQ query all 6 report config tables
-    │                                                  (report_config, report_datasource_ref,
-    │                                                   report_preprocessing_config,
-    │                                                   report_transformation_config,
-    │                                                   report_output_config, report_email_config)
-    ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint(reportName, periodId, reportName)
-    │   → dataSourceId (LOADING row in data_source_checkpoints)
+    ├─ BigQueryReportRepository.fetchReportConfig()    SELECT parameters_val_json FROM parameter_store
+    │                                                  WHERE parameter_group_name=parentId
+    │                                                    AND parameter_data_source=reportSubprocess
+    │                                                    AND parameter_name=reportName
+    │                                                  → parse nested JSON → ReportConfig (periodId: int)
+    ├─ BigQueryReportCheckpointAdapter.createCheckpoint(reportName, periodId, reportName)
+    │   → rpt_id (LOADING row in RptRefer)
     │
     ├─ Phase 1: Preprocessing (optional)
     │   └─ for each ReportPreprocessingStep (by step_order):
@@ -401,11 +554,14 @@ Main.runReportProcessing(options)
     │
     ├─ Phase 2: Datasource availability check
     │   └─ for each required ReportDatasourceRef:
-    │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srcName, perId) → must be true
+    │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srceNm, perId) → must be true
     │
-    ├─ Phase 3: Build alias registry
-    │   └─ BigQueryReportRepository.fetchDatasourceDataSourceId() × N
-    │       → alias → record-table subquery (SELECT RowDSJsonTx ... WHERE dataSourceId=X)
+    ├─ Phase 3: Build alias registry (stage datasource rows)
+    │   └─ for each ReportDatasourceRef:
+    │       ├─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId(srceNm, perId) → da_id
+    │       ├─ BigQueryReportCheckpointAdapter.addDaMapping(rptId, daId)   → map_id (RptDaMap row)
+    │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → copies DaRec's pages into RptStageDa verbatim (one RptStageDa row per page, not per record — batched like DaRec)
+    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT row_json AS stage_ds_json_tx FROM RptStageDa CROSS JOIN UNNEST(...) AS row_json WHERE map_id=X) — un-nests RptStageDa's pages back into individual records on read, so report SQL still sees one row per record
     │
     ├─ Phase 4: Transformation chain
     │   └─ for each ReportTransformStep (by step_order):
@@ -414,71 +570,136 @@ Main.runReportProcessing(options)
     │       ├─ BigQueryJobService.runQueryToTable(resolvedSQL, step.outputBqTable)
     │       └─ aliasRegistry.put(step.outputAlias, step.outputBqTable)
     │
+    ├─ Phase 4b: Write per-report BQ table (if output_bq_table is set)
+    │   ├─ Resolve source alias: output_bq_input_alias → last transform outputAlias → first datasource alias
+    │   └─ BigQueryJobService.runQueryToTable("SELECT * FROM <alias>", config.outputBqTable)
+    │
     ├─ Phase 5: File export
     │   └─ for each ReportOutputConfig:
     │       ├─ BigQueryJobService.exportToCsv() or exportToJson()
     │       └─ record ExportedFile(gcsUri, fileName, contentType)
     │
-    ├─ Phase 6: Email (optional)
+    ├─ Phase 6: Write RptOutput rows + clear staged data
+    │   ├─ BigQueryReportCheckpointAdapter.writeOutput(rptId, outptCd, outputDs, ...) per output
+    │   └─ BigQueryReportCheckpointAdapter.clearStagedData(rptId)  → DELETE FROM RptStageDa WHERE map_id IN (...)
+    │
+    ├─ Phase 7: Email (optional)
     │   ├─ GcsUtils.readBytes(gcsUri) for each exported file
     │   ├─ resolve subject/body templates ({reportName}, {periodId}, etc.)
     │   └─ SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
     │
-    └─ BigQueryDataSourceCheckpointAdapter.updateStatus(dataSourceId, COMPLETED, null)
-       or updateStatus(dataSourceId, FAILED, null) if any phase threw
+    └─ BigQueryReportCheckpointAdapter.updateStatus(rptId, COMPLETED)
+       or updateStatus(rptId, FAILED) if any phase threw
 ```
 
 ---
 
-## 10. BigQuery parameter store — how config is fetched for REPORT_PROCESSING
+## 10. BigQuery parameter store — how config is fetched
 
-All REPORT_PROCESSING configuration lives in BigQuery, in the dataset specified by
-`--paramBqProject` + `--paramBqDataset`. There are two conceptual layers:
-
-### Layer A — Structured report config (6 tables, queried by BigQueryReportRepository)
-
-These mirror the old JDBC tables, now stored in BQ:
-
-| BQ Table | Contents | Key columns |
-|---|---|---|
-| `report_config` | One row per report variant | report_name, report_subprocess, period_id, override_key |
-| `report_datasource_ref` | Which datasources a report needs | datasource_name, transform_alias, is_required |
-| `report_preprocessing_config` | Pre-run BQ queries / API enrichment | step_order, bq_query, query_params_json |
-| `report_transformation_config` | Chain of BQ transform queries | step_order, query_template, input_alias, output_alias |
-| `report_output_config` | File output specs | output_format (CSV/JSON), gcs_path, file_prefix, file_suffix |
-| `report_email_config` | Email recipients + templates | to_list, cc_list, subject_template, body_template |
-
-### Layer B — Generic key-value parameter store (2 tables, queried by BigQueryParameterAdapter)
-
-Used by `ExampleWorkflow` and any custom report code that prefers flat key-value config
-over the structured 6-table schema:
+All pipeline configuration lives in BigQuery, in the dataset specified by
+`--paramBqProject` + `--paramBqDataset`. A single `parameter_store` table holds all
+configuration — DATA_SOURCE_DOWNLOAD source configs and REPORT_PROCESSING report configs.
+PIPELINE has no config of its own: it reads the same report config as REPORT_PROCESSING
+(`--reportName`/`--reportSubprocess`) and runs the datasources that report's own
+`datasources[]` already declares.
 
 | BQ Table | Contents | Key columns |
 |---|---|---|
-| `parameter_store` | One row per param per period | process_name, subprocess_name, period_id, param_key, param_value |
-| `required_parameters_index` | Which keys each process needs | process_name, subprocess_name, param_key, is_required |
+| `parameter_store` | All pipeline params (source configs + report configs) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess), parameter_name (--datasourceName / --reportName) |
 
-**Typical call sequence:**
-```java
-BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
-// 1. Look up required keys from required_parameters_index
-// 2. Fetch values from parameter_store
-// 3. Validate all required keys present → throws IllegalStateException if missing
-Map<String, String> params = adapter.fetchRequiredParameters(reportName, subprocess, periodId);
+`schema_of_json` declares required top-level fields. `parameters_val_json` holds the config JSON.
+
+### Source configs (DATA_SOURCE_DOWNLOAD) — flat JSON in parameters_val_json
+
+```json
+{
+  "source_type":    "BQ",
+  "bq_project_id":  "my-project",
+  "bq_dataset":     "raw_data",
+  "bq_table":       "trades",
+  "bq_query":       "SELECT * FROM ... WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'",
+  "bq_schema_json": "[{\"name\":\"trade_id\",\"type\":\"STRING\"},{\"name\":\"amount\",\"type\":\"FLOAT64\"},{\"name\":\"trade_date\",\"type\":\"DATE\"}]",
+  "min_row_count":  "1",
+  "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]",
+  "data_transform_query":         "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id, ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2) AS amount_with_tax FROM data",
+  "data_transform_min_row_count": "1"
+}
 ```
 
-### New CLI flags (replace --paramDb* JDBC flags for REPORT_PROCESSING)
+`data_transform_query` is optional — see section 8. Real BigQuery Standard SQL, run beneath a
+`WITH data AS (...)` CTE that the framework always prepends — unconditionally, not contingent on
+the query referencing any placeholder token — reunifying every DaRec page for this run into a flat
+rowset of JSON row strings; the operator's query just does `FROM data` like any other table, then
+extracts fields with `JSON_VALUE(row_json, '$.field')`. Runs after storage integrity checks pass
+and before the checkpoint is marked `COMPLETED`; its output row count is validated against
+`data_transform_min_row_count`/`data_transform_max_row_count` before it replaces the stored rows —
+a failure at either step leaves the original rows untouched and sets `sta_cd=FAILED_TRANSFORM`.
+
+`bq_schema_json` is optional and BQ-only. When present, it is the authoritative schema —
+`DataSourcePipelineFactory.fetchBqSchema()` uses it directly (no `bigquery.tables.get` call at
+all) and every fetched row is converted strictly against it: a value that doesn't match its
+declared type fails the run with a message naming the column, declared type, and offending
+value, instead of a bare parse exception or a silent fallback. `type` must be a real BigQuery
+SQL type name — `STRING`, `INT64`, `FLOAT64`, `BOOLEAN`, `BYTES`, `DATE`, `DATETIME`, `TIME`,
+`TIMESTAMP`, `NUMERIC`, `BIGNUMERIC` — so the person editing `parameter_store` recognises it
+directly. When absent,
+schema resolution falls back to `BigQuerySchemaUtils.fetchBeamSchema()` (table metadata), then
+to `BigQuerySourceTransform`'s own name-only preview-query fallback.
+
+### Report configs (REPORT_PROCESSING and PIPELINE) — nested JSON in parameters_val_json
+
+```json
+{
+  "override_key": false,
+  "datasources":  [{"datasource_name": "trades", "datasource_subprocess": "eod",
+                    "transform_alias": "raw_trades", "is_required": true}],
+  "preprocessing": [],
+  "transforms":   [{"step_order": 1, "step_name": "aggregate", "input_alias": "raw_trades",
+                    "output_alias": "summary",
+                    "query_template": "SELECT ... FROM {raw_trades}",
+                    "output_bq_table": "project.dataset.table", "query_params_json": {}}],
+  "outputs":      [{"output_order": 1, "input_alias": "summary", "sink_type": "GCS",
+                    "output_format": "CSV", "gcs_path": "gs://bucket/reports/",
+                    "file_prefix": "", "file_suffix": ".csv", "include_header": true}],
+  "email":        {"to_list": ["analyst@example.com"], "cc_list": [],
+                   "subject_template": "Report {periodId}", "body_template": "Attached."},
+  "output_bq_table":       "project.dataset.daily_trades_report",
+  "output_bq_input_alias": "summary"
+}
+```
+
+The `datasources[]` array (with each entry's `is_required`) is the **same config PIPELINE reads**
+— there is no separate pipeline config. `--processType=PIPELINE` takes the identical
+`--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` and runs whichever declared
+datasources aren't yet `COMPLETED` before running the report; `is_required` decides whether a
+still-incomplete one aborts the run. See section 4's `PipelineSequenceFactory` entry.
+
+`periodId` is not part of the lookup key for either config type — both are period-agnostic.
+Period tokens (`{periodStart}`, `{periodEnd}`) are resolved at runtime by `QueryParameterResolver`.
+
+**Typical call sequence (report config — REPORT_PROCESSING or PIPELINE):**
+```java
+BigQueryReportRepository repo = new BigQueryReportRepository(options);
+ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
+```
+
+**Typical call sequence (source config):**
+```java
+BigQuerySourceConfigRepository repo = new BigQuerySourceConfigRepository(options);
+List<SourceConfig> configs = repo.fetchSourceConfigs(parentId, datasourceName, subprocess, periodId);
+```
+
+### CLI flags for the parameter store
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--paramBqProject` | `--project` | GCP project for all config BQ tables |
-| `--paramBqDataset` | `pipeline_config` | BQ dataset |
-| `--paramStoreTable` | `parameter_store` | Key-value store table |
-| `--paramRequiredTable` | `required_parameters_index` | Required-params index table |
-| `--paramSourceConfigTable` | `source_config` | Source config table (for alias registry) |
+| `--paramBqDataset` | `dw` | BQ dataset |
+| `--paramStoreTable` | `parameter_store` | Used by DATA_SOURCE_DOWNLOAD, REPORT_PROCESSING, and PIPELINE |
 
 **Note**: All configuration — for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING — is fetched
-from **BigQuery** via `BigQuerySourceConfigRepository` or `BigQueryReportRepository`. No JDBC.
+from **BigQuery** via `BigQuerySourceConfigRepository` (source configs, flat JSON) or
+`BigQueryReportRepository` (report configs, nested JSON). Both read `parameter_store`. No JDBC.
 
 ---
 
@@ -498,11 +719,21 @@ Layer 2 — Standard tokens (both process types)
     {periodId}    → options.getPeriodId()
     {runDate}     → DateUtils.resolveRunDate(options).toString()
 
-Layer 3 — Custom tokens (both process types, from query_params_json column)
+Layer 3 — Custom tokens (both process types, from query_params_json column,
+          plus --customParamsJson from the CLI on top)
     QueryParameterResolver.resolve() — pass 2
     {exchange}  → "NYSE"    (from query_params_json)
     {threshold} → "10000"   (from query_params_json)
     Note: param values may reference standard tokens — those are resolved first.
+
+    --customParamsJson='{"exchange":"NASDAQ"}' is the CLI-supplied equivalent of
+    query_params_json, for a value that should come from the invocation itself
+    (Airflow DAG conf, ad-hoc CLI run) rather than be hard-coded into the stored
+    parameter_store row. On a key collision it wins over the step's own
+    query_params_json — e.g. the override above makes {exchange} resolve to
+    "NASDAQ" for this run only, no parameter_store edit needed. Malformed JSON
+    or a non-object root throws immediately rather than silently resolving to
+    nothing.
 
 Any number of custom tokens are supported. Unknown tokens are left unchanged.
 ```
@@ -521,7 +752,8 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 | Hold secrets in FrameworkOptions values | Pass Secret Manager ID, fetch value at runtime |
 | Call `BigQuerySchemaUtils`, `GcsUtils`, `BigQueryReportRepository` inside a DoFn | Call in driver JVM only |
 | Make any JDBC / SQL database connection | All config is in BigQuery — use BigQuerySourceConfigRepository or BigQueryReportRepository |
-| Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from required_parameters_index |
+| Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from schema_of_json in parameter_store |
+| Create a separate source_config table | Store source connector config in parameter_store (parameters_val_json) |
 | Create `TupleTag` inside `@ProcessElement` | `static final` field on the DoFn |
 | Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
 | Call `result.waitUntilFinish()` for streaming | Check source type first |
@@ -533,37 +765,52 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 
 ## 13. DataSourceCheckpointAdapter — lifecycle contract
 
-One row per run in `data_source_checkpoints`. Both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` use this table.
+One row per run in `DaRefer`. Used by `DATA_SOURCE_DOWNLOAD` for source run lifecycle.
+`REPORT_PROCESSING` reads DaRefer (via `isCompleted()` and `fetchLatestCompletedDaId()`) to
+check datasource availability, but writes its own checkpoint to `RptRefer` via `ReportCheckpointAdapter`.
+`perId` is always `int`.
 
 ```
-// Before pipeline.run() / report.execute():
-long dsId = adapter.createCheckpoint(srcName, perId, dsNm)
-    — inserts LOADING row
-    — dataSourceId = SELECT MAX(dataSourceId)+1 FROM checkpoints  (BQ sequence)
-    — vsnNo = SELECT MAX(vsnNo)+1 WHERE srcName=X AND PerId=Y     (per-source version)
-    — returns dataSourceId for use in all record rows and final updateStatus()
+// Before pipeline.run():
+long dsId = adapter.createCheckpoint(srceNm, perId, flNm)
+    — inserts LOADING row (perId: int → per_id INT64 in BQ)
+    — da_id = SELECT MAX(da_id)+1 FROM DaRefer  (BQ sequence)
+    — vsn_no = SELECT MAX(vsn_no)+1 WHERE srce_nm=X AND per_id=Y  (per-source version)
+    — returns da_id for use in all record rows and final updateStatus()
 
 // After waitUntilFinish() / report completes:
-adapter.updateStatus(dataSourceId, DataSourceCheckpoint.STA_COMPLETED, bncJson)
-adapter.updateStatus(dataSourceId, DataSourceCheckpoint.STA_FAILED_BNC, bncJson)
-adapter.updateStatus(dataSourceId, DataSourceCheckpoint.STA_FAILED, null)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_COMPLETED, bncJson)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED_BNC, bncJson)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED_TRANSFORM, bncJson)
+adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED, null)
 
 // Skip-logic check (DATA_SOURCE_DOWNLOAD):
-adapter.isCompleted(srcName, perId) — true if latest StaCd == 'COMPLETED'
+adapter.isCompleted(srceNm, perId) — true if latest sta_cd == 'COMPLETED'
+// Bypassed entirely under --manualOverrun / --overrideDownload.
+
+// --manualOverrun: fetchLatestCompletedDaId(srceNm, perId) is called BEFORE createCheckpoint()
+// to capture the run being superseded. createCheckpoint() always INSERTs a fresh DaRefer row
+// (new da_id, incremented vsn_no) regardless — a re-run never overwrites or reuses a prior row.
+// Once the NEW run reaches COMPLETED, PostDownloadFinalizeTransform deletes the OLD da_id's
+// DaRec rows (recordAdapter.deleteRecords(previousDaId)) — DaRefer itself is never touched.
 
 // DataSourceRecordAdapter — validates written records:
-recordAdapter.countRecords(dataSourceId)               — COUNT(*) for row-count check
-recordAdapter.sumField(dataSourceId, "amount")         — SUM(JSON_VALUE(RowDSJsonTx, '$.amount'))
+recordAdapter.countRecords(daId)               — COUNT(*) for row-count check
+recordAdapter.sumField(daId, "amount")         — SUM(JSON_VALUE(row_da_json_tx, '$.amount'))
+recordAdapter.deleteRecords(daId)              — DELETE FROM DaRec WHERE da_id=@daId (best-effort)
 
-// BalAndCntlSmryTx JSON written on COMPLETED or FAILED_BNC:
-{ "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
+// bal_and_cntl_smry_tx JSON written on COMPLETED, FAILED_BNC, or FAILED_TRANSFORM:
+{ "status": "Matched", "pipelineRowCount": 1000, "storedRowCount": 1000, "transformOutputRowCount": 950, ... }
 ```
 
 ---
 
 ## 14. BigQueryJobService — BQ job contract
 
-Used exclusively in driver JVM (ReportPipelineFactory). Not used in Beam workers.
+Used in the driver JVM (`ReportPipelineFactory`) and — since its no-arg constructor holds only a
+plain `BigQuery` client, no `FrameworkOptions` — also safe to instantiate in `@Setup` inside a
+Beam worker DoFn: `PostDownloadFinalizeTransform.FinalizeDoFn` does this to run
+`data_transform_query`.
 
 ```java
 // Run a query and materialise result to a BQ table
@@ -571,6 +818,12 @@ bqJobService.runQueryToTable(resolvedSql, "project.dataset.table");
 
 // Run a query with no destination (DDL, DML)
 bqJobService.runQuery(resolvedSql);
+
+// Exact live row count (SELECT COUNT(*), not table-metadata based)
+bqJobService.countRows("project.dataset.table");
+
+// Best-effort cleanup of a temp/staging table — logs and swallows failure, never throws
+bqJobService.dropTableIfExists("project.dataset.tmp_table");
 
 // Export BQ table to GCS as CSV
 bqJobService.exportToCsv("project.dataset.table", "gs://bucket/path/file.csv", includeHeader);
@@ -580,7 +833,8 @@ bqJobService.exportToJson("project.dataset.table", "gs://bucket/path/file.json")
 ```
 
 Table refs use `project.dataset.table` (dot-separated, 3 parts) or `dataset.table` (2 parts).
-All methods block until the BQ job completes. Failures throw `RuntimeException`.
+All methods block until the BQ job completes. Failures throw `RuntimeException`
+(except `dropTableIfExists`, which is intentionally best-effort).
 
 ---
 
@@ -607,35 +861,55 @@ inject it into `ReportPipelineFactory` via constructor.
 
 | Concept | Table | Written by | Read by |
 |---|---|---|---|
-| "Start/end of a source or report run" | `data_source_checkpoints` | `DataSourcePipelineFactory`, `ReportPipelineFactory` | `DataSourcePipelineFactory` (skip logic), `ReportPipelineFactory` (DS availability check) |
-| "Loaded rows from any source/report" | `data_source_records` | `DataSourceRecordSinkTransform` (Beam workers) | `BigQueryDataSourceRecordAdapter` (validation), report transform chain |
+| "Start/end of a DATA_SOURCE_DOWNLOAD run" | `DaRefer` | `DataSourcePipelineFactory` | `DataSourcePipelineFactory` (skip logic), `ReportPipelineFactory` (DS availability check + da_id lookup), `PipelineSequenceFactory` (post-batch-job required/optional gate, via the same `isCompleted()`) |
+| "Loaded rows from any source" | `DaRec` | `DataSourceRecordSinkTransform` (Beam workers); also `PostDownloadFinalizeTransform` — replaces a run's own rows once a validated `data_transform_query` applies, and deletes a superseded run's rows under `--manualOverrun` | `BigQueryDataSourceRecordAdapter` (BnC validation), `ReportCheckpointAdapter` (staging into RptStageDa) |
+| "Start/end of a REPORT_PROCESSING run" | `RptRefer` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | — |
+| "Report run → datasource mapping" | `RptDaMap` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | `ReportCheckpointAdapter.clearStagedData()` |
+| "Staged datasource pages for current report" | `RptStageDa` | `ReportCheckpointAdapter.stageFromDaRec()` — one row per `DaRec` page, batched, not per record | Transform chain (as subquery alias, un-nested back to individual records by `stagedDataSubquery()`) |
+| "One row per output step of a report" | `RptOutput` | `ReportPipelineFactory` via `ReportCheckpointAdapter.writeOutput()` | — |
 
-Checkpoint lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED`.
-All rows from one run share the same `dataSourceId` — shard-safe.
-`vsnNo` increments each time (srcName, PerId) is re-run.
+DATA_SOURCE_DOWNLOAD lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED_TRANSFORM / FAILED`.
+REPORT_PROCESSING lifecycle: `LOADING → COMPLETED / FAILED`.
+All rows from one DATA_SOURCE_DOWNLOAD run share the same `da_id` — shard-safe.
+`vsn_no` in DaRefer increments each time `(srce_nm, per_id)` is re-run.
+`vsn_no` in RptOutput increments each time `(rpt_id, outpt_cd)` produces another version.
+`perId` is stored as `INT64` in all tables (Java `int`).
+Under `--manualOverrun`, a re-run's DaRefer row is always a fresh INSERT — the previous run's
+DaRefer row is never modified or deleted, only its `DaRec` rows are removed, and only after the
+new run reaches `COMPLETED`.
 
 ---
 
 ## 17. Build and run reference
 
 ```bash
+# Run unit tests (currently: beam-io and beam-utils pure-logic classes only — see their READMEs)
+mvn -pl beam-io,beam-utils -am test
+
 # Build fat JAR from project root
 mvn package -pl beam-runner -am -DskipTests
 
-# Run DATA_SOURCE_DOWNLOAD locally (DirectRunner) — still uses JDBC for source config
+# Run DATA_SOURCE_DOWNLOAD locally (DirectRunner) — source config read from parameter_store
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --runner=DirectRunner \
   --processType=DATA_SOURCE_DOWNLOAD \
+  --parentId=TRADING \
   --datasourceName=trades \
-  --periodId=2024-01 \
+  --subprocessName=eod \
+  --periodId=202401 \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
-  --paramDbUrl=jdbc:postgresql://localhost:5432/params \
-  --paramDbUser=user \
-  --checkpointBqDataset=pipeline_metadata \
-  --processStatusBqDataset=pipeline_metadata
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=dw \
+  --checkpointBqProject=my-gcp-project \
+  --checkpointBqDataset=pipeline_metadata
+
+# Force re-run when DaRefer already shows COMPLETED (explicit operator override)
+# --manualOverrun=true
 
 # Run REPORT_PROCESSING (BQ-configured) — no JDBC required
+# NOTE: --emailSmtpHost and --smtpPasswordSecretId are no longer CLI flags.
+#       Add them as rows in parameter_store (keys: email_smtp_host, smtp_password_secret_id).
 java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --runner=DirectRunner \
   --processType=REPORT_PROCESSING \
@@ -645,19 +919,33 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --periodStart=2024-01-01 \
   --periodEnd=2024-01-31 \
   --paramBqProject=my-gcp-project \
-  --paramBqDataset=pipeline_config \
-  --emailSmtpHost=smtp.gmail.com \
-  --smtpPasswordSecretId=projects/p/secrets/smtp/versions/latest
+  --paramBqDataset=dw
+
+# Run PIPELINE (same --reportName/--reportSubprocess as REPORT_PROCESSING — no separate pipeline
+# config; runs whichever datasources the report's own datasources[] declares, then the report)
+java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
+  --runner=DirectRunner \
+  --processType=PIPELINE \
+  --parentId=TRADING \
+  --reportName=daily_trades_report \
+  --reportSubprocess=eod \
+  --periodId=202401 \
+  --periodStart=2024-01-01 \
+  --periodEnd=2024-01-31 \
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=dw \
+  --checkpointBqProject=my-gcp-project \
+  --checkpointBqDataset=pipeline_metadata
 
 # Run ExampleWorkflow (BQ params → BQ transform → GCS CSV)
 # See EXAMPLE.md for required BQ table setup
 mvn -pl beam-runner exec:java \
   -Dexec.mainClass=com.yourco.beam.runner.example.ExampleWorkflow \
   "-Dexec.args=--project=my-gcp-project --paramBqProject=my-gcp-project \
-    --paramBqDataset=pipeline_config --reportName=daily_trades_summary \
+    --paramBqDataset=dw --reportName=daily_trades_summary \
     --reportSubprocess=eod --periodId=2024-01 \
     --periodStart=2024-01-01 --periodEnd=2024-01-31 \
-    --processType=REPORT_PROCESSING --sinkType=GCS"
+    --processType=REPORT_PROCESSING"
 ```
 
 ---
@@ -672,6 +960,7 @@ mvn -pl beam-runner exec:java \
 6. Secrets are never stored in `FrameworkOptions` values — only Secret Manager IDs.
 7. `BigQueryJobService`, `GcsUtils`, `BigQueryReportRepository`, `BigQuerySourceConfigRepository`, and `BigQueryParameterAdapter` are driver-JVM only — never inside DoFns.
 11. No JDBC. No SQL database connections. All config and data flow through BigQuery.
+12. No separate source_config table. All source connector config is stored in `parameter_store` as JSON in `parameters_val_json`.
 8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
 9. Every code change is accompanied by a README update in the same commit.
 10. A `data_source_checkpoints` LOADING row is created before every source download or report run, and updated to COMPLETED / FAILED_BNC / FAILED after. All data rows go to `data_source_records` as JSON blobs.

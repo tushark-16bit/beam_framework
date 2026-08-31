@@ -1,7 +1,6 @@
 package com.yourco.beam.runner;
 
 import com.yourco.beam.options.FrameworkOptions;
-import com.yourco.beam.options.SourceType;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -15,34 +14,42 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   --processType=DATA_SOURCE_DOWNLOAD  →  DataSourcePipelineFactory
  *   --processType=REPORT_PROCESSING     →  PipelineFactory (general-purpose factory)
+ *   --processType=PIPELINE              →  PipelineSequenceFactory (same --reportName/
+ *                                            --reportSubprocess as REPORT_PROCESSING; runs every
+ *                                            datasource the report's own datasources[] declares,
+ *                                            batched into one job, then the report)
  * </pre>
  *
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
  * <pre>
  *   1. DataSourcePipelineFactory.assemble()
- *        ├─ Resolve MSTR_Per row for --periodId
- *        ├─ Validate params in BQ (source_config row present)
+ *        ├─ Validate params in BQ (parameter_store row present)
  *        ├─ Fetch source configs (transforms, validationConfig)
  *        ├─ Skip sources already COMPLETED in DaRefer (unless --overrideDownload)
- *        ├─ Insert DaRefer row StaCd=LOADING → returns DaId per source
- *        └─ Assemble per-source Beam branches → rows written to DaRec as RowDaJsonTx JSON
+ *        ├─ Insert DaRefer row sta_cd=LOADING → returns da_id per source
+ *        └─ Assemble per-source Beam branches:
+ *               source read → transform chain → DataSourceRecordSinkTransform (streaming inserts)
+ *                                                         ↓
+ *                                             PostDownloadFinalizeTransform
+ *                                   (BnC validation + checkpoint update + email — in worker)
  *   2. pipeline.run().waitUntilFinish()
- *   3. DataSourcePipelineFactory.runPostPipelineSteps()
- *        ├─ COUNT(*) FROM DaRec WHERE DaId=X; SUM BnC fields
- *        └─ UPDATE DaRefer StaCd → COMPLETED / FAILED_BNC / FAILED
+ *      Checkpoint (COMPLETED / FAILED_BNC / FAILED) is written by the worker as the last step.
  * </pre>
  *
  * <h2>REPORT_PROCESSING lifecycle (DB-configured)</h2>
  * <pre>
  *   ReportPipelineFactory.execute() — runs entirely in the driver JVM (no Beam workers):
- *        ├─ Resolve MSTR_Per, load ReportConfig from BQ
- *        ├─ Insert DaRefer row StaCd=LOADING
- *        ├─ Check all required datasources have DaRefer StaCd=COMPLETED
- *        ├─ Run transform chain (BQ jobs, each materialised to a temp table)
- *        ├─ Route each output → GCS / BQ / API via ReportOutputSinkRouter
- *        ├─ Insert COM_CmnRptDtl row per output
+ *        ├─ Load ReportConfig from BQ (parameter_store)
+ *        ├─ Insert RptRefer row sta_cd=LOADING → returns rpt_id
+ *        ├─ Run preprocessing steps              (BQ_QUERY jobs)
+ *        ├─ Check all required datasources have DaRefer sta_cd=COMPLETED
+ *        ├─ Add RptDaMap rows (rpt_id → da_id per datasource)
+ *        ├─ Stage rows into RptStageDa (copied from DaRec per map_id)
+ *        ├─ Run transform chain (BQ jobs, each materialised to a BQ table)
+ *        ├─ Export outputs to GCS/BQ
+ *        ├─ Insert RptOutput row per output; clear RptStageDa rows
  *        ├─ Send email (GCS outputs as attachments, if configured)
- *        └─ UPDATE DaRefer StaCd → COMPLETED / FAILED
+ *        └─ UPDATE RptRefer sta_cd → COMPLETED / FAILED
  * </pre>
  */
 public final class Main {
@@ -63,6 +70,7 @@ public final class Main {
         switch (options.getProcessType()) {
             case DATA_SOURCE_DOWNLOAD -> runDataSourceDownload(options);
             case REPORT_PROCESSING    -> runReportProcessing(options);
+            case PIPELINE             -> runPipelineSequence(options);
         }
     }
 
@@ -79,32 +87,12 @@ public final class Main {
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
         PipelineResult result = pipeline.run();
 
-        PipelineResult.State finalState = PipelineResult.State.UNKNOWN;
-        Throwable pipelineError = null;
-
         try {
             result.waitUntilFinish();
-            finalState = result.getState();
-            LOG.info("Pipeline finished with state: {}", finalState);
+            LOG.info("Pipeline finished with state: {}", result.getState());
         } catch (Exception e) {
-            pipelineError = e;
             LOG.error("Pipeline run threw exception: {}", e.getMessage(), e);
-            try {
-                finalState = result.getState();
-            } catch (Exception ignored) {}
-        }
-
-        // Post-pipeline: validate output tables, write final checkpoints + status rows.
-        // This runs regardless of success/failure — the factory handles each case.
-        try {
-            factory.runPostPipelineSteps(finalState, pipelineError);
-        } catch (Exception e) {
-            // Best-effort — don't mask a pipeline failure with a status-write failure
-            LOG.error("Post-pipeline steps failed (status rows may be incomplete): {}", e.getMessage(), e);
-        }
-
-        if (pipelineError != null) {
-            throw new RuntimeException("DATA_SOURCE_DOWNLOAD pipeline failed", pipelineError);
+            throw new RuntimeException("DATA_SOURCE_DOWNLOAD pipeline failed", e);
         }
     }
 
@@ -129,15 +117,15 @@ public final class Main {
             return;
         }
 
-        LOG.info("REPORT_PROCESSING (legacy transform-chain) | source={} | chain={} | sink={}",
-                 options.getSourceType(), options.getTransformChain(), options.getSinkType());
+        LOG.info("REPORT_PROCESSING (legacy transform-chain)");
 
-        Pipeline pipeline = new PipelineFactory().assemble(options);
+        PipelineFactory factory = new PipelineFactory();
+        Pipeline pipeline = factory.assemble(options);
 
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
         PipelineResult result = pipeline.run();
 
-        if (isBatchSource(options.getSourceType())) {
+        if (!factory.isStreamingSource()) {
             result.waitUntilFinish();
             LOG.info("Pipeline finished with state: {}", result.getState());
         } else {
@@ -145,14 +133,11 @@ public final class Main {
         }
     }
 
-    // ── Helper ───────────────────────────────────────────────────────────────
+    // ── PIPELINE ─────────────────────────────────────────────────────────────
 
-    /** Returns {@code true} for bounded sources; false for streaming. */
-    private static boolean isBatchSource(SourceType sourceType) {
-        if (sourceType == null) return true;
-        return switch (sourceType) {
-            case GCS, BQ, API, FILE -> true;
-            case PUBSUB              -> false;
-        };
+    private static void runPipelineSequence(FrameworkOptions options) {
+        LOG.info("PIPELINE | report={} subprocess={} period={}",
+                 options.getReportName(), options.getReportSubprocess(), options.getPeriodId());
+        new PipelineSequenceFactory().execute(options);
     }
 }

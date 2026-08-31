@@ -1,102 +1,100 @@
 package com.yourco.beam.runner;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
-import com.yourco.beam.io.checkpoint.DataSourceCheckpointAdapter;
 import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
-import com.yourco.beam.io.records.BigQueryDataSourceRecordAdapter;
-import com.yourco.beam.io.records.DataSourceRecordAdapter;
+import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.sink.DataSourceRecordSinkTransform;
 import com.yourco.beam.io.source.SourceRouter;
-import com.yourco.beam.model.BncRule;
-import com.yourco.beam.model.DataSourceCheckpoint;
+import com.yourco.beam.model.BqFetchConfig;
 import com.yourco.beam.model.SourceConfig;
-import com.yourco.beam.model.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
+import com.yourco.beam.options.SourceType;
+import com.yourco.beam.utils.BigQuerySchemaUtils;
 import com.yourco.beam.utils.DateUtils;
+import com.yourco.beam.utils.QueryParameterResolver;
 import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.options.ValueProvider;
+import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Assembles and runs a {@code DATA_SOURCE_DOWNLOAD} pipeline.
+ * Assembles a {@code DATA_SOURCE_DOWNLOAD} pipeline.
  *
  * <h2>Per-source independent branches</h2>
  * Each {@link SourceConfig} produces an independent Beam DAG branch:
  * <pre>
- *   source read → transform chain → DataSourceRecordSinkTransform
- *                                          ↓
- *                               DaRec table (JSON blobs keyed by DaId)
+ *   source read → transform chain → DataSourceRecordSinkTransform (streaming inserts → DaRec)
+ *                                           ↓
+ *                               PostDownloadFinalizeTransform
+ *                    (BnC validation + checkpoint update + failure email — runs in worker)
  * </pre>
  *
- * <h2>Orchestration steps</h2>
- * <ol>
- *   <li><b>Fetch source config from BQ</b> — {@link BigQuerySourceConfigRepository}.</li>
- *   <li><b>Validate required parameters</b> — fail fast before launching Dataflow.</li>
- *   <li><b>Filter by checkpoint</b> — skip COMPLETED sources unless {@code --overrideDownload=true}.</li>
- *   <li><b>Create LOADING DaRefer rows</b> — one row per source; returns the {@code DaId}
- *       used for all record rows and the final status update.</li>
- *   <li><b>Assemble parallel source branches</b> — source read → transforms →
- *       {@link DataSourceRecordSinkTransform} (all rows stored as JSON blobs in DaRec, keyed by DaId).</li>
- *   <li><b>Run pipeline</b> (called by {@link Main})</li>
- *   <li><b>Post-pipeline validation</b> — row count and BnC against the record table.
- *       Results written to {@code BalAndCntlSmryTx}; checkpoint updated to COMPLETED / FAILED_BNC / FAILED.</li>
- * </ol>
+ * <h2>Single-flow design</h2>
+ * Checkpoint creation (LOADING) happens in the driver JVM before the pipeline is assembled.
+ * All post-write steps — row-count validation, BnC checks, and the terminal checkpoint update
+ * (COMPLETED / FAILED_BNC / FAILED) — run inside {@link PostDownloadFinalizeTransform} as the
+ * last step of each source branch. No external post-pipeline invocation is needed.
  */
 public final class DataSourcePipelineFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(DataSourcePipelineFactory.class);
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    // Held after assembly so Main can call runPostPipelineSteps()
-    private List<SourceConfig>               processedConfigs;
-    private Map<String, Long>                dataSourceIds;   // datasourceName → DaId
-    private DataSourceCheckpointAdapter      checkpointAdapter;
-    private DataSourceRecordAdapter          recordAdapter;
-
     /**
-     * Validates parameters, assembles the Beam pipeline graph, and returns the pipeline
-     * ready for {@code run()} in Main.
+     * Validates parameters, creates LOADING checkpoints, assembles the Beam pipeline graph,
+     * and returns the pipeline ready for {@code run()} in {@link Main}.
      *
      * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility.
      */
     public Pipeline assemble(FrameworkOptions options) {
-        // ── Resolve job run ID ─────────────────────────────────────────────
-        String jobRunId = options.getJobRunId();
-        if (jobRunId == null || jobRunId.isBlank()) {
-            jobRunId = UUID.randomUUID().toString();
-            options.setJobRunId(jobRunId);
-        }
-        LOG.info("DATA_SOURCE_DOWNLOAD | jobRunId={} | datasource={} | period={} | subprocess={}",
-                 jobRunId, options.getDatasourceName(), options.getPeriodId(),
-                 options.getSubprocessName());
+        LOG.info("DATA_SOURCE_DOWNLOAD | datasource={} | period={} | subprocess={}",
+                 options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
 
-        // ── Step 1-2: BQ source config fetch and parameter validation ─────
+        validateRequiredParameters(options);
+
         BigQuerySourceConfigRepository bqRepo = new BigQuerySourceConfigRepository(options);
-        validateRequiredParameters(bqRepo, options);
         List<SourceConfig> sourceConfigs = bqRepo.fetchSourceConfigs(
             options.getParentId(), options.getDatasourceName(),
             options.getSubprocessName(), options.getPeriodId());
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
 
-        // ── Step 3: Filter by checkpoint ──────────────────────────────────
-        checkpointAdapter = new BigQueryDataSourceCheckpointAdapter(options);
-        recordAdapter     = new BigQueryDataSourceRecordAdapter(options);
-        List<SourceConfig> toProcess = filterByCheckpoint(sourceConfigs, options);
+        return assembleForConfigs(options, sourceConfigs);
+    }
 
+    /**
+     * Same assembly as {@link #assemble} — checkpoint filtering, {@code --manualOverrun}
+     * previous-{@code da_id} capture, LOADING checkpoint creation, per-source Beam branch
+     * assembly — starting from an explicitly supplied list of {@link SourceConfig} instead of
+     * fetching by a single {@code --datasourceName}. Used by {@code PipelineSequenceFactory} to
+     * batch every {@code DATA_SOURCE} step of a {@code PIPELINE} run's still-pending sources
+     * (each fetched by its own name, possibly several different datasources) into one Dataflow
+     * job — sources already {@code COMPLETED} for the period are still skipped here exactly as
+     * they are for a standalone {@code DATA_SOURCE_DOWNLOAD} run, via the same
+     * {@link #filterByCheckpoint}.
+     *
+     * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility. Assigns a
+     * {@code jobRunId} exactly like {@link #assemble} does, if the caller hasn't already.
+     */
+    public Pipeline assembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
+        String jobRunId = options.getJobRunId();
+        if (jobRunId == null || jobRunId.isBlank()) {
+            jobRunId = UUID.randomUUID().toString();
+            options.setJobRunId(jobRunId);
+        }
+        LOG.info("Assembling {} source config(s) | jobRunId={}", sourceConfigs.size(), jobRunId);
+
+        BigQueryDataSourceCheckpointAdapter checkpointAdapter =
+            new BigQueryDataSourceCheckpointAdapter(options);
+
+        List<SourceConfig> toProcess = filterByCheckpoint(sourceConfigs, checkpointAdapter, options);
         if (toProcess.isEmpty()) {
             LOG.info("All {} source(s) already completed. "
                      + "Set --overrideDownload=true to force re-download.", sourceConfigs.size());
@@ -104,162 +102,175 @@ public final class DataSourcePipelineFactory {
         }
         LOG.info("Will process {} of {} source(s)", toProcess.size(), sourceConfigs.size());
 
-        // ── Step 4: Create LOADING checkpoints ────────────────────────────
-        dataSourceIds = new HashMap<>();
-        for (SourceConfig config : toProcess) {
-            String dsNm = extractDsNm(config);
-            long dsId = checkpointAdapter.createCheckpoint(
-                config.datasourceName, config.periodId, dsNm);
-            dataSourceIds.put(config.datasourceName, dsId);
-            LOG.info("DaRefer LOADING row created for '{}': DaId={}", config.datasourceName, dsId);
-        }
-
-        // ── Step 5-6: Assemble per-source independent pipeline branches ────
-        processedConfigs = toProcess;
-        return assemblePipeline(options, toProcess);
-    }
-
-    /**
-     * Called by {@link Main} after {@code waitUntilFinish()} completes.
-     * Runs post-pipeline validation (row count, BnC) against the record table
-     * and updates each checkpoint to COMPLETED / FAILED_BNC / FAILED.
-     *
-     * @param pipelineState result from Beam's {@code waitUntilFinish()}
-     * @param pipelineError exception from the pipeline, or null if it succeeded
-     */
-    public void runPostPipelineSteps(PipelineResult.State pipelineState, Throwable pipelineError) {
-        if (processedConfigs == null) return;
-
-        boolean pipelineSucceeded = (pipelineState == PipelineResult.State.DONE
-                                     || pipelineState == PipelineResult.State.UPDATED)
-                                    && pipelineError == null;
-
-        for (SourceConfig config : processedConfigs) {
-            long dsId = dataSourceIds.get(config.datasourceName);
-
-            if (!pipelineSucceeded) {
-                String errorMsg = pipelineError != null ? pipelineError.getMessage()
-                                                        : "Pipeline ended in state: " + pipelineState;
-                LOG.warn("Pipeline failed for source '{}': {}", config.datasourceName, errorMsg);
-                checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
-            } else {
+        // Under --manualOverrun, capture each source's previous COMPLETED da_id (if any) BEFORE
+        // creating the new checkpoint below. Once the new run reaches COMPLETED,
+        // PostDownloadFinalizeTransform deletes this previous da_id's DaRec rows — DaRefer itself
+        // is never touched, only a new row is ever inserted (see createCheckpoint() below), so the
+        // full run history stays intact; only the superseded bulk row data is reclaimed.
+        boolean manualOverrun = options.getManualOverrun();
+        Map<String, Long> previousDaIds = new HashMap<>();
+        if (manualOverrun) {
+            for (SourceConfig config : toProcess) {
                 try {
-                    runValidationAndUpdateCheckpoint(config, dsId);
-                } catch (Exception e) {
-                    LOG.error("Post-pipeline validation failed for '{}' (DaId={}): {}",
-                              config.datasourceName, dsId, e.getMessage(), e);
-                    checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED, null);
+                    long prevDaId = checkpointAdapter.fetchLatestCompletedDaId(
+                        config.datasourceName, config.periodId);
+                    previousDaIds.put(config.datasourceName, prevDaId);
+                    LOG.info("manualOverrun: '{}' will supersede previous COMPLETED da_id={}",
+                             config.datasourceName, prevDaId);
+                } catch (IllegalArgumentException e) {
+                    LOG.debug("manualOverrun: no previous COMPLETED da_id for '{}' — nothing to supersede",
+                              config.datasourceName);
                 }
             }
         }
+
+        // Create LOADING checkpoints — one per source, before any worker touches the data.
+        // Always a fresh INSERT (new da_id, incremented vsn_no) — re-runs never overwrite or
+        // reuse a prior DaRefer row, even under --manualOverrun.
+        Map<String, Long> dataSourceIds = new HashMap<>();
+        for (SourceConfig config : toProcess) {
+            long dsId = checkpointAdapter.createCheckpoint(
+                config.datasourceName, config.periodId, extractDsNm(config));
+            dataSourceIds.put(config.datasourceName, dsId);
+            LOG.info("DaRefer LOADING row created for '{}': da_id={}", config.datasourceName, dsId);
+        }
+
+        return assemblePipeline(options, toProcess, dataSourceIds, previousDaIds);
     }
 
     // ── Graph assembly ────────────────────────────────────────────────────────
 
-    private Pipeline assemblePipeline(FrameworkOptions options, List<SourceConfig> configs) {
-        Pipeline pipeline = Pipeline.create(options);
-        LocalDate runDate = DateUtils.resolveRunDate(options);
+    private static Pipeline assemblePipeline(FrameworkOptions options,
+                                             List<SourceConfig> configs,
+                                             Map<String, Long> dataSourceIds,
+                                             Map<String, Long> previousDaIds) {
+        Pipeline  pipeline = Pipeline.create(options);
+        LocalDate runDate  = DateUtils.resolveRunDate(options);
         LOG.info("Effective run date: {}", runDate);
+
+        // Pre-compute the checkpoint table refs once — passed to FinalizeDoFn fields (Strings are
+        // serializable; FrameworkOptions is not, so we extract what we need here in the driver JVM).
+        String project        = options.getCheckpointBqProject() != null
+                                && !options.getCheckpointBqProject().isBlank()
+                                ? options.getCheckpointBqProject() : options.getProject();
+        String daReferTableRef = "`" + project + "." + options.getCheckpointBqDataset()
+                               + "." + options.getDaReferTable() + "`";
+        String daRecTableRef   = "`" + project + "." + options.getCheckpointBqDataset()
+                               + "." + options.getDaRecTable() + "`";
 
         for (SourceConfig config : configs) {
             long dsId = dataSourceIds.get(config.datasourceName);
-            LOG.info("Assembling source branch: {} ({}) → DaRec (DaId={})",
+            LOG.info("Assembling source branch: {} ({}) → DaRec (da_id={})",
                      config.datasourceName, config.sourceType, dsId);
 
+            SourceConfig resolved = resolveQueryTokens(config, options);
+            Schema bqSchema = fetchBqSchema(config);
             PCollection<Row> sourceData = SourceRouter.routeFromConfig(
-                pipeline, config, options, runDate);
+                pipeline, resolved, options, runDate, bqSchema);
 
             PCollection<Row> transformed = SourceTransformChainAssembler.assemble(
                 sourceData, config, options, pipeline);
 
-            transformed.apply("RecordSink-" + config.datasourceName,
-                              new DataSourceRecordSinkTransform(options, dsId));
+            // Write rows to DaRec (streaming inserts) and emit count after all inserts commit
+            PCollection<Long> writtenCount = transformed.apply(
+                "RecordSink-" + config.datasourceName,
+                new DataSourceRecordSinkTransform(options,
+                    ValueProvider.StaticValueProvider.of(dsId)));
+
+            // Finalize: row/BnC validation, optional data_transform_query, checkpoint update,
+            // manualOverrun cleanup, and failure email — all in the worker
+            long previousDaId = previousDaIds.getOrDefault(config.datasourceName, -1L);
+            writtenCount.apply(
+                "Finalize-" + config.datasourceName,
+                new PostDownloadFinalizeTransform(
+                    dsId, config, daReferTableRef, daRecTableRef, previousDaId));
         }
 
         return pipeline;
     }
 
-    // ── Post-pipeline validation ──────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     /**
-     * Validates row count and BnC rules against the record table, then updates the
-     * checkpoint to COMPLETED, FAILED_BNC, or COMPLETED (with BnC mismatch in summary).
-     *
-     * <p>The BnC summary ({@code BalAndCntlSmryTx}) is a JSON object:
-     * <pre>{@code
-     * {
-     *   "status":    "Matched",
-     *   "srcCount":  1000,
-     *   "srcAmount": 5000000.00,
-     *   "dstCount":  1000,
-     *   "dstAmount": 5000000.00
-     * }
-     * }</pre>
+     * For BQ sources, resolves {periodStart}/{periodEnd}/{periodId}/{runDate} and custom
+     * tokens in {@code bqFetchConfig.query} before the query reaches BigQueryIO.
+     * Must run here in beam-runner (not in beam-io SourceRouter) because
+     * QueryParameterResolver is in beam-utils and beam-io cannot depend on beam-utils.
+     * Non-BQ sources are returned unchanged.
      */
-    private void runValidationAndUpdateCheckpoint(SourceConfig config, long dsId) {
-        ValidationConfig validation = config.validationConfig;
-        long rowCount = recordAdapter.countRecords(dsId);
-
-        // -1 means the count query itself failed — treat as infrastructure error, not a BnC miss
-        if (rowCount == -1L) {
-            LOG.error("DaRec count query failed for '{}' (DaId={}) — marking FAILED",
-                      config.datasourceName, dsId);
-            checkpointAdapter.updateStatus(dsId, DataSourceCheckpoint.STA_FAILED,
-                "{\"error\":\"record count query failed — see pipeline logs\"}");
-            return;
+    private static SourceConfig resolveQueryTokens(SourceConfig config, FrameworkOptions options) {
+        if (config.sourceType != SourceType.BQ
+                || config.bqFetchConfig == null
+                || !config.bqFetchConfig.hasQuery()) {
+            return config;
         }
-        LOG.info("DaRec count for '{}' (DaId={}): {}", config.datasourceName, dsId, rowCount);
-
-        List<String> failures = new ArrayList<>();
-        boolean infraError = false;
-
-        // Row count check
-        if (validation.hasMinRowCheck() && rowCount < validation.minRowCount) {
-            failures.add("row_count " + rowCount + " < min " + validation.minRowCount);
-        }
-        if (validation.hasMaxRowCheck() && rowCount > validation.maxRowCount) {
-            failures.add("row_count " + rowCount + " > max " + validation.maxRowCount);
-        }
-
-        // BnC checks — query SUM(JSON_VALUE(...)) per rule
-        Map<String, Object> bncSummary = new LinkedHashMap<>();
-        bncSummary.put("srcCount", rowCount);
-        bncSummary.put("dstCount", rowCount);
-
-        for (BncRule rule : validation.bncRules) {
-            double actual = recordAdapter.sumField(dsId, rule.field);
-            if (Double.isNaN(actual)) {
-                // NaN means the BQ query failed, not a data mismatch — mark FAILED, not FAILED_BNC
-                failures.add("BnC SUM(" + rule.field + ") query failed (infrastructure error — check logs)");
-                infraError = true;
-            } else {
-                bncSummary.put("srcAmount_" + rule.field, rule.expectedTotal);
-                bncSummary.put("dstAmount_" + rule.field, actual);
-                if (!rule.passes(actual)) {
-                    failures.add("BnC SUM(" + rule.field + ") actual=" + actual
-                        + " expected=" + rule.expectedTotal + " ±" + rule.tolerancePct * 100 + "%");
-                }
-            }
-        }
-
-        String staCd;
-        if (failures.isEmpty()) {
-            bncSummary.put("status", "Matched");
-            staCd = DataSourceCheckpoint.STA_COMPLETED;
-            LOG.info("Validation PASSED for '{}'", config.datasourceName);
-        } else {
-            bncSummary.put("status", "Not Matched");
-            bncSummary.put("failures", failures);
-            // Infrastructure failures (query errors) map to FAILED; data mismatches to FAILED_BNC
-            staCd = infraError ? DataSourceCheckpoint.STA_FAILED : DataSourceCheckpoint.STA_FAILED_BNC;
-            LOG.warn("Validation FAILED for '{}': {}", config.datasourceName, failures);
-        }
-
-        String bncJson = toJson(bncSummary);
-        checkpointAdapter.updateStatus(dsId, staCd, bncJson);
+        BqFetchConfig bq = config.bqFetchConfig;
+        String resolvedQuery = QueryParameterResolver.resolve(bq.query, bq.queryParams, options);
+        BqFetchConfig resolvedBq = new BqFetchConfig(
+            bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema);
+        return SourceConfig.builder()
+            .parentId(config.parentId)
+            .datasourceName(config.datasourceName)
+            .periodId(config.periodId)
+            .subprocessName(config.subprocessName)
+            .sourceType(config.sourceType)
+            .bqFetchConfig(resolvedBq)
+            .queryConfig(config.queryConfig)
+            .sourceTransforms(new java.util.ArrayList<>(config.sourceTransforms))
+            .validationConfig(config.validationConfig)
+            .failureEmailConfig(config.failureEmailConfig)
+            .dataTransformConfig(config.dataTransformConfig)
+            .build();
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    /**
+     * Resolves the Beam Schema for a BQ table source at driver-JVM time.
+     * Returns null for non-BQ sources, query-only sources with no declared schema (no static
+     * table to inspect), or when metadata fetch fails (logs a warning and continues with the
+     * generic fallback in {@code BigQuerySourceTransform}).
+     *
+     * <p>Resolution order:
+     * <ol>
+     *   <li>{@link BqFetchConfig#schema} — an explicit column list the operator declared via
+     *       {@code bq_schema_json} in {@code parameter_store}. When present, this is used
+     *       directly and no BigQuery metadata call is made at all; a bad declared type name
+     *       throws {@link IllegalArgumentException} uncaught, failing the run before any data
+     *       moves rather than silently falling back.</li>
+     *   <li>{@code BigQuerySchemaUtils.fetchBeamSchema()} — table-metadata lookup. Must be
+     *       called here in beam-runner because {@link BigQuerySchemaUtils} is in beam-utils
+     *       and beam-io cannot depend on beam-utils.</li>
+     *   <li>{@code null} — {@code BigQuerySourceTransform} resolves column names itself via a
+     *       preview query when this returns null.</li>
+     * </ol>
+     */
+    private static Schema fetchBqSchema(SourceConfig config) {
+        if (config.sourceType != SourceType.BQ || config.bqFetchConfig == null) return null;
+        BqFetchConfig bq = config.bqFetchConfig;
+
+        if (bq.hasSchema()) {
+            Schema schema = BigQuerySchemaUtils.toBeamSchema(bq.schema);
+            LOG.info("Using explicitly declared schema ({} fields, bq_schema_json) for BQ source "
+                     + "'{}' — no table-metadata fetch needed",
+                     schema.getFieldCount(), config.datasourceName);
+            return schema;
+        }
+
+        if (bq.table == null || bq.table.isBlank()) {
+            LOG.debug("BQ source '{}' is query-only with no declared schema — using generic fallback",
+                      config.datasourceName);
+            return null;
+        }
+        try {
+            Schema schema = BigQuerySchemaUtils.fetchBeamSchema(bq.tableRef());
+            LOG.info("Fetched typed schema ({} fields) for BQ source '{}'",
+                     schema.getFieldCount(), config.datasourceName);
+            return schema;
+        } catch (Exception e) {
+            LOG.warn("Could not fetch BQ schema for source '{}' ({}): {} — using generic fallback",
+                     config.datasourceName, bq.tableRef(), e.getMessage());
+            return null;
+        }
+    }
 
     private static String extractDsNm(SourceConfig config) {
         if (config.bqFetchConfig != null) {
@@ -276,48 +287,31 @@ public final class DataSourcePipelineFactory {
         return config.datasourceName;
     }
 
-    private static String toJson(Map<String, Object> map) {
-        try {
-            return MAPPER.writeValueAsString(map);
-        } catch (Exception e) {
-            return map.toString();
-        }
-    }
-
-    private void validateRequiredParameters(BigQuerySourceConfigRepository repo, FrameworkOptions options) {
-        String datasource = options.getDatasourceName();
-        String period     = options.getPeriodId();
-        String subprocess = options.getSubprocessName();
-
-        if (datasource == null || datasource.isBlank()) {
+    private static void validateRequiredParameters(FrameworkOptions options) {
+        if (options.getDatasourceName() == null || options.getDatasourceName().isBlank()) {
             throw new PipelineConfigurationException("--datasourceName is required for DATA_SOURCE_DOWNLOAD");
         }
-        if (period == null || period.isBlank()) {
+        if (options.getPeriodId() <= 0) {
             throw new PipelineConfigurationException("--periodId is required for DATA_SOURCE_DOWNLOAD");
         }
-
-        LOG.info("Validating required parameters in BQ for datasource={}, period={}, subprocess={}",
-                 datasource, period, subprocess);
-        List<String> missing = repo.getMissingParameters(
-            options.getParentId(), datasource, subprocess, period);
-        if (!missing.isEmpty()) {
-            throw new PipelineConfigurationException(
-                "Required parameters missing from BQ — cannot start pipeline. Missing: " + missing
-                + ". Datasource=" + datasource + ", period=" + period + ", subprocess=" + subprocess);
-        }
-        LOG.info("All required parameters present.");
     }
 
-    private List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs, FrameworkOptions options) {
-        if (options.getOverrideDownload()) {
-            LOG.info("--overrideDownload=true: skipping checkpoint check, re-downloading all sources");
+    private static List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs,
+                                                          BigQueryDataSourceCheckpointAdapter adapter,
+                                                          FrameworkOptions options) {
+        boolean forceRerun = options.getManualOverrun() || options.getOverrideDownload();
+        if (forceRerun) {
+            String flag = options.getManualOverrun() ? "--manualOverrun" : "--overrideDownload";
+            LOG.info("{} = true: skipping COMPLETED checkpoint guard, re-downloading all sources", flag);
             return configs;
         }
         return configs.stream()
             .filter(config -> {
-                boolean done = checkpointAdapter.isCompleted(config.datasourceName, config.periodId);
+                boolean done = adapter.isCompleted(config.datasourceName, config.periodId);
                 if (done) {
-                    LOG.info("Skipping '{}' — COMPLETED checkpoint found", config.datasourceName);
+                    LOG.info("Skipping '{}' (period={}, parent={}) — COMPLETED row found in DaRefer. "
+                             + "Pass --manualOverrun=true to force a re-run.",
+                             config.datasourceName, config.periodId, config.parentId);
                 }
                 return !done;
             })

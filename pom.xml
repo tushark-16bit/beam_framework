@@ -45,6 +45,7 @@
         <module>beam-utils</module>
         <module>beam-transforms</module>
         <module>beam-runner</module>
+        <module>beam-orchestrator</module>
     </modules>
 
     <properties>
@@ -66,6 +67,12 @@
         <poi.version>5.2.5</poi.version>
         <jackson.version>2.16.1</jackson.version>
         <angus-mail.version>2.0.2</angus-mail.version>
+
+        <!-- Artifactory repository URLs — override on CLI or in settings.xml:
+             mvn deploy -Dartifactory.releases.url=https://your-org.jfrog.io/artifactory/libs-release-local
+                        -Dartifactory.snapshots.url=https://your-org.jfrog.io/artifactory/libs-snapshot-local -->
+        <artifactory.releases.url>https://your-org.jfrog.io/artifactory/libs-release-local</artifactory.releases.url>
+        <artifactory.snapshots.url>https://your-org.jfrog.io/artifactory/libs-snapshot-local</artifactory.snapshots.url>
     </properties>
 
     <dependencyManagement>
@@ -139,9 +146,26 @@
             </dependency>
 
             <!-- ── JSON for API response parsing ────────────────────────── -->
+            <!-- jackson-core/jackson-annotations pinned alongside jackson-databind: without
+                 this, Maven's nearest-wins mediation can resolve an older transitively-pulled
+                 jackson-core (e.g. 2.14.x via Beam SDK) against this newer jackson-databind,
+                 which throws NoClassDefFoundError at class-init time (jackson-databind's
+                 TokenBuffer references classes, e.g. StreamReadConstraints, only present in a
+                 matching jackson-core version) — including in PipelineOptionsFactory's own
+                 static initializer, i.e. the very first line of Main.java. -->
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
                 <version>${jackson.version}</version>
             </dependency>
 
@@ -194,6 +218,19 @@
         </dependency>
     </dependencies>
 
+    <distributionManagement>
+        <repository>
+            <id>artifactory-releases</id>
+            <name>Artifactory Releases</name>
+            <url>${artifactory.releases.url}</url>
+        </repository>
+        <snapshotRepository>
+            <id>artifactory-snapshots</id>
+            <name>Artifactory Snapshots</name>
+            <url>${artifactory.snapshots.url}</url>
+        </snapshotRepository>
+    </distributionManagement>
+
     <build>
         <pluginManagement>
             <plugins>
@@ -211,6 +248,17 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.2.3</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-source-plugin</artifactId>
+                    <version>3.3.0</version>
+                    <executions>
+                        <execution>
+                            <id>attach-sources</id>
+                            <goals><goal>jar-no-fork</goal></goals>
+                        </execution>
+                    </executions>
                 </plugin>
             </plugins>
         </pluginManagement>

@@ -1,73 +1,75 @@
 package com.yourco.beam.model;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
 
 /**
  * Represents one row in the {@code DaRefer} reference table.
  *
- * <p>A row is created (StaCd = LOADING) before the pipeline starts and updated
- * (COMPLETED / FAILED_BNC / FAILED) after it finishes. Both DATA_SOURCE_DOWNLOAD
- * and REPORT_PROCESSING use the same table.
+ * <p>A row is created (sta_cd = LOADING) before the pipeline starts and updated
+ * (COMPLETED / FAILED_BNC / FAILED) after it finishes. Only DATA_SOURCE_DOWNLOAD
+ * uses this table — REPORT_PROCESSING uses {@code RptRefer} via {@code ReportCheckpointAdapter}.
  *
  * <h2>BQ table schema (DaRefer)</h2>
  * <pre>{@code
  * CREATE TABLE pipeline_metadata.DaRefer (
- *   DaId               INT64     NOT NULL,   -- surrogate PK: MAX(DaId)+1 per run
- *   SrceNm             STRING    NOT NULL,   -- data source or report name
- *   VsnNo              INT64     NOT NULL,   -- rerun counter per (SrceNm, PerId): 1, 2, 3 …
- *   PerId              STRING,               -- period identifier (from MSTR_Per)
- *   FlNm               STRING,               -- BQ table ref, file path, or API endpoint
- *   BalAndCntlSmryTx   STRING,               -- JSON: BnC summary {status, srcCount, dstCount, …}
- *   StaCd              STRING    NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED
- *   CreatedTs          TIMESTAMP NOT NULL,
- *   LstUpdtTs          TIMESTAMP NOT NULL
+ *   da_id                INT64    NOT NULL,   -- surrogate PK: MAX(da_id)+1 per run
+ *   srce_nm              STRING   NOT NULL,   -- data source name
+ *   vsn_no               INT64    NOT NULL,   -- rerun counter per (srce_nm, per_id): 1, 2, 3 …
+ *   per_id               INT64,               -- period identifier (from MSTR_Per)
+ *   fl_nm                STRING,              -- BQ table ref, file path, or API endpoint
+ *   bal_and_cntl_smry_tx STRING,              -- JSON: BnC summary {status, srcCount, dstCount, …}
+ *   sta_cd               STRING   NOT NULL,   -- LOADING | COMPLETED | FAILED_BNC | FAILED_TRANSFORM | FAILED
+ *   created_ts           DATETIME NOT NULL,
+ *   lst_updt_ts          DATETIME NOT NULL
  * );
  * }</pre>
  */
 public final class DataSourceCheckpoint {
 
     // ── Status codes ──────────────────────────────────────────────────────────
-    public static final String STA_LOADING    = "LOADING";
-    public static final String STA_COMPLETED  = "COMPLETED";
-    public static final String STA_FAILED_BNC = "FAILED_BNC";
-    public static final String STA_FAILED     = "FAILED";
+    public static final String STA_LOADING          = "LOADING";
+    public static final String STA_COMPLETED        = "COMPLETED";
+    public static final String STA_FAILED_BNC       = "FAILED_BNC";
+    /** The optional {@code data_transform_query} errored, or its output failed row-count bounds. */
+    public static final String STA_FAILED_TRANSFORM = "FAILED_TRANSFORM";
+    public static final String STA_FAILED           = "FAILED";
 
-    public final long    DaId;
-    public final String  SrceNm;
-    public final long    VsnNo;
-    public final String  PerId;
-    public final String  FlNm;
-    public final String  balAndCntlSmryTx;
-    public final String  StaCd;
-    public final Instant CreatedTs;
-    public final Instant LstUpdtTs;
+    public final long          daId;
+    public final String        srceNm;
+    public final long          vsnNo;
+    public final int           perId;
+    public final String        flNm;
+    public final String        balAndCntlSmryTx;
+    public final String        staCd;
+    public final LocalDateTime createdTs;
+    public final LocalDateTime lstUpdtTs;
 
-    public DataSourceCheckpoint(long DaId, String SrceNm, long VsnNo, String PerId,
-                                String FlNm, String balAndCntlSmryTx, String StaCd,
-                                Instant CreatedTs, Instant LstUpdtTs) {
-        this.DaId             = DaId;
-        this.SrceNm           = SrceNm;
-        this.VsnNo            = VsnNo;
-        this.PerId            = PerId;
-        this.FlNm             = FlNm;
+    public DataSourceCheckpoint(long daId, String srceNm, long vsnNo, int perId,
+                                String flNm, String balAndCntlSmryTx, String staCd,
+                                LocalDateTime createdTs, LocalDateTime lstUpdtTs) {
+        this.daId             = daId;
+        this.srceNm           = srceNm;
+        this.vsnNo            = vsnNo;
+        this.perId            = perId;
+        this.flNm             = flNm;
         this.balAndCntlSmryTx = balAndCntlSmryTx;
-        this.StaCd            = StaCd;
-        this.CreatedTs        = CreatedTs;
-        this.LstUpdtTs        = LstUpdtTs;
+        this.staCd            = staCd;
+        this.createdTs        = createdTs;
+        this.lstUpdtTs        = lstUpdtTs;
     }
 
-    /** Creates a LOADING row with generated DaId and VsnNo. */
-    public static DataSourceCheckpoint loading(long DaId, long VsnNo,
-                                               String SrceNm, String PerId, String FlNm) {
-        Instant now = Instant.now();
+    /** Creates a LOADING row with generated daId and vsnNo. */
+    public static DataSourceCheckpoint loading(long daId, long vsnNo,
+                                               String srceNm, int perId, String flNm) {
+        LocalDateTime now = LocalDateTime.now();
         return new DataSourceCheckpoint(
-            DaId, SrceNm, VsnNo, PerId, FlNm, null, STA_LOADING, now, now);
+            daId, srceNm, vsnNo, perId, flNm, null, STA_LOADING, now, now);
     }
 
     @Override
     public String toString() {
-        return "DataSourceCheckpoint{DaId=" + DaId
-            + ", SrceNm=" + SrceNm + ", VsnNo=" + VsnNo
-            + ", PerId=" + PerId + ", StaCd=" + StaCd + "}";
+        return "DataSourceCheckpoint{daId=" + daId
+            + ", srceNm=" + srceNm + ", vsnNo=" + vsnNo
+            + ", perId=" + perId + ", staCd=" + staCd + "}";
     }
 }
