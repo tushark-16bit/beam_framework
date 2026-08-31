@@ -408,7 +408,7 @@ When `--reportName` is set alongside `--processType=REPORT_PROCESSING`, the
  3. Run preprocessing steps                    (BQ jobs — BQ_QUERY)
  4. Check datasource availability              (all required DSes must have DaRefer sta_cd=COMPLETED)
  5. Add RptDaMap rows                          (rpt_id → da_id from DaRefer, one per datasource)
- 6. Stage data into RptStageDa                 (copy rows from DaRec per map_id)
+ 6. Stage data into RptStageDa                 (copy DaRec's pages per map_id, batched — un-nested back to individual records on read)
  7. Build alias registry                       (alias → staged-data subquery or BQ table ref)
  8. Run transformation chain                   (BQ jobs; each step materialises to a BQ table)
  9. Export outputs to GCS / BQ
@@ -425,7 +425,7 @@ All report tracking tables live in the BQ dataset specified by `--checkpointBqPr
 |---|---|---|
 | `RptRefer` | `--rptReferTable` | Report run lifecycle: one row per run, `sta_cd` = LOADING → COMPLETED / FAILED |
 | `RptDaMap` | `--rptDaMapTable` | Maps each report run (`rpt_id`) to the datasource runs it consumed (`da_id` from `DaRefer`) |
-| `RptStageDa` | `--rptStageDaTable` | Transient staging area: rows copied from `DaRec` before transforms; deleted after export |
+| `RptStageDa` | `--rptStageDaTable` | Transient staging area: `DaRec`'s pages copied verbatim before transforms (batched, not per-record — un-nested back to individual records on read); deleted after export |
 | `RptOutput` | `--rptOutputTable` | One row per output step: output code, report date, version, balance amount, type |
 
 ```sql
@@ -448,11 +448,13 @@ CREATE TABLE RptDaMap (
   lst_updt_ts  DATETIME NOT NULL
 );
 
--- RptStageDa: transient staged rows (deleted after export)
+-- RptStageDa: transient staged pages (deleted after export). One row per DaRec page (batched
+-- like DaRec, ≤250 records/JSON array), not one row per source record — un-nested back into
+-- individual records on read by stagedDataSubquery(), so report SQL is unaffected.
 CREATE TABLE RptStageDa (
   stage_id          INT64    NOT NULL,
   map_id            INT64    NOT NULL,   -- FK → RptDaMap.map_id
-  stage_ds_json_tx  STRING   NOT NULL,   -- row JSON blob
+  stage_ds_json_tx  STRING   NOT NULL,   -- one DaRec page's JSON, copied verbatim
   query_config_tx   STRING,
   load_dt           DATE     NOT NULL,
   lst_updt_ts       DATETIME NOT NULL

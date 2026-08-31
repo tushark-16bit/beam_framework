@@ -137,27 +137,25 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
 
     @Override
     public void stageFromDaRec(long mapId, long daId) {
-        // DaRec stores rows as paginated JSON arrays (up to 250 rows per DaRec row) — or, for a
-        // FILE source with a header row, {"Data":[...],"DataHeaders":[...]}.
-        // FileHeaderLegend.dataArrayExpr() extracts just the row array either way, so
-        // CROSS JOIN UNNEST un-nests each page into individual source-row JSON objects so that
-        // RptStageDa.stage_ds_json_tx holds exactly one source row per staging row —
-        // consistent with what report transform SQL expects (JSON_VALUE(stage_ds_json_tx, '$.field')).
+        // Batched staging: copies DaRec's pages into RptStageDa unchanged — one RptStageDa row
+        // per DaRec page (≤250 records each, or a FILE-with-header source's
+        // {"Data":[...],"DataHeaders":[...]}), not one row per individual source record. This
+        // mirrors DaRec's own pagination and cuts RptStageDa's streaming-insert volume by the
+        // same ~250x factor DaRec already gets. The per-record view every report's SQL expects
+        // is reconstructed on read, in stagedDataSubquery() below — un-nesting moved from write
+        // time to read time, entirely inside this adapter. No report's query_template changes.
         // stage_id is computed via ROW_NUMBER() to avoid per-row MAX lookups.
-        // The header legend, when present, lives in DataHeaders — structurally separate from
-        // Data, so it's never unnested and never staged into a report's input data.
         String sql = "INSERT INTO " + rptStageDaTable
             + " (stage_id, map_id, stage_ds_json_tx, query_config_tx, load_dt, lst_updt_ts)"
             + " SELECT"
             + "   IFNULL((SELECT MAX(stage_id) FROM " + rptStageDaTable + "), 0)"
             + "     + ROW_NUMBER() OVER (),"
             + "   @mapId,"
-            + "   row_json,"
+            + "   row_da_json_tx,"
             + "   @queryConfigTx,"
             + "   CURRENT_DATE(),"
             + "   CURRENT_DATETIME()"
             + " FROM " + daRecTable
-            + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("row_da_json_tx") + ") AS row_json"
             + " WHERE da_id = @daId";
 
         runDml(QueryJobConfiguration.newBuilder(sql)
@@ -167,13 +165,26 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
             .addNamedParameter("daId",          QueryParameterValue.int64(daId))
             .setUseLegacySql(false).build());
 
-        LOG.info("Staged DaRec → RptStageDa: map_id={} da_id={}", mapId, daId);
+        LOG.info("Staged DaRec → RptStageDa (page copy): map_id={} da_id={}", mapId, daId);
     }
 
     @Override
     public String stagedDataSubquery(long mapId) {
-        return "(SELECT stage_ds_json_tx FROM " + rptStageDaTable
-               + " WHERE map_id = " + mapId + ")";
+        // RptStageDa.stage_ds_json_tx now holds a page (JSON array, or a FILE-with-header
+        // source's {"Data":[...],"DataHeaders":[...]}) per row, exactly like DaRec.row_da_json_tx
+        // — see stageFromDaRec() above. This subquery un-nests every page for mapId back into
+        // individual source-row JSON objects, aliasing the result column back to
+        // stage_ds_json_tx, so every caller (report transform SQL via {alias} substitution,
+        // writeOutputBqTable(), a BQ/GCS output reading a datasource alias directly) keeps
+        // seeing exactly the same "one row = one source record, column stage_ds_json_tx" shape
+        // it always has — un-nesting is internal to this method, never something a
+        // query_template author has to do. FileHeaderLegend.dataArrayExpr() extracts just the
+        // row array either way, so the FILE source's DataHeaders legend is never unnested and
+        // never reaches report input data, same guarantee as before, just applied on read
+        // instead of on write.
+        return "(SELECT row_json AS stage_ds_json_tx FROM " + rptStageDaTable
+            + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("stage_ds_json_tx") + ") AS row_json"
+            + " WHERE map_id = " + mapId + ")";
     }
 
     @Override

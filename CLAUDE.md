@@ -169,7 +169,7 @@ model/ReportOutputConfig.java         File output: CSV/JSON, GCS path, prefix, s
 model/ReportEmailConfig.java          Email: to, cc, subject/body templates with tokens.
 model/ReportCheckpoint.java           RptRefer row: rptId, rptNm, perId (int), rptDs, staCd, creatTs, lstUpdtTs. sta_cd: LOADING → COMPLETED / FAILED.
 model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtTs. Links a report run to a data source da_id.
-model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDsJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. Transient staging; deleted after transforms.
+model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDsJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. One row per DaRec page (batched, ≤250 records/JSON array — mirrors DaRec's own pagination), not one row per record; un-nested back to individual records on read by stagedDataSubquery(). Transient staging; deleted after transforms.
 model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
 model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces FrameworkOptions flags for source, sink, transforms, and retry/DLQ. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, etc.) + generic get(key)/get(key, default) escape hatch. Calendar (--calendarName) and per-source failure email (SourceFailureEmailConfig) are configured elsewhere, not here.
 ```
@@ -215,8 +215,12 @@ checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(
 checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME. Has String-tableRef constructor for in-worker use.
 checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_PROCESSING tables: RptRefer, RptDaMap, RptStageDa, RptOutput.
 checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
-                                                     stageFromDaRec unnests via FileHeaderLegend.dataArrayExpr() (handles both a plain array
-                                                     page and a FILE source's {"Data":[...],"DataHeaders":[...]} page), so any FILE-source
+                                                     stageFromDaRec copies DaRec's pages into RptStageDa verbatim (one RptStageDa row per DaRec
+                                                     page, batched like DaRec itself — not one row per source record). stagedDataSubquery()
+                                                     un-nests those pages back into individual source-row JSON objects on read, via
+                                                     FileHeaderLegend.dataArrayExpr() (handles both a plain array page and a FILE source's
+                                                     {"Data":[...],"DataHeaders":[...]} page), aliasing the result back to stage_ds_json_tx —
+                                                     so report SQL always sees one row per record, same as before batching, and any FILE-source
                                                      header legend — in the separate DataHeaders array — is never staged into a report's input data.
 
 records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field), deleteRecords(daId).
@@ -556,8 +560,8 @@ Main.runReportProcessing(options)
     │   └─ for each ReportDatasourceRef:
     │       ├─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId(srceNm, perId) → da_id
     │       ├─ BigQueryReportCheckpointAdapter.addDaMapping(rptId, daId)   → map_id (RptDaMap row)
-    │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → un-nests DaRec JSON array pages into individual source-row JSON objects in RptStageDa
-    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT stage_ds_json_tx FROM RptStageDa WHERE map_id=X)
+    │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → copies DaRec's pages into RptStageDa verbatim (one RptStageDa row per page, not per record — batched like DaRec)
+    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT row_json AS stage_ds_json_tx FROM RptStageDa CROSS JOIN UNNEST(...) AS row_json WHERE map_id=X) — un-nests RptStageDa's pages back into individual records on read, so report SQL still sees one row per record
     │
     ├─ Phase 4: Transformation chain
     │   └─ for each ReportTransformStep (by step_order):
@@ -861,7 +865,7 @@ inject it into `ReportPipelineFactory` via constructor.
 | "Loaded rows from any source" | `DaRec` | `DataSourceRecordSinkTransform` (Beam workers); also `PostDownloadFinalizeTransform` — replaces a run's own rows once a validated `data_transform_query` applies, and deletes a superseded run's rows under `--manualOverrun` | `BigQueryDataSourceRecordAdapter` (BnC validation), `ReportCheckpointAdapter` (staging into RptStageDa) |
 | "Start/end of a REPORT_PROCESSING run" | `RptRefer` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | — |
 | "Report run → datasource mapping" | `RptDaMap` | `ReportPipelineFactory` via `ReportCheckpointAdapter` | `ReportCheckpointAdapter.clearStagedData()` |
-| "Staged datasource rows for current report" | `RptStageDa` | `ReportCheckpointAdapter.stageFromDaRec()` | Transform chain (as subquery alias) |
+| "Staged datasource pages for current report" | `RptStageDa` | `ReportCheckpointAdapter.stageFromDaRec()` — one row per `DaRec` page, batched, not per record | Transform chain (as subquery alias, un-nested back to individual records by `stagedDataSubquery()`) |
 | "One row per output step of a report" | `RptOutput` | `ReportPipelineFactory` via `ReportCheckpointAdapter.writeOutput()` | — |
 
 DATA_SOURCE_DOWNLOAD lifecycle: `LOADING → COMPLETED / FAILED_BNC / FAILED_TRANSFORM / FAILED`.

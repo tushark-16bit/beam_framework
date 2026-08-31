@@ -71,8 +71,11 @@ public interface ReportCheckpointAdapter {
     // ── RptStageDa ───────────────────────────────────────────────────────────
 
     /**
-     * Copies all rows for {@code daId} from {@code DaRec} into {@code RptStageDa}
-     * under the given {@code mapId}. Runs as a BQ DML INSERT…SELECT job.
+     * Copies all pages for {@code daId} from {@code DaRec} into {@code RptStageDa} under the
+     * given {@code mapId}, unchanged — one {@code RptStageDa} row per {@code DaRec} page, not
+     * one row per source record. Runs as a BQ DML INSERT…SELECT job. See
+     * {@link #stagedDataSubquery(long)} for where those pages get un-nested back into
+     * individual records for report SQL.
      *
      * @param mapId FK to {@code RptDaMap.map_id}
      * @param daId  the {@code DaRefer.da_id} whose {@code DaRec} rows to stage
@@ -80,9 +83,11 @@ public interface ReportCheckpointAdapter {
     void stageFromDaRec(long mapId, long daId);
 
     /**
-     * Returns the BQ subquery that exposes staged data for {@code mapId}.
-     * The result is used as the alias value in the transform chain SQL:
-     * {@code (SELECT stage_ds_json_tx FROM RptStageDa WHERE map_id = X)}.
+     * Returns the BQ subquery that exposes staged data for {@code mapId} — one row per
+     * individual source record, column {@code stage_ds_json_tx}, exactly as report SQL has
+     * always expected. Internally un-nests {@code RptStageDa}'s paginated storage (see
+     * {@link #stageFromDaRec(long, long)}) on every read; callers never see or handle
+     * pagination.
      */
     String stagedDataSubquery(long mapId);
 

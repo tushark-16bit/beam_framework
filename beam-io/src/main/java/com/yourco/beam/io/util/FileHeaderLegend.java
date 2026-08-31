@@ -14,12 +14,14 @@ import java.util.List;
  * letter to its real header name. Headerless FILE pages, and all BQ/API pages (which never have
  * letter-keyed columns or a legend), keep the original flat {@code [{...},{...},...]} shape.
  *
- * <p>{@link #dataArrayExpr} extracts the row array from {@code row_da_json_tx} regardless of
- * which of the two shapes a given page uses, so every DaRec reader (row counts, BnC sums, the
- * {@code data} CTE always prepended to {@code data_transform_query}, REPORT_PROCESSING staging)
- * can use one SQL pattern uniformly — no per-source-type branching, and no explicit legend
- * exclusion, since {@code DataHeaders} is structurally separate from {@code Data} and never gets
- * unnested with it.
+ * <p>{@link #dataArrayExpr} extracts the row array from a page's JSON column regardless of
+ * which of the two shapes it uses, so every page reader (DaRec row counts, BnC sums, the
+ * {@code data} CTE always prepended to {@code data_transform_query}, and — since
+ * {@code RptStageDa} copies {@code DaRec}'s pages verbatim rather than un-nesting them at write
+ * time — {@code ReportCheckpointAdapter.stagedDataSubquery()} reading {@code RptStageDa} back out
+ * for report SQL) can use one SQL pattern uniformly — no per-source-type branching, and no
+ * explicit legend exclusion, since {@code DataHeaders} is structurally separate from {@code Data}
+ * and never gets unnested with it.
  */
 public final class FileHeaderLegend {
 

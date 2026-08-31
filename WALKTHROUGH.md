@@ -265,8 +265,8 @@ sequenceDiagram
             RPF->>RptAdapter: addDaMapping(rpt_id, da_id)
             RptAdapter-->>RPF: map_id (row inserted into RptDaMap)
             RPF->>RptAdapter: stageFromDaRec(map_id, da_id)
-            RptAdapter->>DaRec: INSERT INTO RptStageDa SELECT ... FROM DaRec WHERE da_id=?
-            RPF->>RPF: aliasRegistry.put(alias, stagedDataSubquery(map_id))
+            RptAdapter->>DaRec: INSERT INTO RptStageDa SELECT ... FROM DaRec WHERE da_id=? (page copy, one RptStageDa row per DaRec page)
+            RPF->>RPF: aliasRegistry.put(alias, stagedDataSubquery(map_id)) — subquery un-nests RptStageDa's pages back into individual records
         end
     end
 
@@ -696,7 +696,7 @@ erDiagram
 
 **RptRefer** — `sta_cd` values: `LOADING` | `COMPLETED` | `FAILED`. Written and updated by `REPORT_PROCESSING` only.
 
-**RptStageDa** — transient. Rows are inserted from `DaRec` before the transform chain runs and deleted after all outputs are exported. They exist only for the duration of one report execution.
+**RptStageDa** — transient. Rows are copied from `DaRec` before the transform chain runs and deleted after all outputs are exported. They exist only for the duration of one report execution. Batched like `DaRec`: one `RptStageDa` row per `DaRec` page (≤250 records), not one row per source record — `stagedDataSubquery()` un-nests those pages back into individual records when a transform's `{alias}` resolves, so this batching is invisible to every `query_template`.
 
 ---
 

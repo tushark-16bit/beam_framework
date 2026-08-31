@@ -378,8 +378,8 @@ ul.plain li{margin-bottom:6px;}
                 <td><code>ReportPipelineFactory</code></td><td>—</td></tr>
             <tr><td><code>RptDaMap</code></td><td>Report run → datasource mapping</td>
                 <td><code>ReportPipelineFactory</code></td><td>used to clear staged data afterward</td></tr>
-            <tr><td><code>RptStageDa</code></td><td>Un-nested, per-row staged data — transient</td>
-                <td><code>stageFromDaRec()</code></td><td>the transform chain, as an alias subquery; then deleted</td></tr>
+            <tr><td><code>RptStageDa</code></td><td>Staged data, batched like DaRec (one row per page) — transient</td>
+                <td><code>stageFromDaRec()</code></td><td>the transform chain, as an alias subquery un-nested back to individual records by <code>stagedDataSubquery()</code>; then deleted</td></tr>
             <tr><td><code>RptOutput</code></td><td>One row per output step produced</td>
                 <td><code>ReportPipelineFactory</code></td><td>—</td></tr>
           </tbody>
@@ -534,9 +534,13 @@ ul.plain li{margin-bottom:6px;}
           <div class="step-title">Stage each datasource's rows</div>
           <div class="step-body">For each ref: <code>fetchLatestCompletedDaId()</code> →
           <code>addDaMapping()</code> (a <code>RptDaMap</code> row) →
-          <code>stageFromDaRec(mapId, daId)</code>, which un-nests every <code>DaRec</code> page for that
-          <code>da_id</code> into individual rows in <code>RptStageDa</code>. This always runs — it's plain,
-          unconditional SQL, not something an operator's query can opt out of or forget.</div>
+          <code>stageFromDaRec(mapId, daId)</code>, which copies every <code>DaRec</code> page for that
+          <code>da_id</code> into <code>RptStageDa</code> verbatim — one <code>RptStageDa</code> row per page,
+          batched like <code>DaRec</code> itself, not one row per record. The alias registered for this
+          datasource (<code>stagedDataSubquery()</code>) un-nests those pages back into individual records on
+          every read, so a transform's SQL always sees one row per record regardless — this batching-and-unnest
+          always runs, it's plain, unconditional SQL, not something an operator's query can opt out of, forget,
+          or even needs to know about.</div>
         </div>
         <div class="step driver" data-n="5">
           <div class="step-title">Run the transformation chain</div>
@@ -566,10 +570,12 @@ ul.plain li{margin-bottom:6px;}
 
       <div class="callout">
         <span class="lbl">Where does the report's SQL actually read from?</span>
-        <p>Never <code>DaRec</code> directly. By the time the transform chain runs, staging has already turned
-        every paginated JSON page into one flat row per source record in <code>RptStageDa</code> — the chain's
-        SQL does <code>JSON_VALUE(stage_ds_json_tx, '$.field')</code> against that, never against the raw,
-        still-paginated download.</p>
+        <p>Never <code>DaRec</code> directly. <code>RptStageDa</code> itself is batched exactly like
+        <code>DaRec</code> — one row per page, not per record — but <code>stagedDataSubquery()</code> un-nests
+        those pages back into individual records the moment a transform's <code>{alias}</code> is substituted,
+        so the chain's SQL always does <code>JSON_VALUE(stage_ds_json_tx, '$.field')</code> against a flat,
+        one-row-per-record view — never against a raw page, and never against the still-paginated download
+        directly.</p>
       </div>
     </section>
 
@@ -703,6 +709,28 @@ ul.plain li{margin-bottom:6px;}
           <div class="col cost"><div class="h">Cost</div><ul>
             <li>The CTE always computes, even if a query somehow never references <code>data</code> — BigQuery
               optimizes this away in practice, so it's a cost mostly on paper</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
+        <div class="tocard-head"><h4>RptStageDa batched like DaRec — unnest moved from write to read</h4><span class="verdict">recent change, this session</span></div>
+        <p>Used to be: <code>stageFromDaRec()</code> un-nested every DaRec page into individual RptStageDa rows at
+        write time — one RptStageDa row per source record. Now: it copies DaRec's pages across verbatim (one
+        RptStageDa row per page), and <code>stagedDataSubquery()</code> un-nests them back into individual
+        records on every read instead.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>Same ~250x reduction in streaming-insert/DML volume on RptStageDa that DaRec's own pagination
+              already gets — cheaper and faster staging</li>
+            <li>Zero report-facing change: <code>{alias}</code> still resolves to one row per record, column
+              <code>stage_ds_json_tx</code> — no <code>query_template</code> anywhere has to change, because the
+              unnest lives entirely inside <code>BigQueryReportCheckpointAdapter</code>, not in the alias
+              resolution layer or the operator's SQL</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>Ad-hoc diagnostic queries against RptStageDa change meaning — <code>SELECT COUNT(*)</code> now
+              counts pages, not records, so debugging by eye needs to remember to <code>UNNEST</code> first</li>
           </ul></div>
         </div>
       </div>

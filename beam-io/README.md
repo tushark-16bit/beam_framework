@@ -52,11 +52,15 @@ io/checkpoint/
                                           Has a String-tableRef constructor for in-worker use (DoFn @Setup).
     ReportCheckpointAdapter             — interface for 4 report tables: RptRefer (createCheckpoint/updateStatus/isCompleted), RptDaMap (addDaMapping), RptStageDa (stageFromDaRec/stagedDataSubquery/clearStagedData), RptOutput (writeOutput).
     BigQueryReportCheckpointAdapter     — BQ DML impl for all 4 report tables. All timestamps DATETIME. Stage_id generated via MAX+ROW_NUMBER() OVER().
-                                          stageFromDaRec uses CROSS JOIN UNNEST(FileHeaderLegend.dataArrayExpr(...)) to un-nest
-                                          DaRec pages into individual source-row JSON objects in stage_ds_json_tx — this handles
-                                          both a plain array page and a FILE source's {"Data":[...],"DataHeaders":[...]} page.
-                                          The header legend, when present, lives in the separate DataHeaders array, so it's
-                                          never unnested and never staged into a report's input data.
+                                          stageFromDaRec copies DaRec's pages into RptStageDa unchanged — one RptStageDa row per
+                                          DaRec page (batched, like DaRec itself), not one row per source record. stagedDataSubquery()
+                                          un-nests those pages back into individual source-row JSON objects on read, via
+                                          CROSS JOIN UNNEST(FileHeaderLegend.dataArrayExpr(...)) — aliasing the result back to
+                                          stage_ds_json_tx — so report SQL always sees one row per record regardless of the
+                                          underlying batching, and this handles both a plain array page and a FILE source's
+                                          {"Data":[...],"DataHeaders":[...]} page. The header legend, when present, lives in the
+                                          separate DataHeaders array, so it's never unnested and never staged into a report's
+                                          input data.
 
 io/records/
     DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field), deleteRecords(daId)

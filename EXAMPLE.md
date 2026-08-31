@@ -104,12 +104,14 @@ CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptDaMap` (
   lst_updt_ts DATETIME  NOT NULL
 );
 
--- RptStageDa: transient staging table — DaRec pages are un-nested into individual source rows
--- here before transforms, then deleted via clearStagedData() at the end of every successful run.
+-- RptStageDa: transient staging table — DaRec's pages are copied here verbatim (one RptStageDa
+-- row per DaRec page, batched like DaRec itself, not one row per source record), then deleted via
+-- clearStagedData() at the end of every successful run. stagedDataSubquery() un-nests pages back
+-- into individual source-row JSON objects on read, so this batching is invisible to report SQL.
 CREATE TABLE IF NOT EXISTS `my-gcp-project.pipeline_metadata.RptStageDa` (
-  stage_id        INT64     NOT NULL,   -- surrogate PK (base + ROW_NUMBER per bulk INSERT)
+  stage_id        INT64     NOT NULL,   -- surrogate PK (base + ROW_NUMBER per bulk INSERT), one per page
   map_id          INT64     NOT NULL,   -- FK → RptDaMap.map_id
-  stage_ds_json_tx STRING,              -- one source row's JSON (un-nested from a DaRec page's array)
+  stage_ds_json_tx STRING,              -- one DaRec page's JSON, copied verbatim (≤250 records)
   query_config_tx  STRING,              -- JSON metadata: {da_id, map_id}
   load_dt         DATE      NOT NULL,
   lst_updt_ts     DATETIME  NOT NULL
@@ -361,8 +363,8 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 3 | Run preprocessing steps in `step_order` (BQ_QUERY or API_ENRICHMENT), if any | — |
 | 4 | For each required datasource ref: `isCompleted(srce_nm, 202401)` via DaRefer — fail if not COMPLETED | — |
 | 5 | For each datasource ref: `fetchLatestCompletedDaId()` → `addDaMapping(rpt_id, da_id)` → RptDaMap row | — |
-| 6 | `stageFromDaRec(map_id, da_id)` — CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(row_da_json_tx)) to un-nest every DaRec page for that da_id into individual source rows, bulk-inserted into RptStageDa (one stage_ds_json_tx row per source row, page boundaries invisible from here on) | — |
-| 7 | Register alias: `raw_trades` → `(SELECT stage_ds_json_tx FROM RptStageDa WHERE map_id=X)` | — |
+| 6 | `stageFromDaRec(map_id, da_id)` — copies every DaRec page for that da_id into RptStageDa verbatim (one RptStageDa row per DaRec page, batched like DaRec itself — not one row per source record) | — |
+| 7 | Register alias: `raw_trades` → `stagedDataSubquery(map_id)`, which un-nests RptStageDa's pages back into individual source rows on read (`SELECT row_json AS stage_ds_json_tx FROM RptStageDa CROSS JOIN UNNEST(...) AS row_json WHERE map_id=X`) — page boundaries invisible from here on, same as before batching | — |
 | 8 | Run transform chain in `step_order`: resolve alias + period tokens → `runQueryToTable(sql, output_bq_table)` | — |
 | 9 | Route each output: BQ export job → GCS CSV or JSON | — |
 | 10 | `writeOutput(rpt_id, outpt_cd, output_ds, ...)` — inserts one RptOutput row per output step | — |
