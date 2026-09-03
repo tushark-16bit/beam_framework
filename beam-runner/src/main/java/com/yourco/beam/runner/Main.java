@@ -1,5 +1,6 @@
 package com.yourco.beam.runner;
 
+import com.yourco.beam.exception.DataSourceDownloadException;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -51,6 +52,19 @@ import org.slf4j.LoggerFactory;
  *        ├─ Send email (GCS outputs as attachments, if configured)
  *        └─ UPDATE RptRefer sta_cd → COMPLETED / FAILED
  * </pre>
+ *
+ * <h2>Failure handling</h2>
+ * {@code main()} wraps the entire process-type dispatch in one catch. Each factory
+ * ({@code DataSourcePipelineFactory}, {@code ReportPipelineFactory}, {@code PipelineSequenceFactory})
+ * has already classified its own failure into
+ * {@link com.yourco.beam.exception.DataSourceDownloadException},
+ * {@link com.yourco.beam.exception.ReportProcessingException}, or
+ * {@link com.yourco.beam.exception.PipelineException} by the time it reaches here — see each
+ * class's own javadoc for exactly where and how. {@link FailureNotifier} picks a notification
+ * template by exception type (a default template covers anything else — e.g. the legacy
+ * {@code PipelineFactory} path, or a failure before any factory even ran), always logs it, and —
+ * only if {@code --opsFailureEmail} is set and an {@code EmailSendUtility} is available — emails
+ * it. The original exception is always rethrown afterward, unchanged.
  */
 public final class Main {
 
@@ -67,10 +81,22 @@ public final class Main {
         LOG.info("Process type: {}", options.getProcessType());
         LOG.info("Job run ID:   {}", options.getJobRunId());
 
-        switch (options.getProcessType()) {
-            case DATA_SOURCE_DOWNLOAD -> runDataSourceDownload(options);
-            case REPORT_PROCESSING    -> runReportProcessing(options);
-            case PIPELINE             -> runPipelineSequence(options);
+        try {
+            switch (options.getProcessType()) {
+                case DATA_SOURCE_DOWNLOAD -> runDataSourceDownload(options);
+                case REPORT_PROCESSING    -> runReportProcessing(options);
+                case PIPELINE             -> runPipelineSequence(options);
+            }
+        } catch (Exception e) {
+            // Single last-resort catch: DataSourcePipelineFactory/ReportPipelineFactory/
+            // PipelineSequenceFactory have already classified their own failures into
+            // DataSourceDownloadException/ReportProcessingException/PipelineException by the time
+            // they reach here — FailureNotifier picks the matching template by type, plus a
+            // default template for anything else (e.g. the legacy PipelineFactory path, or a
+            // failure before any of those factories even ran). Rethrown unchanged afterward so
+            // the process still exits non-zero exactly as it did before this handler existed.
+            FailureNotifier.notify(options, e);
+            throw e;
         }
     }
 
@@ -92,7 +118,9 @@ public final class Main {
             LOG.info("Pipeline finished with state: {}", result.getState());
         } catch (Exception e) {
             LOG.error("Pipeline run threw exception: {}", e.getMessage(), e);
-            throw new RuntimeException("DATA_SOURCE_DOWNLOAD pipeline failed", e);
+            DataSourceDownloadException.Reason reason = DataSourceFailureClassifier.classify(e);
+            throw DataSourceDownloadException.wrap(reason, options.getDatasourceName(),
+                options.getSubprocessName(), options.getPeriodId(), e);
         }
     }
 

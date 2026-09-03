@@ -1,5 +1,6 @@
 package com.yourco.beam.runner;
 
+import com.yourco.beam.exception.ReportProcessingException;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.checkpoint.BigQueryReportCheckpointAdapter;
 import com.yourco.beam.io.checkpoint.DataSourceCheckpointAdapter;
@@ -108,7 +109,11 @@ public final class ReportPipelineFactory {
     /**
      * Executes the full report run for the given options.
      *
-     * @throws RuntimeException if any phase fails (status is marked FAILED before throwing)
+     * @throws ReportProcessingException if any phase fails (status is marked FAILED before
+     *         throwing). {@link ReportProcessingException#reason} identifies which phase — the
+     *         {@code currentReason} local below is updated right before each phase runs, so the
+     *         catch block always wraps with the reason matching where the failure actually
+     *         occurred, not a generic catch-all.
      */
     public void execute(FrameworkOptions options) {
         String reportName       = options.getReportName();
@@ -120,7 +125,13 @@ public final class ReportPipelineFactory {
 
         // ── 1. Load config from BigQuery ──────────────────────────────────────
         BigQueryReportRepository repo = new BigQueryReportRepository(options);
-        ReportConfig config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
+        ReportConfig config;
+        try {
+            config = repo.fetchReportConfig(reportName, reportSubprocess, periodId);
+        } catch (Exception e) {
+            throw ReportProcessingException.wrap(ReportProcessingException.Reason.CONFIG_NOT_FOUND,
+                reportName, reportSubprocess, periodId, e);
+        }
 
         // ── 2. RptRefer: LOADING ──────────────────────────────────────────────
         ReportCheckpointAdapter      reportAdapter = new BigQueryReportCheckpointAdapter(options);
@@ -129,24 +140,30 @@ public final class ReportPipelineFactory {
         LOG.info("REPORT_PROCESSING RptRefer LOADING row created: rpt_id={}", rptId);
 
         int outputCount = 0;
+        ReportProcessingException.Reason currentReason = ReportProcessingException.Reason.UNKNOWN;
         try {
             // ── 3. Preprocessing ──────────────────────────────────────────────
+            currentReason = ReportProcessingException.Reason.PREPROCESSING_FAILURE;
             if (config.hasPreprocessing()) {
                 runPreprocessing(config, options);
             }
 
             // ── 4. Datasource availability check ──────────────────────────────
+            currentReason = ReportProcessingException.Reason.DATASOURCE_UNAVAILABLE;
             checkDatasourceAvailability(config, dsAdapter);
 
             // ── 5. Build alias registry (stage DaRec rows into RptStageDa) ───
+            currentReason = ReportProcessingException.Reason.STAGING_FAILURE;
             Map<String, String> aliasRegistry = buildAliasRegistry(config, rptId, dsAdapter, reportAdapter);
 
             // ── 6. Transformation chain ───────────────────────────────────────
+            currentReason = ReportProcessingException.Reason.TRANSFORM_FAILURE;
             if (config.hasTransforms()) {
                 runTransformChain(config, options, aliasRegistry);
             }
 
             // ── 6b. Write final result to per-report BQ table ─────────────────
+            currentReason = ReportProcessingException.Reason.OUTPUT_FAILURE;
             if (config.hasOutputBqTable()) {
                 writeOutputBqTable(config, aliasRegistry);
             }
@@ -168,6 +185,7 @@ public final class ReportPipelineFactory {
             LOG.info("Staged data cleared for rpt_id={}", rptId);
 
             // ── 10. Send email (GCS outputs only, as attachments) ─────────────
+            currentReason = ReportProcessingException.Reason.EMAIL_FAILURE;
             if (config.hasEmail()) {
                 List<ExportedFile> attachments = outputResults.stream()
                     .filter(ReportOutputSinkRouter.OutputResult::hasAttachment)
@@ -180,10 +198,14 @@ public final class ReportPipelineFactory {
             reportAdapter.updateStatus(rptId, ReportCheckpoint.STA_COMPLETED);
             LOG.info("REPORT_PROCESSING completed: {} output(s) written", outputCount);
 
-        } catch (Exception e) {
-            LOG.error("REPORT_PROCESSING failed: {}", e.getMessage(), e);
+        } catch (ReportProcessingException e) {
+            LOG.error("REPORT_PROCESSING failed ({}): {}", e.reason, e.getMessage(), e);
             reportAdapter.updateStatus(rptId, ReportCheckpoint.STA_FAILED);
-            throw new RuntimeException("REPORT_PROCESSING failed for report=" + reportName, e);
+            throw e;
+        } catch (Exception e) {
+            LOG.error("REPORT_PROCESSING failed during phase '{}': {}", currentReason, e.getMessage(), e);
+            reportAdapter.updateStatus(rptId, ReportCheckpoint.STA_FAILED);
+            throw ReportProcessingException.wrap(currentReason, reportName, reportSubprocess, periodId, e);
         }
     }
 

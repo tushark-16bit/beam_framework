@@ -609,8 +609,8 @@ ul.plain li{margin-bottom:6px;}
         <div class="step" data-n="3">
           <div class="step-title">Submit, wait, then re-check</div>
           <div class="step-body">After <code>waitUntilFinish()</code>, each ref's checkpoint is re-checked. An
-          incomplete <em>required</em> datasource throws <code>PipelineAbortedException</code> and the whole run
-          stops before the report ever starts. An incomplete <em>optional</em> one just logs a warning.</div>
+          incomplete <em>required</em> datasource throws <code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code> and
+          the whole run stops before the report ever starts. An incomplete <em>optional</em> one just logs a warning.</div>
         </div>
         <div class="step driver" data-n="4">
           <div class="step-title">Run the report, unchanged</div>
@@ -738,6 +738,38 @@ ul.plain li{margin-bottom:6px;}
       </div>
 
       <div class="tocard">
+        <div class="tocard-head"><h4>Typed exception per process type, classified before Main ever sees it</h4><span class="verdict">recent change, this session</span></div>
+        <p>Used to be: a plain <code>RuntimeException</code>, three separately-shaped nested exception
+        classes across two factories (<code>PipelineConfigurationException</code> defined twice,
+        <code>PipelineAbortedException</code> once), and no notification path at all for
+        REPORT_PROCESSING/PIPELINE failures — only DATA_SOURCE_DOWNLOAD had one, and only for
+        failures caught inside <code>PostDownloadFinalizeTransform</code>. Now: three exceptions —
+        <code>DataSourceDownloadException</code>, <code>ReportProcessingException</code>,
+        <code>PipelineException</code> — one per process type, each carrying a <code>Reason</code> enum
+        and identifying fields, classified at the point of failure by the factory that owns that
+        process type.</p>
+        <div class="pro-con">
+          <div class="col win"><div class="h">Gained</div><ul>
+            <li>One consistent global failure path — <code>Main</code> catches once, templates by
+              type, always logs, optionally emails via the same <code>EmailSendUtility</code>
+              already built for report-completion email</li>
+            <li>PIPELINE's composition rule is explicit and enforced by the type system: a
+              <code>DataSourceDownloadException</code>/<code>ReportProcessingException</code> from
+              either composed phase passes through unchanged; anything else becomes
+              <code>PipelineException</code> — no accidental double-wrapping</li>
+          </ul></div>
+          <div class="col cost"><div class="h">Cost</div><ul>
+            <li>Two classification techniques, not one — <code>ReportPipelineFactory</code> tracks
+              a <code>currentReason</code> local per phase (driver-JVM, straightforward), while
+              <code>DataSourceDownloadException</code>'s reason for a Beam-job failure needs
+              <code>DataSourceFailureClassifier</code> to walk the cause chain in <code>beam-runner</code>
+              — <code>beam-core</code> can't <code>instanceof</code>-check a <code>beam-io</code> type
+              like <code>FileSourceAdapter.FileSourceException</code> directly</li>
+          </ul></div>
+        </div>
+      </div>
+
+      <div class="tocard">
         <div class="tocard-head"><h4>--customParamsJson wins on collision</h4><span class="verdict">recent addition</span></div>
         <p>A CLI-supplied JSON blob merges on top of a step's stored <code>query_params_json</code>, and beats it
         on any key collision.</p>
@@ -843,10 +875,11 @@ ul.plain li{margin-bottom:6px;}
             <tr><td>Required headers present</td><td><code>ValidationConfig</code> / file parsing</td><td><code>required_headers_json</code></td><td>configured validation failure path</td></tr>
             <tr><td>Declared schema type strictness</td><td><code>BigQuerySchemaUtils.toBeamSchema()</code></td><td><code>bq_schema_json</code> present</td><td>run fails immediately — a bad type name or mismatched value throws, naming the column</td></tr>
             <tr><td>Datasource availability (required)</td><td><code>ReportPipelineFactory</code></td><td><code>ReportDatasourceRef.required</code></td><td><code>IllegalStateException</code>, run aborts before staging</td></tr>
-            <tr><td>Datasource availability (PIPELINE)</td><td><code>PipelineSequenceFactory</code></td><td>same <code>required</code> flag</td><td><code>PipelineAbortedException</code> if required, warning-only if optional</td></tr>
+            <tr><td>Datasource availability (PIPELINE)</td><td><code>PipelineSequenceFactory</code></td><td>same <code>required</code> flag</td><td><code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code> if required, warning-only if optional</td></tr>
             <tr><td>Config row exists</td><td><code>fetchSourceConfigs()</code> / <code>fetchReportConfig()</code></td><td>always-on</td><td>throws immediately — no separate "is it there" check needed</td></tr>
             <tr><td>Idempotency / skip-already-done</td><td><code>isCompleted(srceNm, perId)</code></td><td>DaRefer status</td><td>source is skipped, not re-run — bypassable via <code>--manualOverrun</code></td></tr>
             <tr><td>Atomic replace never partial</td><td><code>replaceStoredRows()</code></td><td>always-on when a transform applies</td><td>whole transaction rolls back; retried up to ~30s, then throws</td></tr>
+            <tr><td>Failure classified by type before reaching Main</td><td>each factory's own catch (see §07)</td><td>always-on</td><td><code>DataSourceDownloadException</code>/<code>ReportProcessingException</code>/<code>PipelineException</code>, each with a <code>Reason</code> — <code>Main</code>'s <code>FailureNotifier</code> templates and (if <code>--opsFailureEmail</code> is set) emails it, then always rethrows</td></tr>
             <tr><td>Serialization rules (DoFns, TupleTags)</td><td>convention, not code</td><td>code review / <code>CLAUDE.md</code></td><td><em>not enforced by the compiler</em> — violating it fails at runtime on a worker, often cryptically</td></tr>
             <tr><td>Docs stay in sync with code</td><td>git pre-commit hook</td><td>always-on for staged <code>.java</code> files</td><td>commit is blocked unless a README/CLAUDE.md is staged alongside</td></tr>
           </tbody>

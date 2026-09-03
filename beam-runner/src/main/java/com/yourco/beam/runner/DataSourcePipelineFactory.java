@@ -1,5 +1,6 @@
 package com.yourco.beam.runner;
 
+import com.yourco.beam.exception.DataSourceDownloadException;
 import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.sink.DataSourceRecordSinkTransform;
@@ -61,9 +62,15 @@ public final class DataSourcePipelineFactory {
         validateRequiredParameters(options);
 
         BigQuerySourceConfigRepository bqRepo = new BigQuerySourceConfigRepository(options);
-        List<SourceConfig> sourceConfigs = bqRepo.fetchSourceConfigs(
-            options.getParentId(), options.getDatasourceName(),
-            options.getSubprocessName(), options.getPeriodId());
+        List<SourceConfig> sourceConfigs;
+        try {
+            sourceConfigs = bqRepo.fetchSourceConfigs(
+                options.getParentId(), options.getDatasourceName(),
+                options.getSubprocessName(), options.getPeriodId());
+        } catch (Exception e) {
+            throw DataSourceDownloadException.wrap(DataSourceDownloadException.Reason.INVALID_INPUT,
+                options.getDatasourceName(), options.getSubprocessName(), options.getPeriodId(), e);
+        }
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
 
         return assembleForConfigs(options, sourceConfigs);
@@ -84,6 +91,23 @@ public final class DataSourcePipelineFactory {
      * {@code jobRunId} exactly like {@link #assemble} does, if the caller hasn't already.
      */
     public Pipeline assembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
+        try {
+            return doAssembleForConfigs(options, sourceConfigs);
+        } catch (DataSourceDownloadException e) {
+            throw e;
+        } catch (Exception e) {
+            String names = sourceConfigs.stream().map(c -> c.datasourceName).distinct()
+                .collect(Collectors.joining(","));
+            int periodId = sourceConfigs.isEmpty() ? options.getPeriodId() : sourceConfigs.get(0).periodId;
+            DataSourceDownloadException.Reason reason =
+                (e instanceof IllegalArgumentException || e instanceof IllegalStateException)
+                ? DataSourceDownloadException.Reason.INVALID_INPUT
+                : DataSourceDownloadException.Reason.CONNECTIVITY_FAILURE;
+            throw DataSourceDownloadException.wrap(reason, names, null, periodId, e);
+        }
+    }
+
+    private Pipeline doAssembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
         String jobRunId = options.getJobRunId();
         if (jobRunId == null || jobRunId.isBlank()) {
             jobRunId = UUID.randomUUID().toString();
@@ -289,10 +313,14 @@ public final class DataSourcePipelineFactory {
 
     private static void validateRequiredParameters(FrameworkOptions options) {
         if (options.getDatasourceName() == null || options.getDatasourceName().isBlank()) {
-            throw new PipelineConfigurationException("--datasourceName is required for DATA_SOURCE_DOWNLOAD");
+            throw new DataSourceDownloadException(DataSourceDownloadException.Reason.INVALID_INPUT,
+                options.getDatasourceName(), options.getSubprocessName(), options.getPeriodId(),
+                "--datasourceName is required for DATA_SOURCE_DOWNLOAD", null);
         }
         if (options.getPeriodId() <= 0) {
-            throw new PipelineConfigurationException("--periodId is required for DATA_SOURCE_DOWNLOAD");
+            throw new DataSourceDownloadException(DataSourceDownloadException.Reason.INVALID_INPUT,
+                options.getDatasourceName(), options.getSubprocessName(), options.getPeriodId(),
+                "--periodId is required for DATA_SOURCE_DOWNLOAD", null);
         }
     }
 
@@ -316,11 +344,5 @@ public final class DataSourcePipelineFactory {
                 return !done;
             })
             .collect(Collectors.toList());
-    }
-
-    // ── Exception type ────────────────────────────────────────────────────────
-
-    public static final class PipelineConfigurationException extends RuntimeException {
-        public PipelineConfigurationException(String message) { super(message); }
     }
 }

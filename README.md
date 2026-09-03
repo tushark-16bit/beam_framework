@@ -563,6 +563,27 @@ and re-downloads, superseding its previous run's `DaRec` rows once complete, sam
 `DATA_SOURCE_DOWNLOAD`. The report itself needs no flag at all: it has no `COMPLETED` guard of
 its own and always re-runs fresh, pipeline or standalone.
 
+## Failure notification (all three process types)
+
+Each process type's own factory (`DataSourcePipelineFactory`, `ReportPipelineFactory`,
+`PipelineSequenceFactory`) classifies its failures into a typed exception —
+`DataSourceDownloadException`, `ReportProcessingException`, `PipelineException` — before it
+reaches `Main`. `Main` wraps the whole run in one catch, picks a notification template matching
+whichever type it received (a default template covers anything else), always logs it, and — only
+if these two flags are set and an `EmailSendUtility` implementation is available — emails it:
+
+```bash
+  --opsFailureEmail=oncall@example.com \
+  --opsFailureFromAddress=pipeline-alerts@example.com
+```
+
+This is a last-resort address, separate from the per-source (`SourceFailureEmailConfig`) and
+per-report (`ReportEmailConfig`) recipients those two factories already use at the point of
+failure — `--opsFailureEmail` is the one that still works even if config never loaded at all. Both
+flags default to empty; leave them unset to skip notification and just log. See
+`beam-runner/README.md`'s "Failure handling" section and `CLAUDE.md` §19 for the full exception
+hierarchy.
+
 ## Built-in transforms reference
 
 | Token | Options | Description |

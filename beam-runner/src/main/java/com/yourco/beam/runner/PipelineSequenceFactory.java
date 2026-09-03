@@ -1,5 +1,8 @@
 package com.yourco.beam.runner;
 
+import com.yourco.beam.exception.DataSourceDownloadException;
+import com.yourco.beam.exception.PipelineException;
+import com.yourco.beam.exception.ReportProcessingException;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.config.BigQueryReportRepository;
 import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
@@ -14,6 +17,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Assembles and runs a {@code PIPELINE} sequence: every datasource the terminal report itself
@@ -38,7 +42,7 @@ import java.util.List;
  *   │     (internally skips any datasource already COMPLETED, same as standalone DATA_SOURCE_DOWNLOAD)
  *   ├─ pipeline.run().waitUntilFinish()
  *   ├─ re-check each declared datasource's checkpoint status
- *   │     unmet + is_required=true    → abort, throw PipelineAbortedException
+ *   │     unmet + is_required=true    → abort, throw PipelineException(ABORTED_REQUIRED_DATASOURCE)
  *   │     unmet + is_required=false   → log, continue
  *   └─ ReportPipelineFactory.execute()                           → terminal report, unchanged
  * </pre>
@@ -46,6 +50,13 @@ import java.util.List;
  * <p>Composes the existing {@link DataSourcePipelineFactory} and {@link ReportPipelineFactory}
  * rather than reimplementing either — this class only decides which sources to batch together
  * and whether an incomplete one should stop the sequence before the report runs.
+ *
+ * <h2>Exception propagation</h2>
+ * {@link com.yourco.beam.exception.DataSourceDownloadException} from the data-source phase or
+ * {@link ReportProcessingException} from the report phase propagate <b>unchanged</b> — they
+ * already carry the specific detail {@code Main} needs. Only a failure of some other type (or
+ * PIPELINE's own config lookup / required-datasource gate) is wrapped in
+ * {@link com.yourco.beam.exception.PipelineException}.
  *
  * <h2>{@code --manualOverrun}</h2>
  * Applies uniformly across the whole sequence, exactly as it does standalone, because the same
@@ -74,8 +85,8 @@ public final class PipelineSequenceFactory {
 
         String reportName       = options.getReportName();
         String reportSubprocess = options.getReportSubprocess();
-        LOG.info("PIPELINE | report={} subprocess={} period={}",
-                 reportName, reportSubprocess, options.getPeriodId());
+        int    periodId         = options.getPeriodId();
+        LOG.info("PIPELINE | report={} subprocess={} period={}", reportName, reportSubprocess, periodId);
         if (options.getManualOverrun()) {
             LOG.info("--manualOverrun=true: every datasource this report declares will bypass "
                      + "its COMPLETED guard and re-download, superseding its previous run once "
@@ -83,17 +94,33 @@ public final class PipelineSequenceFactory {
                      + "step always re-runs regardless (it has no COMPLETED guard of its own).");
         }
 
-        BigQueryReportRepository reportRepo = new BigQueryReportRepository(options);
-        ReportConfig reportConfig = reportRepo.fetchReportConfig(
-            reportName, reportSubprocess, options.getPeriodId());
+        ReportConfig reportConfig;
+        try {
+            BigQueryReportRepository reportRepo = new BigQueryReportRepository(options);
+            reportConfig = reportRepo.fetchReportConfig(reportName, reportSubprocess, periodId);
+        } catch (Exception e) {
+            throw PipelineException.wrap(PipelineException.Reason.CONFIG_NOT_FOUND,
+                reportName, reportSubprocess, periodId, e);
+        }
         List<ReportDatasourceRef> datasources = reportConfig.datasources;
 
-        runDataSourceSteps(options, datasources);
-        checkRequiredDataSources(options, datasources, reportName);
+        // A DataSourceDownloadException, ReportProcessingException, or PipelineException raised
+        // by either composed phase already carries the right specific detail — pass it through
+        // unchanged rather than re-wrapping. Only an exception PIPELINE doesn't recognize gets
+        // wrapped here.
+        try {
+            runDataSourceSteps(options, datasources);
+            checkRequiredDataSources(options, datasources, reportName);
 
-        // reportName/reportSubprocess were never touched — options is exactly what the operator
-        // passed in, same flags REPORT_PROCESSING already reads.
-        new ReportPipelineFactory().execute(options);
+            // reportName/reportSubprocess were never touched — options is exactly what the
+            // operator passed in, same flags REPORT_PROCESSING already reads.
+            new ReportPipelineFactory().execute(options);
+        } catch (DataSourceDownloadException | ReportProcessingException | PipelineException e) {
+            throw e;
+        } catch (Exception e) {
+            throw PipelineException.wrap(PipelineException.Reason.UNKNOWN,
+                reportName, reportSubprocess, periodId, e);
+        }
 
         LOG.info("PIPELINE completed: report={}", reportName);
     }
@@ -106,13 +133,23 @@ public final class PipelineSequenceFactory {
             return;
         }
 
-        BigQuerySourceConfigRepository sourceRepo = new BigQuerySourceConfigRepository(options);
+        String names = datasources.stream().map(ref -> ref.datasourceName).distinct()
+            .collect(Collectors.joining(","));
+
         List<SourceConfig> sourceConfigs = new ArrayList<>();
-        for (ReportDatasourceRef ref : datasources) {
-            sourceConfigs.addAll(sourceRepo.fetchSourceConfigs(
-                options.getParentId(), ref.datasourceName, ref.datasourceSubprocess, options.getPeriodId()));
+        try {
+            BigQuerySourceConfigRepository sourceRepo = new BigQuerySourceConfigRepository(options);
+            for (ReportDatasourceRef ref : datasources) {
+                sourceConfigs.addAll(sourceRepo.fetchSourceConfigs(
+                    options.getParentId(), ref.datasourceName, ref.datasourceSubprocess, options.getPeriodId()));
+            }
+        } catch (Exception e) {
+            throw DataSourceDownloadException.wrap(DataSourceDownloadException.Reason.INVALID_INPUT,
+                names, null, options.getPeriodId(), e);
         }
 
+        // assembleForConfigs() already throws DataSourceDownloadException itself on failure —
+        // let it propagate unchanged, it's already the right type.
         DataSourcePipelineFactory dsFactory = new DataSourcePipelineFactory();
         Pipeline pipeline = dsFactory.assembleForConfigs(options, sourceConfigs);
 
@@ -124,7 +161,8 @@ public final class PipelineSequenceFactory {
             LOG.info("Batched data-source job finished with state: {}", result.getState());
         } catch (Exception e) {
             LOG.error("Batched data-source job threw exception: {}", e.getMessage(), e);
-            throw new RuntimeException("PIPELINE data-source phase failed", e);
+            DataSourceDownloadException.Reason reason = DataSourceFailureClassifier.classify(e);
+            throw DataSourceDownloadException.wrap(reason, names, null, options.getPeriodId(), e);
         }
     }
 
@@ -150,7 +188,8 @@ public final class PipelineSequenceFactory {
         }
 
         if (!unmetRequired.isEmpty()) {
-            throw new PipelineAbortedException(
+            throw new PipelineException(PipelineException.Reason.ABORTED_REQUIRED_DATASOURCE,
+                options.getReportName(), options.getReportSubprocess(), options.getPeriodId(),
                 "PIPELINE aborted before report '" + reportName + "': required data "
                 + "source(s) not COMPLETED: " + unmetRequired);
         }
@@ -160,21 +199,14 @@ public final class PipelineSequenceFactory {
 
     private static void validateRequiredParameters(FrameworkOptions options) {
         if (options.getReportName() == null || options.getReportName().isBlank()) {
-            throw new PipelineConfigurationException("--reportName is required for PIPELINE");
+            throw new PipelineException(PipelineException.Reason.CONFIGURATION_ERROR,
+                options.getReportName(), options.getReportSubprocess(), options.getPeriodId(),
+                "--reportName is required for PIPELINE");
         }
         if (options.getPeriodId() <= 0) {
-            throw new PipelineConfigurationException("--periodId is required for PIPELINE");
+            throw new PipelineException(PipelineException.Reason.CONFIGURATION_ERROR,
+                options.getReportName(), options.getReportSubprocess(), options.getPeriodId(),
+                "--periodId is required for PIPELINE");
         }
-    }
-
-    // ── Exception types ──────────────────────────────────────────────────────
-
-    public static final class PipelineConfigurationException extends RuntimeException {
-        public PipelineConfigurationException(String message) { super(message); }
-    }
-
-    /** Thrown when a required (per the report's own datasources[].is_required) step never completed. */
-    public static final class PipelineAbortedException extends RuntimeException {
-        public PipelineAbortedException(String message) { super(message); }
     }
 }

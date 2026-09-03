@@ -20,6 +20,7 @@ Every other module depends on this one — it defines the language the whole fra
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
 | `model` | `EmailParams`, `EmailAttachment` | Contract types for `beam-io`'s `EmailSendUtility` (REPORT_PROCESSING/PIPELINE completion email). `EmailAttachment` here (fileName, content, type) is a different type from `beam-io`'s own `io.email.EmailAttachment` (used by the older, DATA_SOURCE_DOWNLOAD-only `ReportEmailAdapter`) — don't import both unqualified in the same file |
 | `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces CLI flags for source, sink, transform chain, and retry/DLQ. Typed getters + generic `get(key)` for extensibility. Calendar and per-source failure email are configured elsewhere — see `--calendarName` and `SourceFailureEmailConfig`. |
+| `exception` | `DataSourceDownloadException`, `ReportProcessingException`, `PipelineException` | One typed, unchecked exception per process type, each with a `Reason` enum + identifying fields (`datasourceName`/`reportName` + `periodId`). Thrown by each process type's own factory, caught by `Main`'s `FailureNotifier`. See `beam-runner/README.md` for exactly where each is thrown/caught, and `CLAUDE.md` §19 for the full picture. |
 There is no separate model for the `PIPELINE` process type — it reuses `ReportConfig.datasources`
 (`List<ReportDatasourceRef>`, row above) directly. See `beam-runner/README.md`'s
 `PipelineSequenceFactory` section.
@@ -125,6 +126,19 @@ and which are mandatory, so `PipelineSequenceFactory` reads that directly, runs 
 > Per-source failure-notification email (SMTP host/port/secret, recipients) is separate — it lives
 > on `SourceConfig.failureEmailConfig` (`SourceFailureEmailConfig`, `failure_email_*` keys), not on
 > `PipelineRunConfig`. `--calendarName` is a whole-run CLI flag — see below.
+
+### Global failure notification (all process types)
+```
+--opsFailureEmail=oncall@example.com,platform-team@example.com   # comma-separated; default empty
+--opsFailureFromAddress=pipeline-alerts@example.com               # default empty
+```
+Last-resort recipient for `Main`'s top-level catch — see `beam-runner/README.md`'s
+`FailureNotifier` section and `CLAUDE.md` §19. Distinct from `SourceFailureEmailConfig`
+(per-source) and `ReportEmailConfig` (per-report): those are used at the point of failure, when
+that config is already loaded; `--opsFailureEmail` is the one address that works even when it
+isn't (e.g. a bad `parameter_store` row that never let config load in the first place). Both
+flags default to empty — leave unset to skip email entirely (the failure is still logged).
+Requires an `EmailSendUtility` discoverable via SPI; a no-op, not an error, if none is found.
 
 ### Adding a new flag
 

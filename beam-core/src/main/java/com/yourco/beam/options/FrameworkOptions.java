@@ -285,6 +285,33 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setRptOutputTable(String value);
 
     // =========================================================================
+    // GLOBAL FAILURE NOTIFICATION
+    // Last-resort recipient for Main's top-level catch, used when a run fails before (or
+    // without) any report/source-specific email config being available — e.g. a
+    // DataSourceDownloadException/ReportProcessingException/PipelineException whose own
+    // recipients can't be resolved. Sent via EmailSendUtility (SPI-discovered), same as
+    // ReportPipelineFactory's report-completion email; skipped silently if unset or if no
+    // EmailSendUtility is available.
+    // =========================================================================
+
+    @Description("Fallback recipient for Main's global failure notification — sent via "
+                 + "EmailSendUtility when a run throws DataSourceDownloadException, "
+                 + "ReportProcessingException, PipelineException, or anything else, regardless of "
+                 + "whether any report/source-specific email config was ever loaded. "
+                 + "Comma-separated for multiple recipients. Leave unset to skip notification "
+                 + "entirely (the failure is still logged).")
+    @Default.String("")
+    String getOpsFailureEmail();
+    void setOpsFailureEmail(String value);
+
+    @Description("Sender address for --opsFailureEmail. Only relevant when --opsFailureEmail is "
+                 + "also set; the concrete EmailSendUtility implementation may apply its own "
+                 + "default if this is left blank.")
+    @Default.String("")
+    String getOpsFailureFromAddress();
+    void setOpsFailureFromAddress(String value);
+
+    // =========================================================================
     // RUN DATE + CALENDAR CONFIGURATION
     // Used by report pipelines to determine which business date to process.
     // Consumed by CalendarUtils and DateUtils in beam-utils.

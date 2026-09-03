@@ -110,6 +110,7 @@ sequenceDiagram
     Beam-->>Main: PipelineResult
 
     Main->>Main: result.waitUntilFinish()
+    Note over Main: a waitUntilFinish() failure is classified via<br/>DataSourceFailureClassifier (FILE_NOT_FOUND / INVALID_INPUT /<br/>JOB_FAILURE) and thrown as DataSourceDownloadException
     Main->>DSF: runPostPipelineSteps(finalState, error)
 
     loop for each SourceConfig that ran
@@ -252,7 +253,7 @@ sequenceDiagram
             DataBQ-->>DsAdapter: row or empty
             alt no COMPLETED row
                 RPF->>RptAdapter: updateStatus(rpt_id, FAILED)
-                RPF-->>Main: throws RuntimeException
+                RPF-->>Main: throws ReportProcessingException(DATASOURCE_UNAVAILABLE)
             end
         end
     end
@@ -868,6 +869,8 @@ Where to find things in the source tree:
 | Email interface (DATA_SOURCE_DOWNLOAD failure email) | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
 | Email SMTP implementation | [`beam-runner/.../runner/SmtpReportEmailAdapter.java`](beam-runner/src/main/java/com/yourco/beam/runner/SmtpReportEmailAdapter.java) |
 | Email interface (REPORT_PROCESSING/PIPELINE completion email) | [`beam-io/.../io/email/EmailSendUtility.java`](beam-io/src/main/java/com/yourco/beam/io/email/EmailSendUtility.java) |
+| Exception hierarchy (one per process type) | [`beam-core/.../exception/`](beam-core/src/main/java/com/yourco/beam/exception/) |
+| Failure notification entry point | [`beam-runner/.../runner/FailureNotifier.java`](beam-runner/src/main/java/com/yourco/beam/runner/FailureNotifier.java) |
 
 ---
 
@@ -899,15 +902,16 @@ sequenceDiagram
     end
 
     PSF->>DSF: assembleForConfigs(options, allFetchedConfigs)
-    Note over DSF: skips any datasource already COMPLETED —<br/>same DaRefer skip-logic as standalone<br/>DATA_SOURCE_DOWNLOAD
+    Note over DSF: skips any datasource already COMPLETED —<br/>same DaRefer skip-logic as standalone<br/>DATA_SOURCE_DOWNLOAD. Throws DataSourceDownloadException<br/>directly on a config/assembly failure.
     DSF-->>PSF: Pipeline (ONE job, every declared datasource as its own branch)
     PSF->>PSF: pipeline.run().waitUntilFinish()
+    Note over PSF: a waitUntilFinish() failure is classified via<br/>DataSourceFailureClassifier and thrown as<br/>DataSourceDownloadException — propagates to Main unchanged
 
     loop each declared datasource
         PSF->>CKA: isCompleted(dsName, periodId)
         alt still not COMPLETED
             alt ReportDatasourceRef.required == true
-                PSF-->>Main: throw PipelineAbortedException
+                PSF-->>Main: throw PipelineException(ABORTED_REQUIRED_DATASOURCE)
             else required == false
                 PSF->>PSF: log + continue
             end
@@ -915,7 +919,7 @@ sequenceDiagram
     end
 
     PSF->>RPF: execute(options)
-    Note over RPF: unchanged — options.reportName/reportSubprocess<br/>were never touched. Runs its own<br/>checkDatasourceAvailability() too,<br/>a second line of defense
+    Note over RPF: unchanged — options.reportName/reportSubprocess<br/>were never touched. Runs its own<br/>checkDatasourceAvailability() too,<br/>a second line of defense. A failure here throws<br/>ReportProcessingException, which PSF passes<br/>through to Main unchanged (not re-wrapped).
     RPF-->>PSF: RptRefer COMPLETED / FAILED
     PSF-->>Main: PIPELINE completed
 ```
@@ -932,3 +936,100 @@ than duplicating it.
 — the "never merged" rule from section 4 still holds, no `Flatten.pCollections()` across sources
 — so submitting every declared datasource as one Dataflow job is just `DataSourcePipelineFactory`'s
 existing multi-source behavior (`assembleForConfigs`), reused rather than reinvented.
+
+---
+
+## 17. Exception Hierarchy — Class Structure
+
+```mermaid
+classDiagram
+    class DataSourceDownloadException {
+        <<RuntimeException>>
+        +Reason reason
+        +String datasourceName
+        +String subprocessName
+        +int periodId
+        +static wrap(reason, datasourceName, subprocessName, periodId, cause) DataSourceDownloadException
+    }
+    class DataSourceDownloadException_Reason["Reason"] {
+        <<enumeration>>
+        FILE_NOT_FOUND
+        INVALID_INPUT
+        CONNECTIVITY_FAILURE
+        JOB_FAILURE
+        UNKNOWN
+    }
+
+    class ReportProcessingException {
+        <<RuntimeException>>
+        +Reason reason
+        +String reportName
+        +String reportSubprocess
+        +int periodId
+        +static wrap(reason, reportName, reportSubprocess, periodId, cause) ReportProcessingException
+    }
+    class ReportProcessingException_Reason["Reason"] {
+        <<enumeration>>
+        CONFIG_NOT_FOUND
+        PREPROCESSING_FAILURE
+        DATASOURCE_UNAVAILABLE
+        STAGING_FAILURE
+        TRANSFORM_FAILURE
+        OUTPUT_FAILURE
+        EMAIL_FAILURE
+        UNKNOWN
+    }
+
+    class PipelineException {
+        <<RuntimeException>>
+        +Reason reason
+        +String reportName
+        +String reportSubprocess
+        +int periodId
+        +static wrap(reason, reportName, reportSubprocess, periodId, cause) PipelineException
+    }
+    class PipelineException_Reason["Reason"] {
+        <<enumeration>>
+        CONFIGURATION_ERROR
+        CONFIG_NOT_FOUND
+        ABORTED_REQUIRED_DATASOURCE
+        DATASOURCE_PHASE_FAILURE
+        REPORT_PHASE_FAILURE
+        UNKNOWN
+    }
+
+    DataSourceDownloadException *-- DataSourceDownloadException_Reason
+    ReportProcessingException *-- ReportProcessingException_Reason
+    PipelineException *-- PipelineException_Reason
+
+    class DataSourceFailureClassifier {
+        <<beam-runner, package-private>>
+        +static classify(Throwable) DataSourceDownloadException.Reason
+        note "Walks the cause chain for a\nFileSourceAdapter.FileSourceException\nor IllegalArgumentException — lives\nhere, not on the exception class,\nbecause beam-core can't import\nFileSourceAdapter (beam-io)."
+    }
+
+    class FailureNotifier {
+        <<beam-runner, package-private>>
+        +static notify(options, Throwable) void
+        note "Main's single failure-notification\nentry point. Template by exception\ntype, plus a default for anything\nelse. Always logs; emails only if\n--opsFailureEmail is set and an\nEmailSendUtility is available."
+    }
+
+    DataSourceFailureClassifier ..> DataSourceDownloadException : classifies for
+    FailureNotifier ..> DataSourceDownloadException : templates
+    FailureNotifier ..> ReportProcessingException : templates
+    FailureNotifier ..> PipelineException : templates
+```
+
+**Thrown from:**
+
+| Exception | Factory | Mechanism |
+|---|---|---|
+| `DataSourceDownloadException` | `DataSourcePipelineFactory.assemble()`/`assembleForConfigs()` | direct try/catch around config load and graph assembly |
+| `DataSourceDownloadException` | `Main.runDataSourceDownload()`, `PipelineSequenceFactory.runDataSourceSteps()` | `DataSourceFailureClassifier.classify()` on a `waitUntilFinish()` failure |
+| `ReportProcessingException` | `ReportPipelineFactory.execute()` | a `currentReason` local, updated before each of the 7 phases runs |
+| `PipelineException` | `PipelineSequenceFactory.execute()` | wraps anything that isn't already `DataSourceDownloadException`/`ReportProcessingException` |
+
+**Caught in:** `Main.main()` — one `catch (Exception e)` around the whole process-type dispatch,
+calling `FailureNotifier.notify(options, e)` then rethrowing `e` unchanged. See section 12's
+pattern (two separate contracts for two different callers) — this is the same idea one layer up:
+three separate exception types for three different process types, all converging on one handler.

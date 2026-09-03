@@ -174,6 +174,10 @@ model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtT
 model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDsJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. One row per DaRec page (batched, ≤250 records/JSON array — mirrors DaRec's own pagination), not one row per record; un-nested back to individual records on read by stagedDataSubquery(). Transient staging; deleted after transforms.
 model/RptOutput.java                  RptOutput row: outptCd, rptDt, vsnNo, outputDs, lineReferCd, schedTx, balAm, rptTypeCd, rptId, lstUpdtTs. One per output step.
 model/PipelineRunConfig.java          Per-datasource runtime config from parameter_store. Replaces FrameworkOptions flags for source, sink, transforms, and retry/DLQ. Typed getters (getSourceType, getSinkType, getTransformChain, getPiiFields, getRetryPolicy, getDeadLetterSink, etc.) + generic get(key)/get(key, default) escape hatch. Calendar (--calendarName) and per-source failure email (SourceFailureEmailConfig) are configured elsewhere, not here.
+
+exception/DataSourceDownloadException.java  Thrown for a DATA_SOURCE_DOWNLOAD failure. Reason enum: FILE_NOT_FOUND, INVALID_INPUT, CONNECTIVITY_FAILURE, JOB_FAILURE, UNKNOWN. Carries datasourceName/subprocessName/periodId. Thrown from DataSourcePipelineFactory (config/graph-assembly) and from wherever the job is run+awaited (Main, PipelineSequenceFactory) — see DataSourceFailureClassifier (beam-runner) for how the Reason is picked, since that needs a beam-io type this class can't import.
+exception/ReportProcessingException.java    Thrown for a REPORT_PROCESSING failure. Reason enum: CONFIG_NOT_FOUND, PREPROCESSING_FAILURE, DATASOURCE_UNAVAILABLE, STAGING_FAILURE, TRANSFORM_FAILURE, OUTPUT_FAILURE, EMAIL_FAILURE, UNKNOWN. Carries reportName/reportSubprocess/periodId. Thrown from ReportPipelineFactory.execute(), which tracks which of its own phases was running and wraps with the matching Reason.
+exception/PipelineException.java            Thrown for a PIPELINE failure that isn't already a DataSourceDownloadException or ReportProcessingException — those two propagate through PipelineSequenceFactory.execute() unchanged; this wraps anything else (PIPELINE's own config lookup, the required-datasource gate, or an unrecognized exception type). Reason enum: CONFIGURATION_ERROR, CONFIG_NOT_FOUND, ABORTED_REQUIRED_DATASOURCE, DATASOURCE_PHASE_FAILURE, REPORT_PHASE_FAILURE, UNKNOWN.
 ```
 
 There is no separate PIPELINE config model. `ProcessType.PIPELINE` reuses `ReportConfig.datasources[]`
@@ -300,8 +304,10 @@ META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 ### beam-runner — entry point and orchestrators
 
 ```
-Main.java                       Parses CLI → routes by processType + reportName.
-PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink. fetchBqSchema() fetches typed Schema at driver-JVM time and passes it to SourceRouter.route().
+Main.java                       Parses CLI → routes by processType + reportName. main() wraps the whole dispatch in one catch: calls FailureNotifier.notify(options, e) then rethrows unchanged, so the process still exits non-zero. runDataSourceDownload() classifies its own waitUntilFinish() failure into DataSourceDownloadException via DataSourceFailureClassifier.
+PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform chain → sink. fetchBqSchema() fetches typed Schema at driver-JVM time and passes it to SourceRouter.route(). Does not classify failures into the typed exception hierarchy — Main's FailureNotifier default template covers it.
+DataSourceFailureClassifier.java  Package-private: classify(Throwable) walks a cause chain (Beam wraps a worker-thrown exception before it reaches the driver JVM) for a FileSourceAdapter.FileSourceException (→ FILE_NOT_FOUND) or IllegalArgumentException (→ INVALID_INPUT), else JOB_FAILURE. Lives here, not on DataSourceDownloadException itself, because beam-core can't import FileSourceAdapter (beam-io). Shared by Main and PipelineSequenceFactory.
+FailureNotifier.java            Package-private: notify(options, Throwable) — Main's single failure-notification entry point. Picks a subject/body template by exception type (DataSourceDownloadException/ReportProcessingException/PipelineException, plus a default for anything else), always logs it, and — only if --opsFailureEmail is set and an EmailSendUtility is discoverable via SPI — emails it. Every step inside is try/caught so a notification failure can never mask the original exception.
 DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creates LOADING checkpoint per source in driver JVM, wires RecordSink → PostDownloadFinalizeTransform in graph. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time.
                                 fetchBqSchema() prefers BqFetchConfig.schema (operator-declared bq_schema_json) via
                                 BigQuerySchemaUtils.toBeamSchema() over table-metadata fetch when present — a bad
@@ -315,6 +321,12 @@ DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creat
                                 manualOverrun capture, LOADING checkpoint creation, per-source branch assembly —
                                 so PipelineSequenceFactory can batch several explicitly-fetched SourceConfigs
                                 (one per PIPELINE DATA_SOURCE step) into the same single Dataflow job.
+                                Both assemble() and (the now-public wrapper around the renamed
+                                doAssembleForConfigs()) assembleForConfigs() classify their own failures into
+                                DataSourceDownloadException (INVALID_INPUT for bad config, CONNECTIVITY_FAILURE
+                                otherwise) — an already-typed exception from inside passes through unchanged.
+                                validateRequiredParameters() throws DataSourceDownloadException(INVALID_INPUT)
+                                directly (replaces the old nested PipelineConfigurationException).
 PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional data_transform_query (post-storage SQL transform; a WITH data AS (...) UNNEST(DaRec) CTE is always prepended before it runs, unconditionally — the operator's SQL just references `data` as a plain table; validates output row count before replacing stored rows; original rows untouched on failure), optional BnC sum rules (against transformed rows if applied), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), manualOverrun cleanup (deletes the superseded previous da_id's DaRec rows, only on COMPLETED), failure email. Runs inside Beam worker.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
@@ -328,6 +340,11 @@ ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ
                                 ships no implementation, so it's null unless the deployment's
                                 classpath provides one; sendEmail() logs a warning and skips
                                 sending rather than failing the report when it's null.
+                                execute() wraps every phase (config load, preprocessing, datasource
+                                availability, staging, transform chain, output routing, email) and
+                                throws ReportProcessingException with the Reason matching whichever
+                                phase actually failed — tracked via a local currentReason variable
+                                updated right before each phase runs, not a generic catch-all.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
 SmtpReportEmailAdapter.java     SMTP impl of ReportEmailAdapter. MimeMultipart for attachments.
 PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSubprocess as REPORT_PROCESSING — no
@@ -340,13 +357,20 @@ PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSu
                                 DataSourcePipelineFactory.assembleForConfigs() (skips any already COMPLETED, same
                                 as standalone DATA_SOURCE_DOWNLOAD) — never one job per datasource. After
                                 waitUntilFinish(), re-checks each datasource's checkpoint status; an incomplete one
-                                only aborts the whole PIPELINE (PipelineAbortedException) if its ReportDatasourceRef.required
-                                says so (this IS the report's own datasources[].is_required — nothing separate to
-                                keep in sync). options.reportName/reportSubprocess are never touched — PIPELINE differs
-                                from plain REPORT_PROCESSING only in running missing datasources first instead of
-                                failing immediately; the terminal report then runs via the unchanged
-                                ReportPipelineFactory.execute(). Composes both existing factories rather than
-                                reimplementing either.
+                                only aborts the whole PIPELINE (PipelineException(ABORTED_REQUIRED_DATASOURCE)) if its
+                                ReportDatasourceRef.required says so (this IS the report's own datasources[].is_required
+                                — nothing separate to keep in sync). options.reportName/reportSubprocess are never
+                                touched — PIPELINE differs from plain REPORT_PROCESSING only in running missing
+                                datasources first instead of failing immediately; the terminal report then runs via
+                                the unchanged ReportPipelineFactory.execute(). Composes both existing factories rather
+                                than reimplementing either.
+                                execute() wraps its own body: DataSourceDownloadException/ReportProcessingException/
+                                PipelineException from either composed phase propagate unchanged (already the right
+                                type); anything else — including PIPELINE's own fetchReportConfig() lookup, wrapped
+                                separately as PipelineException(CONFIG_NOT_FOUND) — becomes
+                                PipelineException(UNKNOWN). validateRequiredParameters() throws
+                                PipelineException(CONFIGURATION_ERROR) directly, replacing the old nested
+                                PipelineConfigurationException/PipelineAbortedException classes (removed).
                                 --manualOverrun applies uniformly across the whole sequence with no PIPELINE-specific
                                 code: the same options instance is passed straight into both assembleForConfigs()
                                 and ReportPipelineFactory.execute(), so every declared datasource gets the same
@@ -1008,6 +1032,20 @@ mvn -pl beam-runner exec:java \
     --processType=REPORT_PROCESSING"
 ```
 
+### Global failure notification
+
+Add these two flags to any of the above to get a best-effort email when the run throws — see
+`FailureNotifier` in `beam-runner`, and §7/§9's exception hierarchy:
+
+```bash
+  --opsFailureEmail=oncall@example.com,platform-team@example.com \
+  --opsFailureFromAddress=pipeline-alerts@example.com
+```
+
+Both default to empty — leave unset to skip notification entirely (the failure is still logged).
+Requires an `EmailSendUtility` discoverable via SPI; if none is on the classpath, this is a no-op
+(logged, not an error).
+
 ---
 
 ## 18. Key invariants to preserve
@@ -1024,3 +1062,48 @@ mvn -pl beam-runner exec:java \
 8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
 9. Every code change is accompanied by a README update in the same commit.
 10. A `data_source_checkpoints` LOADING row is created before every source download or report run, and updated to COMPLETED / FAILED_BNC / FAILED after. All data rows go to `data_source_records` as JSON blobs.
+13. A failure from one process type's own factory is classified into that type's exception (`DataSourceDownloadException` / `ReportProcessingException` / `PipelineException`) before it leaves the factory — never left as a raw `RuntimeException` for `Main` to guess at. `PipelineException` is the only one of the three allowed to wrap another of the three; the other two never wrap each other or themselves.
+
+---
+
+## 19. Exception hierarchy
+
+Three typed, unchecked exceptions — one per process type — each carrying a `Reason` enum and
+identifying fields (`datasourceName`/`reportName` + `periodId` etc.), so `Main`'s failure handling
+never has to parse a message string to know what happened. All three live in
+`beam-core/exception/` (see §4) since they're pure data-carrying contracts, no GCP dependency.
+
+```
+DataSourceDownloadException   FILE_NOT_FOUND | INVALID_INPUT | CONNECTIVITY_FAILURE | JOB_FAILURE | UNKNOWN
+ReportProcessingException     CONFIG_NOT_FOUND | PREPROCESSING_FAILURE | DATASOURCE_UNAVAILABLE |
+                               STAGING_FAILURE | TRANSFORM_FAILURE | OUTPUT_FAILURE | EMAIL_FAILURE | UNKNOWN
+PipelineException             CONFIGURATION_ERROR | CONFIG_NOT_FOUND | ABORTED_REQUIRED_DATASOURCE |
+                               DATASOURCE_PHASE_FAILURE | REPORT_PHASE_FAILURE | UNKNOWN
+```
+
+**Where each is thrown:**
+- `DataSourceDownloadException` — `DataSourcePipelineFactory.assemble()`/`assembleForConfigs()`
+  (config/graph-assembly failures), and wherever the Beam job is submitted and awaited
+  (`Main.runDataSourceDownload()`, `PipelineSequenceFactory.runDataSourceSteps()`). The job-await
+  case uses `DataSourceFailureClassifier.classify()` (beam-runner) to pick the `Reason` by walking
+  the cause chain for a `FileSourceAdapter.FileSourceException` or `IllegalArgumentException` —
+  that classification can't live on the exception class itself because it needs a `beam-io` type,
+  and `beam-core` must never import from `beam-io`.
+- `ReportProcessingException` — `ReportPipelineFactory.execute()`, which tracks a `currentReason`
+  local updated right before each phase (preprocessing, datasource availability, staging,
+  transform chain, output routing, email) runs, so the catch block wraps with the `Reason`
+  matching wherever the failure actually occurred.
+- `PipelineException` — `PipelineSequenceFactory.execute()`. Rule: a `DataSourceDownloadException`
+  or `ReportProcessingException` from either composed phase propagates **unchanged** — those
+  already carry the specific detail; anything else (PIPELINE's own config lookup, the
+  required-datasource gate, or an unrecognized exception type) gets wrapped in `PipelineException`.
+
+**Where they're caught:** `Main.main()` wraps the whole process-type dispatch in one `catch
+(Exception e)`, calls `FailureNotifier.notify(options, e)`, then rethrows `e` unchanged (so the
+process still exits non-zero, same as before this existed). `FailureNotifier` matches a
+notification template to whichever of the three types it received — plus a **default** template
+for anything else (the legacy `PipelineFactory` path never throws one of these three, and a
+failure before any factory even runs — e.g. CLI arg parsing — has nothing to match either). See
+§17's "Global failure notification" for the two CLI flags (`--opsFailureEmail`,
+`--opsFailureFromAddress`) that control whether a notification actually gets emailed, versus just
+logged.
