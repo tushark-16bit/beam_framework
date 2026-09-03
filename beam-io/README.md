@@ -133,8 +133,19 @@ io/config/
                                      and top-level output_bq_table / output_bq_input_alias for per-report BQ write.
 
 io/email/
-    ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>)
-    EmailAttachment           — attachment model (InputStream + fileName + contentType)
+    ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>). Used only by
+                                PostDownloadFinalizeTransform's DATA_SOURCE_DOWNLOAD failure email.
+    EmailAttachment           — attachment model for ReportEmailAdapter (InputStream + fileName + contentType)
+    EmailSendUtility          — interface: SetEmailParams(fromAddress, subject, toList, ccList, encryptedOrNot)
+                                → EmailParams; CreateEmailRequest(EmailParams, bodyHtml, List<model.EmailAttachment>);
+                                default method FetchFileFromGcs(fileLocation) fetches a GCS object via the GCS client
+                                directly (same pattern as FileSourceTransform — beam-io can't depend on beam-utils'
+                                GcsUtils). Ships no implementation here — used only by ReportPipelineFactory's
+                                report-completion email, which discovers a real implementation via ServiceLoader SPI
+                                (a JAR declaring META-INF/services/com.yourco.beam.io.email.EmailSendUtility) or
+                                accepts one via constructor injection; skips sending with a warning if neither is
+                                present. EmailParams and (a differently-shaped) EmailAttachment live in beam-core's
+                                model/ package, not here.
 
 io/report/
     BigQueryJobService        — BQ jobs: query→table, table→GCS export (CSV/JSON), countRows(tableRef)

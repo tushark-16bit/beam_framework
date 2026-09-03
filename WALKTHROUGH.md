@@ -219,7 +219,7 @@ sequenceDiagram
     participant DataBQ as BigQuery<br/>(data / report tables)
     participant DaRec as BigQuery<br/>(DaRec)
     participant GCS as Cloud Storage
-    participant SMTP as SMTP Server
+    participant EmailUtil as EmailSendUtility<br/>(SPI-discovered or injected)
 
     Main->>RPF: execute(options)
 
@@ -305,13 +305,17 @@ sequenceDiagram
     end
 
     rect rgb(220, 245, 255)
-        Note over RPF,SMTP: Phase 8 — Email (GCS outputs only, optional)
-        opt hasEmail
+        Note over RPF,EmailUtil: Phase 8 — Email (optional; skipped with a warning if no EmailSendUtility is available)
+        opt hasEmail and emailUtility != null
             loop each exported GCS file
-                RPF->>GCS: GcsUtils.readBytes(gcsUri)
-                GCS-->>RPF: byte[]
+                RPF->>EmailUtil: FetchFileFromGcs(gcsUri)
+                EmailUtil->>GCS: read object
+                GCS-->>EmailUtil: bytes
+                EmailUtil-->>RPF: InputStream (wrapped as model.EmailAttachment)
             end
-            RPF->>SMTP: SmtpReportEmailAdapter.send(subject, body, to, cc, gcsAttachments)
+            RPF->>EmailUtil: SetEmailParams(fromAddress, subject, toList, ccList, encrypted)
+            EmailUtil-->>RPF: EmailParams
+            RPF->>EmailUtil: CreateEmailRequest(emailParams, body, attachments)
         end
     end
 
@@ -700,7 +704,7 @@ erDiagram
 
 ---
 
-## 12. Email Adapter — Class Structure
+## 12. Email — Two Separate Contracts, Two Different Callers
 
 ```mermaid
 classDiagram
@@ -712,11 +716,11 @@ classDiagram
     class SmtpReportEmailAdapter {
         -Session session
         -String fromAddress
-        +SmtpReportEmailAdapter(FrameworkOptions options)
+        +SmtpReportEmailAdapter(String smtpHost, int smtpPort, String smtpPasswordSecretId, String fromAddress)
         +send(subject, body, to, cc, attachments) void
     }
 
-    class EmailAttachment {
+    class IoEmailAttachment["EmailAttachment (io/email)"] {
         +InputStream content
         +String fileName
         +String contentType
@@ -730,11 +734,41 @@ classDiagram
     }
 
     ReportEmailAdapter <|.. SmtpReportEmailAdapter : implements
-    SmtpReportEmailAdapter ..> EmailAttachment : uses
-    ReportEmailAdapter ..> EmailAttachment : parameter
+    SmtpReportEmailAdapter ..> IoEmailAttachment : uses
+    ReportEmailAdapter ..> IoEmailAttachment : parameter
 
-    note for SmtpReportEmailAdapter "Reads SMTP config from FrameworkOptions.\nFetches password from Secret Manager.\nUses jakarta.mail MimeMultipart\nfor file attachments."
+    note for SmtpReportEmailAdapter "Constructor args come straight from\nSourceFailureEmailConfig — used only by\nPostDownloadFinalizeTransform's\nDATA_SOURCE_DOWNLOAD failure email.\nFetches password from Secret Manager.\nUses jakarta.mail MimeMultipart\nfor file attachments."
+
+    class EmailSendUtility {
+        <<interface>>
+        +SetEmailParams(fromAddress, subject, toList, ccList, encryptedOrNot) EmailParams
+        +CreateEmailRequest(EmailParams, emailBodyHtml, emailAttachments) void
+        +FetchFileFromGcs(fileLocation) InputStream
+    }
+
+    class EmailParams {
+        +String fromEmailAddress
+        +String subject
+        +List~String~ toList
+        +List~String~ ccList
+        +boolean encryptedOrNot
+    }
+
+    class ModelEmailAttachment["EmailAttachment (model)"] {
+        +String fileName
+        +InputStream content
+        +String type
+    }
+
+    EmailSendUtility ..> EmailParams : returns / consumes
+    EmailSendUtility ..> ModelEmailAttachment : parameter
+
+    note for EmailSendUtility "No implementation ships in this repo.\nReportPipelineFactory discovers one via\nServiceLoader SPI, or accepts one via\nconstructor injection. Used only for\nREPORT_PROCESSING/PIPELINE\nreport-completion email — if none is\navailable, sending is skipped with a\nwarning, not a failure."
 ```
+
+`ReportEmailAdapter`/`SmtpReportEmailAdapter` and `EmailSendUtility` are unrelated interfaces for
+two different callers — `ReportPipelineFactory` no longer touches `SmtpReportEmailAdapter` at
+all (its one call site there had a real constructor-signature bug and has been replaced).
 
 ---
 
@@ -831,8 +865,9 @@ Where to find things in the source tree:
 | Checkpoint lifecycle (LOADING→COMPLETED/FAILED) | [`beam-io/.../io/checkpoint/BigQueryDataSourceCheckpointAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/checkpoint/BigQueryDataSourceCheckpointAdapter.java) |
 | Record table sink (all sources → JSON blobs) | [`beam-io/.../io/sink/DataSourceRecordSinkTransform.java`](beam-io/src/main/java/com/yourco/beam/io/sink/DataSourceRecordSinkTransform.java) |
 | Record validation (BnC via JSON_VALUE) | [`beam-io/.../io/records/BigQueryDataSourceRecordAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/records/BigQueryDataSourceRecordAdapter.java) |
-| Email interface | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
+| Email interface (DATA_SOURCE_DOWNLOAD failure email) | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
 | Email SMTP implementation | [`beam-runner/.../runner/SmtpReportEmailAdapter.java`](beam-runner/src/main/java/com/yourco/beam/runner/SmtpReportEmailAdapter.java) |
+| Email interface (REPORT_PROCESSING/PIPELINE completion email) | [`beam-io/.../io/email/EmailSendUtility.java`](beam-io/src/main/java/com/yourco/beam/io/email/EmailSendUtility.java) |
 
 ---
 

@@ -166,7 +166,9 @@ model/ReportDatasourceRef.java        Required DS for a report + transform alias
 model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
 model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
 model/ReportOutputConfig.java         File output: CSV/JSON, GCS path, prefix, suffix.
-model/ReportEmailConfig.java          Email: to, cc, subject/body templates with tokens.
+model/ReportEmailConfig.java          Email: to, cc, subject/body templates with tokens, fromAddress (from_address key), encrypted (default false).
+model/EmailParams.java                Sender/recipient envelope for EmailSendUtility: fromEmailAddress, subject, toList, ccList, encryptedOrNot. Built by SetEmailParams(), passed into CreateEmailRequest().
+model/EmailAttachment.java            EmailSendUtility's attachment shape: fileName, content (InputStream), type (MIME string). Distinct from io/email/EmailAttachment.java (the older ReportEmailAdapter's shape) — never import both unqualified in the same file.
 model/ReportCheckpoint.java           RptRefer row: rptId, rptNm, perId (int), rptDs, staCd, creatTs, lstUpdtTs. sta_cd: LOADING → COMPLETED / FAILED.
 model/RptDaMap.java                   RptDaMap row: mapId, rptId, daId, lstUpdtTs. Links a report run to a data source da_id.
 model/RptStageDa.java                 RptStageDa row: stageId, mapId, stageDsJsonTx, queryConfigTx, loadDt (DATE), lstUpdtTs. One row per DaRec page (batched, ≤250 records/JSON array — mirrors DaRec's own pagination), not one row per record; un-nested back to individual records on read by stagedDataSubquery(). Transient staging; deleted after transforms.
@@ -226,8 +228,18 @@ checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table nam
 records/DataSourceRecordAdapter.java          Interface: countRecords(daId), sumField(daId, field), deleteRecords(daId).
 records/BigQueryDataSourceRecordAdapter.java  countRecords: CROSS JOIN UNNEST(FileHeaderLegend.dataArrayExpr(row_da_json_tx)) then COUNT(*) individual rows — the expression extracts just the row array whether a page is a flat array or a FILE source's {"Data":[...],"DataHeaders":[...]}, so the header legend (in the separate DataHeaders array) is never counted as a row. sumField: same UNNEST then SUM(CAST(JSON_VALUE(row_json, '$.field') AS FLOAT64)) — the legend is likewise never reached. deleteRecords: DELETE FROM DaRec WHERE da_id=@daId; best-effort (logs+swallows); used as-is for the --manualOverrun cleanup of an older, already-flushed run. For the data_transform_query replace (same-run, just-streamed rows), PostDownloadFinalizeTransform.replaceStoredRows() does NOT use this method — it runs DELETE+INSERT as a single atomic BigQuery multi-statement transaction (BEGIN TRANSACTION...COMMIT, with ROLLBACK on error) instead, since those rows can still be in BigQuery's streaming buffer (DML-ineligible despite being SELECT-visible) and two separate unverified statements could leave a partial delete (some pages gone, some not) or, worse, a successful delete followed by a failed insert with nothing to restore the originals.
 
-email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType.
-email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>).
+email/EmailAttachment.java            Attachment model: InputStream + fileName + contentType. Used by ReportEmailAdapter (below) — a
+                                       different type from model/EmailAttachment.java (EmailSendUtility's own attachment shape).
+email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, List<EmailAttachment>). Used only by
+                                       PostDownloadFinalizeTransform's DATA_SOURCE_DOWNLOAD failure email now — see
+                                       EmailSendUtility below for ReportPipelineFactory's report-completion email.
+email/EmailSendUtility.java           Interface: SetEmailParams(fromAddress, subject, toList, ccList, encryptedOrNot) → EmailParams;
+                                       CreateEmailRequest(EmailParams, bodyHtml, List<model.EmailAttachment>); default method
+                                       FetchFileFromGcs(fileLocation) fetches a GCS object as an InputStream via the GCS client
+                                       directly (beam-io can't depend on beam-utils' GcsUtils). No implementation ships in this
+                                       repo — ReportPipelineFactory discovers one via ServiceLoader SPI (same mechanism as
+                                       TransformRegistry for BeamTransform) or accepts one via constructor injection; if neither
+                                       is available, report-completion email is skipped with a warning, not a failure.
 
 report/BigQueryJobService.java        BQ jobs: runQueryToTable(), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
 
@@ -309,6 +321,13 @@ ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ
                                 After transform chain, writes final result to per-report BQ table
                                 (output_bq_table from config) if set; resolves source alias from
                                 output_bq_input_alias → last transform alias → first datasource alias.
+                                Report-completion email uses EmailSendUtility (io/email/), not
+                                SmtpReportEmailAdapter: an EmailSendUtility is passed to the
+                                3-arg constructor, or discovered via ServiceLoader SPI in the
+                                no-arg/2-arg constructors (discoverEmailUtility()) — this repo
+                                ships no implementation, so it's null unless the deployment's
+                                classpath provides one; sendEmail() logs a warning and skips
+                                sending rather than failing the report when it's null.
 SourceTransformChainAssembler.java Assembles LOOKUP/GROUP_BY/SORT_BY per source; loads lookup views.
 SmtpReportEmailAdapter.java     SMTP impl of ReportEmailAdapter. MimeMultipart for attachments.
 PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSubprocess as REPORT_PROCESSING — no
@@ -386,7 +405,10 @@ beam-orchestrator → (nothing internal — standalone, no sibling module deps)
 **Violations**: if `beam-io` imports from `beam-utils`, it breaks this rule. The compiler will
 not catch it — but it creates a circular risk and violates the isolation contract.
 `SmtpReportEmailAdapter` is in `beam-runner` (not `beam-io`) precisely because it needs
-`SecretManagerUtils` from `beam-utils` and `angus-mail` from `beam-transforms`.
+`SecretManagerUtils` from `beam-utils` and `angus-mail` from `beam-transforms`. Contrast
+`EmailSendUtility.FetchFileFromGcs()` in `beam-io`, whose default method only needs the GCS
+client `beam-io` already depends on directly (no `beam-utils`/`beam-transforms` needed) — that's
+the difference that decides where each one is allowed to live.
 
 ### Wire type
 
@@ -583,10 +605,11 @@ Main.runReportProcessing(options)
     │   ├─ BigQueryReportCheckpointAdapter.writeOutput(rptId, outptCd, outputDs, ...) per output
     │   └─ BigQueryReportCheckpointAdapter.clearStagedData(rptId)  → DELETE FROM RptStageDa WHERE map_id IN (...)
     │
-    ├─ Phase 7: Email (optional)
-    │   ├─ GcsUtils.readBytes(gcsUri) for each exported file
+    ├─ Phase 7: Email (optional; skipped with a warning if no EmailSendUtility is available)
     │   ├─ resolve subject/body templates ({reportName}, {periodId}, etc.)
-    │   └─ SmtpReportEmailAdapter.send(subject, body, to, cc, attachments)
+    │   ├─ emailUtility.FetchFileFromGcs(gcsUri) for each exported file → EmailAttachment
+    │   ├─ emailUtility.SetEmailParams(fromAddress, subject, toList, ccList, encrypted) → EmailParams
+    │   └─ emailUtility.CreateEmailRequest(emailParams, body, attachments)
     │
     └─ BigQueryReportCheckpointAdapter.updateStatus(rptId, COMPLETED)
        or updateStatus(rptId, FAILED) if any phase threw
@@ -662,7 +685,8 @@ to `BigQuerySourceTransform`'s own name-only preview-query fallback.
                     "output_format": "CSV", "gcs_path": "gs://bucket/reports/",
                     "file_prefix": "", "file_suffix": ".csv", "include_header": true}],
   "email":        {"to_list": ["analyst@example.com"], "cc_list": [],
-                   "subject_template": "Report {periodId}", "body_template": "Attached."},
+                   "subject_template": "Report {periodId}", "body_template": "Attached.",
+                   "from_address": "pipeline-alerts@example.com", "encrypted": false},
   "output_bq_table":       "project.dataset.daily_trades_report",
   "output_bq_input_alias": "summary"
 }
@@ -838,22 +862,58 @@ All methods block until the BQ job completes. Failures throw `RuntimeException`
 
 ---
 
-## 15. Email adapter contract
+## 15. Email adapter contracts
+
+Two separate, unrelated email contracts exist, used by two different callers:
+
+### ReportEmailAdapter — DATA_SOURCE_DOWNLOAD failure email only
 
 ```java
 // Interface (beam-io)
 ReportEmailAdapter.send(subject, body, to, cc, attachments);
 
-// EmailAttachment — InputStream is consumed exactly once by the adapter
+// io/email/EmailAttachment — InputStream is consumed exactly once by the adapter
 EmailAttachment.csv(inputStream, "report.csv")    // contentType=text/csv
 EmailAttachment.json(inputStream, "report.json")  // contentType=application/json
 
 // Concrete impl (beam-runner — needs jakarta.mail from beam-transforms transitive dep)
-SmtpReportEmailAdapter(options)  // reads --emailSmtpHost, --emailSmtpPort, --smtpPasswordSecretId
+new SmtpReportEmailAdapter(smtpHost, smtpPort, smtpPasswordSecretId, fromAddress)
 ```
 
-To add a different email provider (SendGrid, SES), implement `ReportEmailAdapter` and
-inject it into `ReportPipelineFactory` via constructor.
+Used only by `PostDownloadFinalizeTransform`'s `SourceFailureEmailConfig`-driven failure email —
+constructed there as `new SmtpReportEmailAdapter(emailConfig.smtpHost, emailConfig.smtpPort,
+emailConfig.smtpPasswordSecretId, emailConfig.fromAddress)`, all four values from
+`SourceFailureEmailConfig`. To add a different provider (SendGrid, SES) for this path, implement
+`ReportEmailAdapter` and construct it in place of `SmtpReportEmailAdapter`.
+
+### EmailSendUtility — REPORT_PROCESSING/PIPELINE report-completion email
+
+```java
+// Interface (beam-io) — no implementation ships in this repo; see below
+EmailParams params = emailUtility.SetEmailParams(fromAddress, subject, toList, ccList, encrypted);
+
+// model/EmailAttachment — a different type from io/email/EmailAttachment above
+List<EmailAttachment> attachments = files.stream()
+    .map(f -> new EmailAttachment(f.fileName(), emailUtility.FetchFileFromGcs(f.gcsUri()), f.contentType()))
+    .toList();
+
+emailUtility.CreateEmailRequest(params, bodyHtml, attachments);
+```
+
+Used only by `ReportPipelineFactory`'s report-completion email. This repository defines the
+contract but ships no implementation — the real one is expected to be an organization's own
+existing email-gateway client, supplied at runtime rather than committed here. Two ways to plug
+one in:
+1. **Java SPI** (preferred, zero code change here) — a JAR on the classpath declaring
+   `META-INF/services/com.yourco.beam.io.email.EmailSendUtility` with the implementation's
+   fully-qualified class name. `ReportPipelineFactory.discoverEmailUtility()` finds it via
+   `ServiceLoader.load(EmailSendUtility.class)`, the same mechanism `TransformRegistry` uses for
+   `BeamTransform`.
+2. **Constructor injection** — pass an `EmailSendUtility` instance to
+   `ReportPipelineFactory`'s 3-arg constructor directly (useful for tests).
+
+If neither is available, `sendEmail()` logs a warning and skips sending — it does not fail the
+report.
 
 ---
 

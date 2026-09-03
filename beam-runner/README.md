@@ -12,8 +12,8 @@ You should rarely need to edit this module.
 | `Main` | Parses CLI args, routes by `--processType` (and `--reportName` for REPORT_PROCESSING), delegates to the right factory |
 | `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, creates LOADING checkpoints, assembles per-source Beam branches. `assemble(options)` (single `--datasourceName`) delegates to public `assembleForConfigs(options, List<SourceConfig>)`, which `PipelineSequenceFactory` also calls directly with several explicitly-fetched configs to batch them into one job |
 | `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: row/BnC validation, optional `data_transform_query` (replaces stored rows once validated, via an atomic DELETE+INSERT transaction), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), `--manualOverrun` cleanup of the superseded previous run's DaRec rows, and failure email — all running in the Beam worker |
-| `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted |
-| `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used by `ReportPipelineFactory` and `PostDownloadFinalizeTransform` |
+| `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted. Report-completion email uses `EmailSendUtility` (`beam-io`), discovered via `ServiceLoader` SPI or injected via constructor — see its own section below |
+| `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used only by `PostDownloadFinalizeTransform`'s DATA_SOURCE_DOWNLOAD failure email now |
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline |
 | `PipelineSequenceFactory` | `PIPELINE`: same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, no separate config — runs whichever datasources the report's own `datasources[]` declares (batched into one Dataflow job via `DataSourcePipelineFactory.assembleForConfigs`), then the report (via the unchanged `ReportPipelineFactory`). Composes both existing factories — see its own section below |
 
@@ -106,6 +106,48 @@ PipelineFactory.assemble(options)
 ```
 
 No data moves during assembly — it only describes the computation graph.
+
+---
+
+## ReportPipelineFactory's report-completion email — EmailSendUtility
+
+`ReportPipelineFactory`'s Phase 7 (email) no longer constructs `SmtpReportEmailAdapter` inline —
+that call had a real, long-standing constructor-signature bug (`new SmtpReportEmailAdapter(options)`
+never matched the class's actual 4-arg constructor), so report-completion email was never actually
+reachable through that path. It's replaced with `EmailSendUtility` (`beam-io/io/email/`), a port
+this repository defines but ships no implementation of — the real implementation is expected to be
+an organization's own existing email-gateway client, kept outside this codebase.
+
+```java
+private static EmailSendUtility discoverEmailUtility() {
+    Iterator<EmailSendUtility> found = ServiceLoader.load(EmailSendUtility.class).iterator();
+    return found.hasNext() ? found.next() : null;
+}
+```
+
+Two ways to supply a real implementation:
+1. **SPI (preferred)** — a JAR on the classpath with
+   `META-INF/services/com.yourco.beam.io.email.EmailSendUtility` naming the implementation class.
+   `ReportPipelineFactory`'s no-arg and 2-arg constructors call `discoverEmailUtility()`
+   automatically — same `ServiceLoader` mechanism `TransformRegistry` uses for `BeamTransform`,
+   merged into the fat jar the same way (`maven-shade-plugin`'s `ServicesResourceTransformer`).
+2. **Constructor injection** — `new ReportPipelineFactory(bqJobService, sinkRouter, emailUtility)`.
+
+If neither yields an `EmailSendUtility`, `sendEmail()` logs a warning and returns without sending
+— it does **not** fail the report. `PostDownloadFinalizeTransform`'s DATA_SOURCE_DOWNLOAD failure
+email is unaffected — it still calls `SmtpReportEmailAdapter`'s real 4-arg constructor correctly,
+with values straight from `SourceFailureEmailConfig`.
+
+```java
+List<EmailAttachment> attachments = exportedFiles.stream()
+    .map(f -> new EmailAttachment(f.fileName(), emailUtility.FetchFileFromGcs(f.gcsUri()), f.contentType()))
+    .toList();
+EmailParams params = emailUtility.SetEmailParams(fromAddress, subject, toList, ccList, encrypted);
+emailUtility.CreateEmailRequest(params, bodyHtml, attachments);
+```
+
+`fromAddress`/`encrypted` come from `ReportEmailConfig.fromAddress`/`.encrypted` — parsed from the
+report config's `email.from_address` / `email.encrypted` keys (see `beam-io/README.md`).
 
 ---
 

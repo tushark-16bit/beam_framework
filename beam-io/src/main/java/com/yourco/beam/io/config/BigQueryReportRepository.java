@@ -66,7 +66,8 @@ import java.util.stream.Collectors;
  *   ],
  *   "email": {"to_list": ["analyst@example.com"], "cc_list": [],
  *             "subject_template": "Report {periodId}",
- *             "body_template": "Please find the attached report."},
+ *             "body_template": "Please find the attached report.",
+ *             "from_address": "pipeline-alerts@example.com", "encrypted": false},
  *   "output_bq_table":       "project.dataset.daily_trades_report",
  *   "output_bq_input_alias": "summary"
  * }
@@ -252,7 +253,9 @@ public final class BigQueryReportRepository {
             toList,
             parseEmailList(node.path("cc_list")),
             nullIfMissing(node, "subject_template"),
-            nullIfMissing(node, "body_template"));
+            nullIfMissing(node, "body_template"),
+            nullIfMissing(node, "from_address"),
+            node.path("encrypted").asBoolean(false));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

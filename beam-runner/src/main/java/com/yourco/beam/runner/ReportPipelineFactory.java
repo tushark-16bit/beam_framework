@@ -4,9 +4,10 @@ import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.checkpoint.BigQueryReportCheckpointAdapter;
 import com.yourco.beam.io.checkpoint.DataSourceCheckpointAdapter;
 import com.yourco.beam.io.checkpoint.ReportCheckpointAdapter;
-import com.yourco.beam.io.email.EmailAttachment;
-import com.yourco.beam.io.email.ReportEmailAdapter;
+import com.yourco.beam.io.email.EmailSendUtility;
 import com.yourco.beam.io.report.BigQueryJobService;
+import com.yourco.beam.model.EmailAttachment;
+import com.yourco.beam.model.EmailParams;
 import com.yourco.beam.model.ReportCheckpoint;
 import com.yourco.beam.model.ReportConfig;
 import com.yourco.beam.model.ReportDatasourceRef;
@@ -15,16 +16,16 @@ import com.yourco.beam.model.ReportPreprocessingStep;
 import com.yourco.beam.model.ReportTransformStep;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.io.config.BigQueryReportRepository;
-import com.yourco.beam.utils.GcsUtils;
 import com.yourco.beam.utils.QueryParameterResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ServiceLoader;
 
 /**
  * Orchestrates the full REPORT_PROCESSING lifecycle in the driver JVM.
@@ -61,19 +62,45 @@ public final class ReportPipelineFactory {
 
     private final BigQueryJobService     bqJobService;
     private final ReportOutputSinkRouter sinkRouter;
+    private final EmailSendUtility       emailUtility;
 
     public ReportPipelineFactory() {
         this(new BigQueryJobService());
     }
 
     ReportPipelineFactory(BigQueryJobService bqJobService) {
-        this.bqJobService = bqJobService;
-        this.sinkRouter   = new ReportOutputSinkRouter(bqJobService);
+        this(bqJobService, new ReportOutputSinkRouter(bqJobService), discoverEmailUtility());
     }
 
     ReportPipelineFactory(BigQueryJobService bqJobService, ReportOutputSinkRouter sinkRouter) {
+        this(bqJobService, sinkRouter, discoverEmailUtility());
+    }
+
+    /**
+     * @param emailUtility the {@link EmailSendUtility} to send report-completion email with.
+     *                     Pass explicitly to inject an implementation that isn't discoverable via
+     *                     SPI (e.g. in a test, or a runtime not using the fat-jar's
+     *                     {@code META-INF/services} merge). May be {@code null} — {@link #execute}
+     *                     then logs a warning and skips sending rather than failing the report.
+     */
+    public ReportPipelineFactory(BigQueryJobService bqJobService, ReportOutputSinkRouter sinkRouter,
+                                 EmailSendUtility emailUtility) {
         this.bqJobService = bqJobService;
         this.sinkRouter   = sinkRouter;
+        this.emailUtility = emailUtility;
+    }
+
+    /**
+     * Discovers an {@link EmailSendUtility} implementation via Java SPI — a JAR on the classpath
+     * declaring one in {@code META-INF/services/com.yourco.beam.io.email.EmailSendUtility}, the
+     * same mechanism {@code TransformRegistry} uses for {@code BeamTransform}. This repository
+     * ships no implementation of its own, so this returns {@code null} unless the deployment's
+     * classpath (e.g. an organization's own separately-built JAR, merged into the fat jar by
+     * {@code maven-shade-plugin}'s {@code ServicesResourceTransformer}) provides one.
+     */
+    private static EmailSendUtility discoverEmailUtility() {
+        Iterator<EmailSendUtility> found = ServiceLoader.load(EmailSendUtility.class).iterator();
+        return found.hasNext() ? found.next() : null;
     }
 
     // ── Entry point ───────────────────────────────────────────────────────────
@@ -335,21 +362,26 @@ public final class ReportPipelineFactory {
 
     private void sendEmail(ReportConfig config, FrameworkOptions options,
                            List<ExportedFile> exportedFiles) {
+        if (emailUtility == null) {
+            LOG.warn("No EmailSendUtility available (none injected, none discovered via SPI) — "
+                     + "skipping report-completion email for report={}", config.reportName);
+            return;
+        }
+
         String subject = resolveEmailTokens(config.emailConfig.subjectTemplate, config, options);
         String body    = resolveEmailTokens(config.emailConfig.bodyTemplate,    config, options);
 
         List<EmailAttachment> attachments = new ArrayList<>();
         for (ExportedFile file : exportedFiles) {
-            byte[] bytes = GcsUtils.readBytes(file.gcsUri);
             attachments.add(new EmailAttachment(
-                new ByteArrayInputStream(bytes), file.fileName, file.contentType));
+                file.fileName(), emailUtility.FetchFileFromGcs(file.gcsUri()), file.contentType()));
         }
 
-        ReportEmailAdapter emailAdapter = new SmtpReportEmailAdapter(options);
-        emailAdapter.send(subject, body,
-                          config.emailConfig.toList,
-                          config.emailConfig.ccList,
-                          attachments);
+        EmailParams emailParams = emailUtility.SetEmailParams(
+            config.emailConfig.fromAddress, subject,
+            config.emailConfig.toList, config.emailConfig.ccList,
+            config.emailConfig.encrypted);
+        emailUtility.CreateEmailRequest(emailParams, body, attachments);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

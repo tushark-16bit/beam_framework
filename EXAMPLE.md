@@ -258,7 +258,9 @@ VALUES (
       "to_list": ["analyst@example.com"],
       "cc_list": [],
       "subject_template": "Daily Trades Report {periodId}",
-      "body_template":    "Please find the daily trades summary attached for period {periodId}."
+      "body_template":    "Please find the daily trades summary attached for period {periodId}.",
+      "from_address":     "pipeline-alerts@example.com",
+      "encrypted":        false
     }
   }',
   'TRADING', CURRENT_DATETIME(), 'setup_script'
@@ -369,7 +371,7 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 9 | Route each output: BQ export job → GCS CSV or JSON | — |
 | 10 | `writeOutput(rpt_id, outpt_cd, output_ds, ...)` — inserts one RptOutput row per output step | — |
 | 11 | `clearStagedData(rpt_id)` — DELETE all RptStageDa rows linked to this run's map_id(s) | — |
-| 12 | Send email with GCS outputs as attachments (if email configured) | — |
+| 12 | Send email with GCS outputs as attachments, via `EmailSendUtility` (if email configured **and** an `EmailSendUtility` is available — SPI-discovered or injected; otherwise skipped with a warning, not a failure — see `beam-io/README.md`) | — |
 | 13a | Success → `updateStatus(rpt_id, COMPLETED)` | → **COMPLETED** |
 | 13b | Any failure → `updateStatus(rpt_id, FAILED)` | → **FAILED** |
 

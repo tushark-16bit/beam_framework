@@ -563,8 +563,10 @@ ul.plain li{margin-bottom:6px;}
         </div>
         <div class="step driver" data-n="8">
           <div class="step-title">Email &amp; close out</div>
-          <div class="step-body">GCS outputs are downloaded and attached; the checkpoint is updated to
-          <code>COMPLETED</code> — or <code>FAILED</code> if any phase above threw.</div>
+          <div class="step-body">Outputs are fetched (<code>EmailSendUtility.FetchFileFromGcs()</code>) and attached; the
+          checkpoint is updated to <code>COMPLETED</code> — or <code>FAILED</code> if any phase above threw.
+          <code>EmailSendUtility</code> ships no implementation in this repo — it's discovered via SPI or injected, and
+          email is skipped with a warning (not a failure) if none is available.</div>
         </div>
       </div>
 
