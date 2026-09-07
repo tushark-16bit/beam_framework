@@ -447,9 +447,11 @@ ul.plain li{margin-bottom:6px;}
           <code>DataSourceRecordSinkTransform</code> and <code>PostDownloadFinalizeTransform</code> into the graph.</div>
         </div>
         <div class="step" data-n="6">
-          <div class="step-title">Submit &amp; wait</div>
-          <div class="step-body"><code>pipeline.run()</code>, then <code>result.waitUntilFinish()</code> blocks
-          the driver JVM until Dataflow (or DirectRunner) reaches a terminal state.</div>
+          <div class="step-title">Submit &mdash; not awaited</div>
+          <div class="step-body"><code>pipeline.run()</code>, then the driver JVM logs and returns
+          immediately. This runner platform forbids <code>result.waitUntilFinish()</code>, so job outcome is
+          discovered later by an external poller calling <code>--processType=STATUS_CHECK</code>
+          (<code>DataSourceStatusChecker</code>) against <code>DaRefer</code>, not by blocking here.</div>
         </div>
         <div class="step worker" data-n="7">
           <div class="step-title">Rows land, paginated <span class="tag worker">worker</span></div>
@@ -607,15 +609,20 @@ ul.plain li{margin-bottom:6px;}
           DATA_SOURCE_DOWNLOAD.</div>
         </div>
         <div class="step" data-n="3">
-          <div class="step-title">Submit, wait, then re-check</div>
-          <div class="step-body">After <code>waitUntilFinish()</code>, each ref's checkpoint is re-checked. An
-          incomplete <em>required</em> datasource throws <code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code> and
-          the whole run stops before the report ever starts. An incomplete <em>optional</em> one just logs a warning.</div>
+          <div class="step-title">Submit &mdash; not awaited, no inline re-check</div>
+          <div class="step-body"><code>pipeline.run()</code>, then <code>execute()</code> returns. This runner
+          platform forbids <code>waitUntilFinish()</code>, so the required/optional re-check that used to run
+          right here moved to a separate, later <code>--processType=STATUS_CHECK</code> call
+          (<code>DataSourceStatusChecker.checkPipeline()</code>) &mdash; same gate, same
+          <code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code> for a failed required datasource, just
+          invoked by an external poller instead of inline.</div>
         </div>
         <div class="step driver" data-n="4">
-          <div class="step-title">Run the report, unchanged</div>
-          <div class="step-body"><code>ReportPipelineFactory.execute(options)</code> runs exactly as it would
-          under plain REPORT_PROCESSING — same object, same options, no PIPELINE-specific branch inside it.</div>
+          <div class="step-title">Poll ready, then run the report separately</div>
+          <div class="step-body">Once <code>STATUS_CHECK</code> reports ready, the caller invokes plain
+          <code>--processType=REPORT_PROCESSING</code> (unchanged) &mdash; <code>ReportPipelineFactory.execute(options)</code>
+          runs exactly as it would standalone, no PIPELINE-specific branch inside it. This is now a separate
+          JAR invocation, not a call <code>PipelineSequenceFactory</code> makes itself.</div>
         </div>
       </div>
 
@@ -761,10 +768,12 @@ ul.plain li{margin-bottom:6px;}
           <div class="col cost"><div class="h">Cost</div><ul>
             <li>Two classification techniques, not one — <code>ReportPipelineFactory</code> tracks
               a <code>currentReason</code> local per phase (driver-JVM, straightforward), while
-              <code>DataSourceDownloadException</code>'s reason for a Beam-job failure needs
-              <code>DataSourceFailureClassifier</code> to walk the cause chain in <code>beam-runner</code>
-              — <code>beam-core</code> can't <code>instanceof</code>-check a <code>beam-io</code> type
-              like <code>FileSourceAdapter.FileSourceException</code> directly</li>
+              <code>DataSourceDownloadException</code>'s reason for an async job failure comes from
+              <code>DataSourceStatusChecker</code> mapping an observed <code>DaRefer</code> status string
+              (this runner platform forbids <code>waitUntilFinish()</code>, so there is no Beam-job
+              cause chain left to walk here at all &mdash; a status string alone can't distinguish
+              <em>why</em> a worker failed the way an exception's cause chain once could, so this path
+              only ever reports <code>JOB_FAILURE</code>)</li>
           </ul></div>
         </div>
       </div>

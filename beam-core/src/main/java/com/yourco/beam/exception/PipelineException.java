@@ -1,15 +1,21 @@
 package com.yourco.beam.exception;
 
 /**
- * Thrown for a PIPELINE (composed DATA_SOURCE_DOWNLOAD + REPORT_PROCESSING) failure that isn't
- * already a {@link DataSourceDownloadException} or {@link ReportProcessingException}.
+ * Thrown for a PIPELINE (composed DATA_SOURCE_DOWNLOAD submission + STATUS_CHECK readiness gate +
+ * REPORT_PROCESSING) failure that isn't already a {@link DataSourceDownloadException} or
+ * {@link ReportProcessingException}.
  *
- * <p>{@code PipelineSequenceFactory.execute()} follows one rule: a failure from either composed
- * phase that already surfaced as {@link DataSourceDownloadException} or
- * {@link ReportProcessingException} propagates <b>unchanged</b> — those already carry the right
- * specific detail, and PIPELINE has nothing more useful to add. Anything else (PIPELINE's own
- * config lookup, the required/optional datasource gate, or any exception type PIPELINE doesn't
- * recognize) gets wrapped here instead.
+ * <p>{@code PipelineSequenceFactory.execute()} — which only submits the batched data-source job,
+ * see its class javadoc for why it can no longer also wait or run the report — follows one rule:
+ * a {@link DataSourceDownloadException} raised while submitting propagates <b>unchanged</b>; it
+ * already carries the right specific detail. Anything else (PIPELINE's own config lookup, or any
+ * exception type it doesn't recognize) gets wrapped here instead.
+ *
+ * <p>{@link Reason#ABORTED_REQUIRED_DATASOURCE} is no longer thrown from
+ * {@code PipelineSequenceFactory} itself — that required/optional gate moved to
+ * {@code DataSourceStatusChecker.checkPipeline()}, invoked later via
+ * {@code --processType=STATUS_CHECK} once the batched job is expected to have finished (see
+ * {@code Main}'s class javadoc for why the wait moved out-of-process).
  */
 public final class PipelineException extends RuntimeException {
 

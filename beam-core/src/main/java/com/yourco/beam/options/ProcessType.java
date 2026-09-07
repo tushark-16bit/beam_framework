@@ -17,20 +17,30 @@ package com.yourco.beam.options;
  *       chain, and route output to one or more sinks (GCS / BQ / API). Full lifecycle tracked in
  *       {@code DaRefer}; per-output detail written to {@code RptOutput}.</li>
  *   <li>{@link #PIPELINE} — same {@code --reportName}/{@code --reportSubprocess} as
- *       {@link #REPORT_PROCESSING}; runs every datasource the report's own
- *       {@code ReportConfig.datasources[]} declares (batched into one Dataflow job, skipping any
- *       already {@code COMPLETED}), then the report itself. There is no separate pipeline config
- *       — the report's own datasource list and {@code is_required} flags already declare which
- *       datasources feed it and which are mandatory, so {@code PIPELINE} reuses that directly
- *       instead of redeclaring it. Differs from plain {@link #REPORT_PROCESSING} only in what
- *       happens when a declared datasource isn't {@code COMPLETED} yet: {@code REPORT_PROCESSING}
- *       fails immediately; {@code PIPELINE} runs it first. See {@code PipelineSequenceFactory}.
- *       Composes {@link #DATA_SOURCE_DOWNLOAD} and {@link #REPORT_PROCESSING} rather than
- *       replacing either — both remain independently runnable.</li>
+ *       {@link #REPORT_PROCESSING}; <b>submits</b> (does not wait for) a single batched Dataflow
+ *       job covering every datasource the report's own {@code ReportConfig.datasources[]}
+ *       declares and isn't already {@code COMPLETED}, then returns immediately. There is no
+ *       separate pipeline config — the report's own datasource list and {@code is_required}
+ *       flags already declare which datasources feed it and which are mandatory. This call does
+ *       <b>not</b> run the report itself and does <b>not</b> block until the datasources finish —
+ *       see {@link #STATUS_CHECK} for how a caller (an Airflow sensor) learns when it's safe to
+ *       invoke {@link #REPORT_PROCESSING} next. See {@code PipelineSequenceFactory}.</li>
+ *   <li>{@link #STATUS_CHECK} — fast, synchronous, DB-only readiness check; submits nothing and
+ *       never blocks. Reads {@code DaRefer} (the same row {@code PostDownloadFinalizeTransform}
+ *       writes from the Beam worker) to report whether previously-submitted
+ *       {@link #DATA_SOURCE_DOWNLOAD}/{@link #PIPELINE} work has reached a terminal state.
+ *       {@code --reportName} set → checks every datasource a report's {@code datasources[]}
+ *       declares (mirrors the required/optional gate {@link #PIPELINE} used to run inline);
+ *       {@code --reportName} blank → checks the single {@code --datasourceName}/
+ *       {@code --subprocessName}/{@code --periodId}. Exists because this framework's runner
+ *       platform forbids {@code PipelineResult.waitUntilFinish()} — the driver JVM cannot block
+ *       for a submitted job's full runtime, so job outcome must be polled externally instead.
+ *       See {@code DataSourceStatusChecker} and {@code Main.runStatusCheck()}.</li>
  * </ul>
  */
 public enum ProcessType {
     DATA_SOURCE_DOWNLOAD,
     REPORT_PROCESSING,
-    PIPELINE
+    PIPELINE,
+    STATUS_CHECK
 }

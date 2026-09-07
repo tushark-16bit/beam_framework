@@ -4,13 +4,14 @@ package com.yourco.beam.exception;
  * Thrown for a DATA_SOURCE_DOWNLOAD failure, carrying enough detail for {@code Main} to log and
  * notify on without re-deriving it from a raw stack trace.
  *
- * <p>Thrown from {@code DataSourcePipelineFactory} (config/graph-assembly failures) and from
- * wherever the Beam job itself is submitted and awaited — {@code Main.runDataSourceDownload()}
- * for a standalone run, {@code PipelineSequenceFactory.runDataSourceSteps()} for the
- * data-source phase of a PIPELINE run. Both call sites classify the failure (e.g. detecting a
- * {@code FileSourceAdapter.FileSourceException} in the cause chain for {@link Reason#FILE_NOT_FOUND})
- * before wrapping, since that classification needs {@code beam-io} types this class — living in
- * {@code beam-core} — cannot import.
+ * <p>Thrown from {@code DataSourcePipelineFactory} (config/graph-assembly failures, and
+ * submission failures in {@code Main.runDataSourceDownload()} /
+ * {@code PipelineSequenceFactory.submitDataSourceSteps()}), and from
+ * {@code DataSourceStatusChecker.checkSingle()} when a {@code STATUS_CHECK} invocation observes a
+ * terminal non-COMPLETED row in {@code DaRefer}. That last case is the common one: this
+ * framework's runner platform forbids {@code PipelineResult.waitUntilFinish()}, so job outcome is
+ * discovered later, by an external poller, rather than as a synchronous exception from the
+ * submitting call — see {@code Main}'s class javadoc.
  */
 public final class DataSourceDownloadException extends RuntimeException {
 

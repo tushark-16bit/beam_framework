@@ -46,24 +46,29 @@ flowchart TD
     A["java -jar beam-runner-bundled.jar\n--processType=X ..."] --> B["PipelineOptionsFactory\n.fromArgs(args)\n.as(FrameworkOptions.class)"]
     B --> C{processType?}
 
-    C -->|DATA_SOURCE_DOWNLOAD| D["DataSourcePipelineFactory\n.assemble(options)\npipeline.run()\n.waitUntilFinish()\nrunPostPipelineSteps()"]
+    C -->|DATA_SOURCE_DOWNLOAD| D["DataSourcePipelineFactory\n.assemble(options)\npipeline.run() — NOT awaited\n(waitUntilFinish() is forbidden\non this runner platform)"]
 
     C -->|REPORT_PROCESSING| E{reportName\nset?}
     E -->|yes| F["ReportPipelineFactory\n.execute(options)\ndriver-JVM only\nno Beam pipeline"]
-    E -->|no legacy mode| G["PipelineFactory\n.assemble(options)\npipeline.run()\nwaitUntilFinish if batch"]
+    E -->|no legacy mode| G["PipelineFactory\n.assemble(options)\npipeline.run()\nwaitUntilFinish if batch\n(known gap — no checkpoint\nto poll instead)"]
 
-    C -->|PIPELINE| P["PipelineSequenceFactory\n.execute(options)\nsame reportName/reportSubprocess\nas REPORT_PROCESSING —\nruns report's own datasources[]\n(batched, one job) → report"]
+    C -->|PIPELINE| P["PipelineSequenceFactory\n.execute(options)\nsame reportName/reportSubprocess\nas REPORT_PROCESSING —\nSUBMITS report's own datasources[]\n(batched, one job), returns —\ndoes NOT wait, does NOT run report"]
     P -.calls internally.-> D
-    P -.calls internally.-> F
+
+    C -->|STATUS_CHECK| S["DataSourceStatusChecker\ncheckSingle() / checkPipeline()\nfast DB-only poll of DaRefer\nnever blocks — one BQ read"]
+    S -.polled repeatedly by.-> Ext["external poller\n(Airflow sensor poke loop)"]
+    Ext -.then invokes.-> F
 
     D --> H[("DaRefer\nBQ table")]
     F --> H
     D --> I[("DaRec\nBQ table")]
+    S --> H
 
     style F fill:#e8f5e9,stroke:#4CAF50
     style D fill:#e3f2fd,stroke:#2196F3
     style G fill:#fafafa,stroke:#999
     style P fill:#fff3e0,stroke:#FB8C00
+    style S fill:#fce4ec,stroke:#E91E63
 ```
 
 ---
@@ -109,9 +114,7 @@ sequenceDiagram
     Beam->>DaRec: streams rows as JSON blobs (rec_id, da_id, row_da_json_tx, load_dt)
     Beam-->>Main: PipelineResult
 
-    Main->>Main: result.waitUntilFinish()
-    Note over Main: a waitUntilFinish() failure is classified via<br/>DataSourceFailureClassifier (FILE_NOT_FOUND / INVALID_INPUT /<br/>JOB_FAILURE) and thrown as DataSourceDownloadException
-    Main->>DSF: runPostPipelineSteps(finalState, error)
+    Note over Main: Main logs "submitted" and returns here — it does NOT call<br/>waitUntilFinish() (forbidden on this runner platform). Everything<br/>below runs inside the Beam worker (PostDownloadFinalizeTransform),<br/>independent of whether this driver process is still running.
 
     loop for each SourceConfig that ran
         alt pipeline DONE or UPDATED
@@ -129,6 +132,8 @@ sequenceDiagram
             DSF->>Checkpoint: updateStatus(da_id, FAILED, null)
         end
     end
+
+    Note over Checkpoint: An external poller discovers this outcome later via<br/>--processType=STATUS_CHECK (DataSourceStatusChecker.checkSingle),<br/>which reads this same DaRefer row and throws DataSourceDownloadException<br/>on a terminal failure — routing through Main's FailureNotifier exactly<br/>like a synchronous failure would have.
 ```
 
 ---
@@ -164,7 +169,7 @@ flowchart TD
         H --> A
     end
 
-    subgraph "Driver JVM (after waitUntilFinish)"
+    subgraph "Still inside the Beam worker (PostDownloadFinalizeTransform — driver does NOT wait)"
         RecTab --> I["DataSourceRecordAdapter\n.countRecords(da_id)\n.sumField(da_id, field)"]
         I --> J["ValidationConfig\nmin/max row count\nBnC JSON_VALUE SUM checks"]
         J --> K[("DaRefer\nCOMPLETED / FAILED_BNC / FAILED\n+ bal_and_cntl_smry_tx JSON")]
@@ -852,7 +857,8 @@ Where to find things in the source tree:
 | Entry point | [`beam-runner/.../runner/Main.java`](beam-runner/src/main/java/com/yourco/beam/runner/Main.java) |
 | DATA_SOURCE_DOWNLOAD orchestration | [`beam-runner/.../runner/DataSourcePipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourcePipelineFactory.java) |
 | REPORT_PROCESSING orchestration | [`beam-runner/.../runner/ReportPipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/ReportPipelineFactory.java) |
-| PIPELINE orchestration (composes the two above, reuses ReportConfig.datasources[]) | [`beam-runner/.../runner/PipelineSequenceFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/PipelineSequenceFactory.java) |
+| PIPELINE orchestration (submits DATA_SOURCE_DOWNLOAD's batched job, reuses ReportConfig.datasources[]) | [`beam-runner/.../runner/PipelineSequenceFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/PipelineSequenceFactory.java) |
+| STATUS_CHECK readiness poll (replacement for waitUntilFinish()) | [`beam-runner/.../runner/DataSourceStatusChecker.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourceStatusChecker.java) |
 | Source routing | [`beam-io/.../io/source/SourceRouter.java`](beam-io/src/main/java/com/yourco/beam/io/source/SourceRouter.java) |
 | Per-source transform chain | [`beam-runner/.../runner/SourceTransformChainAssembler.java`](beam-runner/src/main/java/com/yourco/beam/runner/SourceTransformChainAssembler.java) |
 | Lookup transform (side input) | [`beam-transforms/.../transforms/source/LookupEnrichTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/LookupEnrichTransform.java) |
@@ -874,13 +880,18 @@ Where to find things in the source tree:
 
 ---
 
-## 16. PIPELINE — Run a Report's Own Required Data Sources First
+## 16. PIPELINE — Submit a Report's Own Required Data Sources First
 
-Composes section 3 (`DATA_SOURCE_DOWNLOAD`) and section 6 (`REPORT_PROCESSING`) rather than
-re-implementing either. There is no separate pipeline config: `PipelineSequenceFactory` takes the
-exact same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, reads that report's own
-`ReportConfig.datasources[]` (already declaring which datasources feed it and which are
-mandatory via `is_required`), runs whichever aren't `COMPLETED`, and only then runs the report.
+Composes section 3 (`DATA_SOURCE_DOWNLOAD`) — `PipelineSequenceFactory` only **submits**. There is
+no separate pipeline config: it takes the exact same `--reportName`/`--reportSubprocess` as
+`REPORT_PROCESSING`, reads that report's own `ReportConfig.datasources[]` (already declaring which
+datasources feed it and which are mandatory via `is_required`), batches whichever aren't
+`COMPLETED` into one Dataflow job, submits it, and returns.
+
+**It used to also wait and run the report in the same call — it no longer can.** This framework's
+runner platform forbids `PipelineResult.waitUntilFinish()`, so `execute()` cannot safely learn the
+batched job's outcome before returning. What used to be steps 4–5 below moved to two later,
+external-poller-driven calls (see section 17):
 
 ```mermaid
 sequenceDiagram
@@ -889,8 +900,7 @@ sequenceDiagram
     participant RR as BigQueryReportRepository
     participant SCR as BigQuerySourceConfigRepository
     participant DSF as DataSourcePipelineFactory
-    participant CKA as BigQueryDataSourceCheckpointAdapter
-    participant RPF as ReportPipelineFactory
+    participant Beam as Apache Beam / Dataflow
 
     Main->>PSF: execute(options)
     PSF->>RR: fetchReportConfig(reportName, reportSubprocess, periodId)
@@ -904,38 +914,71 @@ sequenceDiagram
     PSF->>DSF: assembleForConfigs(options, allFetchedConfigs)
     Note over DSF: skips any datasource already COMPLETED —<br/>same DaRefer skip-logic as standalone<br/>DATA_SOURCE_DOWNLOAD. Throws DataSourceDownloadException<br/>directly on a config/assembly failure.
     DSF-->>PSF: Pipeline (ONE job, every declared datasource as its own branch)
-    PSF->>PSF: pipeline.run().waitUntilFinish()
-    Note over PSF: a waitUntilFinish() failure is classified via<br/>DataSourceFailureClassifier and thrown as<br/>DataSourceDownloadException — propagates to Main unchanged
+    PSF->>Beam: pipeline.run() — NOT awaited
+    PSF-->>Main: submission complete (does not wait, does not run the report)
 
-    loop each declared datasource
-        PSF->>CKA: isCompleted(dsName, periodId)
-        alt still not COMPLETED
-            alt ReportDatasourceRef.required == true
-                PSF-->>Main: throw PipelineException(ABORTED_REQUIRED_DATASOURCE)
-            else required == false
-                PSF->>PSF: log + continue
-            end
-        end
-    end
-
-    PSF->>RPF: execute(options)
-    Note over RPF: unchanged — options.reportName/reportSubprocess<br/>were never touched. Runs its own<br/>checkDatasourceAvailability() too,<br/>a second line of defense. A failure here throws<br/>ReportProcessingException, which PSF passes<br/>through to Main unchanged (not re-wrapped).
-    RPF-->>PSF: RptRefer COMPLETED / FAILED
-    PSF-->>Main: PIPELINE completed
+    Note over Main: A separate --processType=STATUS_CHECK invocation<br/>(section 17) later applies the required/optional gate<br/>this used to run right here, and a separate<br/>--processType=REPORT_PROCESSING invocation runs the report.
 ```
 
 **Why no separate required/optional flag anywhere else**: the terminal report already declares
-required datasources via `ReportDatasourceRef.required`, enforced on every report run
-(`ReportPipelineFactory.checkDatasourceAvailability()`) whether reached via `PIPELINE` or
-standalone `REPORT_PROCESSING`. A second, independently-set flag anywhere in a pipeline-specific
-config could disagree with the first about the same datasource — there is exactly one place "is
-this datasource required" is declared, and `PipelineSequenceFactory` reads it directly rather
-than duplicating it.
+required datasources via `ReportDatasourceRef.required`, enforced both by
+`ReportPipelineFactory.checkDatasourceAvailability()` (when the report runs) and by
+`DataSourceStatusChecker.checkPipeline()` (the readiness poll beforehand — section 17). A second,
+independently-set flag anywhere in a pipeline-specific config could disagree with the first about
+the same datasource — there is exactly one place "is this datasource required" is declared.
 
 **Why one batched job instead of one job per datasource**: sources are independent Beam branches
 — the "never merged" rule from section 4 still holds, no `Flatten.pCollections()` across sources
 — so submitting every declared datasource as one Dataflow job is just `DataSourcePipelineFactory`'s
 existing multi-source behavior (`assembleForConfigs`), reused rather than reinvented.
+
+### 16a. Discovering completion — STATUS_CHECK
+
+`DataSourceStatusChecker` is the replacement for `waitUntilFinish()`: a fast, synchronous,
+DB-only readiness check, never blocking. An external poller (an Airflow sensor's poke loop) calls
+`--processType=STATUS_CHECK` repeatedly, on its own schedule, until it's ready.
+
+```mermaid
+sequenceDiagram
+    participant Poller as External poller (Airflow sensor)
+    participant Main
+    participant DSC as DataSourceStatusChecker
+    participant RR as BigQueryReportRepository
+    participant CKA as BigQueryDataSourceCheckpointAdapter (DaRefer)
+    participant FN as FailureNotifier
+
+    loop poke, on the poller's own interval
+        Poller->>Main: --processType=STATUS_CHECK --reportName=...
+        Main->>DSC: checkPipeline(options)
+        DSC->>RR: fetchReportConfig(reportName, reportSubprocess, periodId)
+        RR-->>DSC: ReportConfig.datasources[]
+        loop each declared datasource
+            DSC->>CKA: getLatest(dsName, periodId)
+            CKA-->>DSC: DataSourceCheckpoint (sta_cd) or empty
+        end
+        alt any required datasource sta_cd is FAILED/FAILED_BNC/FAILED_TRANSFORM
+            DSC-->>Main: throw PipelineException(ABORTED_REQUIRED_DATASOURCE)
+            Main->>FN: notify(options, e)  [ops failure email, if --opsFailureEmail set]
+            Main-->>Poller: rethrown — non-zero exit
+        else any required datasource still LOADING / no row
+            DSC-->>Main: Outcome.PENDING
+            Main-->>Poller: exit 75 — not an error, poke again later
+        else every required datasource COMPLETED
+            DSC-->>Main: Outcome.READY
+            Main-->>Poller: exit 0
+        end
+    end
+
+    Poller->>Main: --processType=REPORT_PROCESSING --reportName=... (once exit 0 seen)
+```
+
+The same shape applies to a standalone `DATA_SOURCE_DOWNLOAD` run via `checkSingle()` — one
+`getLatest()` call instead of a loop over `datasources[]`, throwing `DataSourceDownloadException`
+on a terminal failure instead of `PipelineException`. Either way, the ops failure email fires from
+the exact same `Main.main()` catch block a synchronous failure always used to hit — a `STATUS_CHECK`
+invocation is an ordinary `Main.main()` call, so nothing async-specific was needed once job outcome
+became something this call observes and throws on, rather than something a blocking wait would
+have thrown on.
 
 ---
 
@@ -1002,10 +1045,11 @@ classDiagram
     ReportProcessingException *-- ReportProcessingException_Reason
     PipelineException *-- PipelineException_Reason
 
-    class DataSourceFailureClassifier {
+    class DataSourceStatusChecker {
         <<beam-runner, package-private>>
-        +static classify(Throwable) DataSourceDownloadException.Reason
-        note "Walks the cause chain for a\nFileSourceAdapter.FileSourceException\nor IllegalArgumentException — lives\nhere, not on the exception class,\nbecause beam-core can't import\nFileSourceAdapter (beam-io)."
+        +checkSingle(options) Outcome
+        +checkPipeline(options) Outcome
+        note "Fast, synchronous, DB-only readiness\ncheck — the replacement for\nwaitUntilFinish(). Reads DaRefer via\ngetLatest(); throws on a terminal\nfailure instead of the old cause-chain\nclassifier, which is gone — there is\nno more synchronous exception to walk."
     }
 
     class FailureNotifier {
@@ -1014,7 +1058,8 @@ classDiagram
         note "Main's single failure-notification\nentry point. Template by exception\ntype, plus a default for anything\nelse. Always logs; emails only if\n--opsFailureEmail is set and an\nEmailSendUtility is available."
     }
 
-    DataSourceFailureClassifier ..> DataSourceDownloadException : classifies for
+    DataSourceStatusChecker ..> DataSourceDownloadException : throws (checkSingle)
+    DataSourceStatusChecker ..> PipelineException : throws (checkPipeline)
     FailureNotifier ..> DataSourceDownloadException : templates
     FailureNotifier ..> ReportProcessingException : templates
     FailureNotifier ..> PipelineException : templates
@@ -1024,10 +1069,11 @@ classDiagram
 
 | Exception | Factory | Mechanism |
 |---|---|---|
-| `DataSourceDownloadException` | `DataSourcePipelineFactory.assemble()`/`assembleForConfigs()` | direct try/catch around config load and graph assembly |
-| `DataSourceDownloadException` | `Main.runDataSourceDownload()`, `PipelineSequenceFactory.runDataSourceSteps()` | `DataSourceFailureClassifier.classify()` on a `waitUntilFinish()` failure |
+| `DataSourceDownloadException` | `DataSourcePipelineFactory.assemble()`/`assembleForConfigs()` | direct try/catch around config load, graph assembly, and submission |
+| `DataSourceDownloadException` | `DataSourceStatusChecker.checkSingle()` (`STATUS_CHECK`) | maps an observed terminal `sta_cd` in `DaRefer` to `JOB_FAILURE` — the common case now, since `waitUntilFinish()` is unavailable and there's no cause chain left to classify |
 | `ReportProcessingException` | `ReportPipelineFactory.execute()` | a `currentReason` local, updated before each of the 7 phases runs |
-| `PipelineException` | `PipelineSequenceFactory.execute()` | wraps anything that isn't already `DataSourceDownloadException`/`ReportProcessingException` |
+| `PipelineException` | `PipelineSequenceFactory.execute()` (submit phase) | wraps anything that isn't already `DataSourceDownloadException` |
+| `PipelineException` (`ABORTED_REQUIRED_DATASOURCE`) | `DataSourceStatusChecker.checkPipeline()` (`STATUS_CHECK`) | a required datasource's `sta_cd` is a terminal failure — moved here from `PipelineSequenceFactory` once that could no longer run synchronously right after `waitUntilFinish()` |
 
 **Caught in:** `Main.main()` — one `catch (Exception e)` around the whole process-type dispatch,
 calling `FailureNotifier.notify(options, e)` then rethrowing `e` unchanged. See section 12's
