@@ -12,39 +12,34 @@ import org.slf4j.LoggerFactory;
  *
  * <h2>Routing by process type</h2>
  * <pre>
- *   --processType=DATA_SOURCE_DOWNLOAD  →  DataSourcePipelineFactory (submits, does not wait)
+ *   --processType=DATA_SOURCE_DOWNLOAD  →  DataSourcePipelineFactory (submits, then BLOCKS until
+ *                                            the source reaches COMPLETED or a terminal failure)
  *   --processType=REPORT_PROCESSING     →  PipelineFactory (general-purpose factory)
  *   --processType=PIPELINE              →  PipelineSequenceFactory (same --reportName/
  *                                            --reportSubprocess as REPORT_PROCESSING; submits one
- *                                            batched job for every not-yet-COMPLETED datasource
- *                                            the report's own datasources[] declares, then
- *                                            returns — does NOT wait and does NOT run the report)
+ *                                            batched job, BLOCKS until every required datasource
+ *                                            reaches COMPLETED, then runs the report — one call,
+ *                                            start to finish)
  *   --processType=STATUS_CHECK          →  DataSourceStatusChecker (fast DB-only readiness poll;
- *                                            see below)
- *   --processType=PIPELINE_SYNC         →  PipelineSyncRunner (chains PIPELINE's submit +
- *                                            STATUS_CHECK's poll, looped with sleeps, + a
- *                                            REPORT_PROCESSING run into one BLOCKING call — only
- *                                            for a context that can tolerate a long-running
- *                                            process; see its own class javadoc)
+ *                                            optional diagnostic only — see below)
  * </pre>
  *
- * <h2>Why nothing here calls {@code PipelineResult.waitUntilFinish()}</h2>
- * This framework's runner platform forbids it — the driver JVM that calls {@code pipeline.run()}
- * must submit and return quickly, not block for a job's full runtime. That makes job outcome
- * unobservable from this process synchronously, so {@code DATA_SOURCE_DOWNLOAD} and
- * {@code PIPELINE} both just submit and log, and completion/failure is discovered later by an
- * external poller (an Airflow sensor's poke loop) calling {@code --processType=STATUS_CHECK}
- * repeatedly against this same JAR. {@code PIPELINE_SYNC} is the one exception: it blocks
- * in-process instead, using its own sleep loop (never {@code waitUntilFinish()}) around repeated
- * {@code DataSourceStatusChecker.checkPipeline()} calls — appropriate only where the invoking
- * context itself can tolerate that. None of this weakens failure handling: the worker-side
- * {@code PostDownloadFinalizeTransform} still writes {@code DaRefer}'s terminal status
- * (COMPLETED / FAILED_BNC / FAILED_TRANSFORM / FAILED) exactly as before regardless of whether
- * anything is watching, and {@link #runStatusCheck} (like {@code PipelineSyncRunner}'s internal
- * poll) throws the same typed exceptions a synchronous {@code waitUntilFinish()} failure used to
- * — so they still flow through this class's one catch block below into {@link FailureNotifier}.
- * Only the trigger for that catch moves from "blocking call threw" to "a status-check invocation
- * observed a terminal failure row in DaRefer".
+ * <h2>Why {@code DATA_SOURCE_DOWNLOAD}/{@code PIPELINE} block, but never call
+ * {@code PipelineResult.waitUntilFinish()}</h2>
+ * This framework's runner platform cannot reliably block on a submitted job's own
+ * {@code PipelineResult} — calling {@code waitUntilFinish()} on it specifically does not work
+ * here. But the process Airflow invokes <em>can</em> be held open for as long as needed. So
+ * instead of returning the moment {@code pipeline.run()} returns, both process types submit and
+ * then block in a plain {@code Thread.sleep} poll loop ({@link DataSourceStatusChecker}) that
+ * re-reads {@code DaRefer} — the same row {@code PostDownloadFinalizeTransform} writes from the
+ * worker — until the work reaches a terminal state, then return (or throw). One Airflow task, one
+ * JVM invocation, everything through to email, with no external poller needed.
+ * {@code REPORT_PROCESSING} (DB-configured) was never affected either way — it never submits a
+ * Beam pipeline, so there's nothing to wait for.
+ *
+ * <p>{@code STATUS_CHECK} still exists as an optional, non-blocking, single-check diagnostic
+ * (useful for an ops dashboard or a manual look) — it is not part of the normal Airflow flow
+ * anymore, since {@code DATA_SOURCE_DOWNLOAD}/{@code PIPELINE} now poll internally.
  *
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
  * <pre>
@@ -58,16 +53,16 @@ import org.slf4j.LoggerFactory;
  *                                                         ↓
  *                                             PostDownloadFinalizeTransform
  *                                   (BnC validation + checkpoint update + email — in worker)
- *   2. pipeline.run() — submitted, NOT awaited. This process returns immediately.
- *      Checkpoint (COMPLETED / FAILED_BNC / FAILED_TRANSFORM / FAILED) is written by the worker
- *      as the last step, independent of whether anything is still watching. Poll it via
- *      --processType=STATUS_CHECK.
+ *   2. pipeline.run() — submitted.
+ *   3. DataSourceStatusChecker.awaitSingle() — blocks here (poll loop, not waitUntilFinish())
+ *      until DaRefer's sta_cd reaches COMPLETED (return) or a terminal failure/timeout (throw).
+ *      Checkpoint is written by the worker as the last step, same as always.
  * </pre>
  *
  * <h2>REPORT_PROCESSING lifecycle (DB-configured)</h2>
  * <pre>
- *   ReportPipelineFactory.execute() — runs entirely in the driver JVM (no Beam workers, so the
- *   waitUntilFinish() restriction above does not apply here — everything is a synchronous BQ job):
+ *   ReportPipelineFactory.execute() — runs entirely in the driver JVM (no Beam workers, so none of
+ *   the above applies here — everything is a synchronous BQ job):
  *        ├─ Load ReportConfig from BQ (parameter_store)
  *        ├─ Insert RptRefer row sta_cd=LOADING → returns rpt_id
  *        ├─ Run preprocessing steps              (BQ_QUERY jobs)
@@ -92,7 +87,10 @@ import org.slf4j.LoggerFactory;
  * template by exception type (a default template covers anything else — e.g. the legacy
  * {@code PipelineFactory} path, or a failure before any factory even ran), always logs it, and —
  * only if {@code --opsFailureEmail} is set and an {@code EmailSendUtility} is available — emails
- * it. The original exception is always rethrown afterward, unchanged.
+ * it. The original exception is always rethrown afterward, unchanged. A failure discovered mid-poll
+ * (a terminal {@code DaRefer} status, or a poll-loop timeout) hits this exact same catch block —
+ * it's thrown from within the same {@code main()} call that submitted the job, not from some
+ * separate later invocation.
  */
 public final class Main {
 
@@ -101,9 +99,9 @@ public final class Main {
     /**
      * Process exit code for {@code --processType=STATUS_CHECK} when the watched work is still
      * in progress (DaRefer sta_cd=LOADING, or no row yet) — distinct from 0 (ready) and the JVM
-     * default non-zero (an uncaught exception — terminal failure, already notified). An external
-     * poller (e.g. an Airflow sensor's poke()) should treat this code, and only this code, as
-     * "not yet — check again later", never as an error.
+     * default non-zero (an uncaught exception — terminal failure, already notified). A caller
+     * using {@code STATUS_CHECK} as a one-shot diagnostic should treat this code, and only this
+     * code, as "not yet — check again later", never as an error.
      */
     static final int STATUS_PENDING_EXIT_CODE = 75;
 
@@ -124,7 +122,6 @@ public final class Main {
                 case REPORT_PROCESSING    -> runReportProcessing(options);
                 case PIPELINE             -> runPipelineSequence(options);
                 case STATUS_CHECK         -> runStatusCheck(options);
-                case PIPELINE_SYNC        -> PipelineSyncRunner.execute(options);
             }
         } catch (Exception e) {
             // Single last-resort catch: DataSourcePipelineFactory/ReportPipelineFactory/
@@ -141,6 +138,12 @@ public final class Main {
 
     // ── DATA_SOURCE_DOWNLOAD ─────────────────────────────────────────────────
 
+    /**
+     * Submits the job, then blocks — via {@link DataSourceStatusChecker#awaitSingle}'s poll loop,
+     * never {@code waitUntilFinish()} — until the source reaches {@code COMPLETED} (returns) or a
+     * terminal failure/timeout is observed (throws {@code DataSourceDownloadException}, caught
+     * above and routed through {@link FailureNotifier} before this call ever returns to Airflow).
+     */
     private static void runDataSourceDownload(FrameworkOptions options) {
         LOG.info("DATA_SOURCE_DOWNLOAD | datasource={} | period={} | periodStart={} | periodEnd={}",
                  options.getDatasourceName(), options.getPeriodId(),
@@ -152,11 +155,11 @@ public final class Main {
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
         pipeline.run();
 
-        LOG.info("Pipeline submitted — this process does not wait for completion (platform "
-                 + "restriction: waitUntilFinish() is not available). Poll readiness via "
-                 + "--processType=STATUS_CHECK --datasourceName={} --subprocessName={} "
-                 + "--periodId={}, or query DaRefer directly.",
-                 options.getDatasourceName(), options.getSubprocessName(), options.getPeriodId());
+        LOG.info("Pipeline submitted — blocking until it completes (poll loop, not "
+                 + "waitUntilFinish(); every {}s, up to {}m)",
+                 options.getJobPollIntervalSeconds(), options.getJobPollTimeoutMinutes());
+        new DataSourceStatusChecker().awaitSingle(options);
+        LOG.info("DATA_SOURCE_DOWNLOAD completed: datasource={}", options.getDatasourceName());
     }
 
     // ── STATUS_CHECK ─────────────────────────────────────────────────────────
@@ -164,6 +167,8 @@ public final class Main {
     /**
      * Fast, synchronous, DB-only readiness poll — see {@link DataSourceStatusChecker} and
      * {@link ProcessType#STATUS_CHECK}. Never blocks or sleeps; one invocation is one check.
+     * Optional diagnostic — {@code DATA_SOURCE_DOWNLOAD}/{@code PIPELINE} no longer need an
+     * external caller to invoke this, since they poll internally now.
      *
      * <p>{@code --reportName} set → checks every datasource a report's own
      * {@code ReportConfig.datasources[]} declares (the {@code PIPELINE} readiness gate).
@@ -171,12 +176,11 @@ public final class Main {
      * {@code --subprocessName}/{@code --periodId} (the standalone {@code DATA_SOURCE_DOWNLOAD}
      * readiness gate).
      *
-     * <p>Exit codes: {@code 0} — ready, safe to proceed. {@link #STATUS_PENDING_EXIT_CODE} — not
-     * yet finished, poll again later; this is not an error and never triggers
-     * {@link FailureNotifier}. Any other (JVM-default) non-zero exit — a terminal failure was
-     * observed in DaRefer; {@link DataSourceStatusChecker} already threw the typed exception,
-     * which this method lets propagate up to {@code main()}'s catch block so
-     * {@link FailureNotifier} fires exactly as it would for a synchronous failure.
+     * <p>Exit codes: {@code 0} — ready. {@link #STATUS_PENDING_EXIT_CODE} — not yet finished;
+     * this is not an error and never triggers {@link FailureNotifier}. Any other (JVM-default)
+     * non-zero exit — a terminal failure was observed in DaRefer; {@link DataSourceStatusChecker}
+     * already threw the typed exception, which this method lets propagate up to {@code main()}'s
+     * catch block so {@link FailureNotifier} fires exactly as it would for a synchronous failure.
      */
     private static void runStatusCheck(FrameworkOptions options) {
         LOG.info("STATUS_CHECK | report={} datasource={} period={}",
@@ -234,15 +238,15 @@ public final class Main {
 
     // ── PIPELINE ─────────────────────────────────────────────────────────────
 
+    /**
+     * Submits the batched datasource job, blocks until every required datasource reaches
+     * {@code COMPLETED} (via {@code DataSourceStatusChecker.awaitPipeline()} — a poll loop, never
+     * {@code waitUntilFinish()}), then runs the report and sends its completion email — all
+     * within this one call. See {@link PipelineSequenceFactory}.
+     */
     private static void runPipelineSequence(FrameworkOptions options) {
         LOG.info("PIPELINE | report={} subprocess={} period={}",
                  options.getReportName(), options.getReportSubprocess(), options.getPeriodId());
         new PipelineSequenceFactory().execute(options);
     }
-
-    // ── PIPELINE_SYNC ────────────────────────────────────────────────────────
-    // No wrapper method here — PipelineSyncRunner.execute(options) is called directly from the
-    // switch above. See its own class javadoc: this is the one BLOCKING call chain in the
-    // framework (submit + poll loop + run the report), only appropriate from an invocation
-    // context that can tolerate a long-running process.
 }

@@ -447,11 +447,13 @@ ul.plain li{margin-bottom:6px;}
           <code>DataSourceRecordSinkTransform</code> and <code>PostDownloadFinalizeTransform</code> into the graph.</div>
         </div>
         <div class="step" data-n="6">
-          <div class="step-title">Submit &mdash; not awaited</div>
-          <div class="step-body"><code>pipeline.run()</code>, then the driver JVM logs and returns
-          immediately. This runner platform forbids <code>result.waitUntilFinish()</code>, so job outcome is
-          discovered later by an external poller calling <code>--processType=STATUS_CHECK</code>
-          (<code>DataSourceStatusChecker</code>) against <code>DaRefer</code>, not by blocking here.</div>
+          <div class="step-title">Submit, then block until done</div>
+          <div class="step-body"><code>pipeline.run()</code>, then the driver JVM blocks in
+          <code>DataSourceStatusChecker.awaitSingle()</code> &mdash; a plain <code>Thread.sleep</code> poll loop
+          re-reading <code>DaRefer</code> (this runner platform forbids <code>result.waitUntilFinish()</code>
+          specifically, though the process itself can stay open as long as needed) &mdash; until the source
+          reaches <code>COMPLETED</code> or a terminal failure/timeout is thrown. One Airflow call, no
+          external poller needed.</div>
         </div>
         <div class="step worker" data-n="7">
           <div class="step-title">Rows land, paginated <span class="tag worker">worker</span></div>
@@ -609,35 +611,33 @@ ul.plain li{margin-bottom:6px;}
           DATA_SOURCE_DOWNLOAD.</div>
         </div>
         <div class="step" data-n="3">
-          <div class="step-title">Submit &mdash; not awaited, no inline re-check</div>
-          <div class="step-body"><code>pipeline.run()</code>, then <code>execute()</code> returns. This runner
-          platform forbids <code>waitUntilFinish()</code>, so the required/optional re-check that used to run
-          right here moved to a separate, later <code>--processType=STATUS_CHECK</code> call
-          (<code>DataSourceStatusChecker.checkPipeline()</code>) &mdash; same gate, same
-          <code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code> for a failed required datasource, just
-          invoked by an external poller instead of inline.</div>
+          <div class="step-title">Submit, then block until every required datasource completes</div>
+          <div class="step-body"><code>pipeline.run()</code>, then <code>execute()</code> blocks in
+          <code>DataSourceStatusChecker.awaitPipeline()</code> &mdash; a plain <code>Thread.sleep</code> poll
+          loop re-reading <code>DaRefer</code> (this runner platform forbids <code>waitUntilFinish()</code>
+          specifically, though the process can stay open as long as needed). A required datasource that
+          terminal-fails throws <code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code>; a poll loop
+          that never completes within <code>--jobPollTimeoutMinutes</code> throws
+          <code>PipelineException(TIMEOUT)</code>.</div>
         </div>
         <div class="step driver" data-n="4">
-          <div class="step-title">Poll ready, then run the report separately</div>
-          <div class="step-body">Once <code>STATUS_CHECK</code> reports ready, the caller invokes plain
-          <code>--processType=REPORT_PROCESSING</code> (unchanged) &mdash; <code>ReportPipelineFactory.execute(options)</code>
-          runs exactly as it would standalone, no PIPELINE-specific branch inside it. This is now a separate
-          JAR invocation, not a call <code>PipelineSequenceFactory</code> makes itself.</div>
+          <div class="step-title">Run the report, still the same call</div>
+          <div class="step-body">Once every required datasource is <code>COMPLETED</code>,
+          <code>PipelineSequenceFactory.execute()</code> calls <code>ReportPipelineFactory.execute(options)</code>
+          directly &mdash; the exact same call <code>REPORT_PROCESSING</code> makes standalone, no
+          PIPELINE-specific branch inside it &mdash; sending the report's completion email before this whole
+          <code>--processType=PIPELINE</code> invocation finally returns to Airflow.</div>
         </div>
       </div>
 
       <div class="callout tradeoff">
-        <span class="lbl">Or: one blocking call instead of three &mdash; PIPELINE_SYNC</span>
-        <p>If whatever invokes this JAR can tolerate a long-running process (a VM, a long-timeout
-        batch job &mdash; not a short-lived Airflow operator), <code>--processType=PIPELINE_SYNC</code>
-        (<code>PipelineSyncRunner</code>) chains steps 1&ndash;4 above into one call: it submits,
-        then sleeps and re-polls <code>checkPipeline()</code> internally
-        (<code>--pipelineSyncPollIntervalSeconds</code>, <code>--pipelineSyncTimeoutMinutes</code>)
-        instead of returning, then runs the report itself once ready. A poll loop that exceeds the
-        timeout throws <code>PipelineException(TIMEOUT)</code>. This is the one place in the
-        framework that blocks &mdash; deliberately, via <code>Thread.sleep</code>, never
-        <code>waitUntilFinish()</code> &mdash; so it belongs behind a different kind of trigger than
-        <code>PIPELINE</code> itself.</p>
+        <span class="lbl">Optional diagnostic: STATUS_CHECK</span>
+        <p><code>--processType=STATUS_CHECK</code> (with the same <code>--reportName</code>/
+        <code>--reportSubprocess</code>/<code>--periodId</code>, or a single
+        <code>--datasourceName</code> standalone) is the same <code>checkPipeline()</code>/<code>checkSingle()</code>
+        logic step 3 loops on, exposed as a one-shot, non-blocking call &mdash; useful for an ops dashboard
+        or a manual look. Neither <code>DATA_SOURCE_DOWNLOAD</code> nor <code>PIPELINE</code> needs an
+        external caller to invoke it anymore; both poll internally and only return once actually done.</p>
       </div>
 
       <div class="callout tradeoff">

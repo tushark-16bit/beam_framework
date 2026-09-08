@@ -20,7 +20,7 @@ Every other module depends on this one — it defines the language the whole fra
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
 | `model` | `EmailParams`, `EmailAttachment` | Contract types for `beam-io`'s `EmailSendUtility` (REPORT_PROCESSING/PIPELINE completion email). `EmailAttachment` here (fileName, content, type) is a different type from `beam-io`'s own `io.email.EmailAttachment` (used by the older, DATA_SOURCE_DOWNLOAD-only `ReportEmailAdapter`) — don't import both unqualified in the same file |
 | `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces CLI flags for source, sink, transform chain, and retry/DLQ. Typed getters + generic `get(key)` for extensibility. Calendar and per-source failure email are configured elsewhere — see `--calendarName` and `SourceFailureEmailConfig`. |
-| `exception` | `DataSourceDownloadException`, `ReportProcessingException`, `PipelineException` | One typed, unchecked exception per process type, each with a `Reason` enum + identifying fields (`datasourceName`/`reportName` + `periodId`). Thrown by each process type's own factory — for `DataSourceDownloadException`, most commonly now by `DataSourceStatusChecker` (`STATUS_CHECK`) observing an async job failure in `DaRefer`, since this platform forbids `PipelineResult.waitUntilFinish()`. Caught by `Main`'s `FailureNotifier`. See `beam-runner/README.md` for exactly where each is thrown/caught, and `CLAUDE.md` §19 for the full picture. |
+| `exception` | `DataSourceDownloadException`, `ReportProcessingException`, `PipelineException` | One typed, unchecked exception per process type, each with a `Reason` enum + identifying fields (`datasourceName`/`reportName` + `periodId`). Thrown by each process type's own factory — for `DataSourceDownloadException`/`PipelineException`, most commonly now by `DataSourceStatusChecker`'s in-process poll loop (`awaitSingle()`/`awaitPipeline()`), which `Main.runDataSourceDownload()`/`PipelineSequenceFactory.execute()` block in after submitting, since this platform can't call `PipelineResult.waitUntilFinish()`. Caught by `Main`'s `FailureNotifier`. See `beam-runner/README.md` for exactly where each is thrown/caught, and `CLAUDE.md` §19 for the full picture. |
 There is no separate model for the `PIPELINE` process type — it reuses `ReportConfig.datasources`
 (`List<ReportDatasourceRef>`, row above) directly. See `beam-runner/README.md`'s
 `PipelineSequenceFactory` section.
@@ -31,11 +31,10 @@ There is no separate model for the `PIPELINE` process type — it reuses `Report
 
 | Value | CLI flag | Use case |
 |---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Fetch raw data from APIs/files/BQ; creates LOADING checkpoint, submits the job, returns immediately. **Does not wait** — this platform forbids `waitUntilFinish()`. BnC/checkpoint-finalize still runs post-pipeline, just inside the Beam worker (`PostDownloadFinalizeTransform`), not the driver. |
-| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | Transform downloaded data into reports. Runs entirely in the driver JVM (BQ jobs only) — unaffected by the `waitUntilFinish()` restriction. |
-| `PIPELINE` | `--processType=PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. **Submits** one batched Dataflow job for whichever datasources the report's own `datasources[]` declares and aren't already `COMPLETED`, then returns — does **not** wait and does **not** run the report. Poll readiness with `STATUS_CHECK`, then invoke `REPORT_PROCESSING` separately. |
-| `STATUS_CHECK` | `--processType=STATUS_CHECK` | Fast, synchronous, DB-only readiness poll — reads `DaRefer` via `DataSourceStatusChecker`, never blocks. `--reportName` set → checks a `PIPELINE` run's required datasources; blank → checks a single `DATA_SOURCE_DOWNLOAD` run. Exit `0` = ready, exit `75` = still pending (not an error), any other non-zero = terminal failure (already routed through `FailureNotifier`). Meant to be invoked repeatedly by an external poller (e.g. an Airflow sensor). |
-| `PIPELINE_SYNC` | `--processType=PIPELINE_SYNC` | Same `--reportName`/`--reportSubprocess` as `PIPELINE`, but chains submit → poll loop → report into **one blocking call** (`PipelineSyncRunner`) instead of three separate invocations. **Only for a context that can tolerate a long-running process** (a VM, a long-timeout batch job) — the opposite of `PIPELINE`/`STATUS_CHECK`, which are built to return in milliseconds. See `--pipelineSyncPollIntervalSeconds`/`--pipelineSyncTimeoutMinutes` below. |
+| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Fetch raw data from APIs/files/BQ; creates LOADING checkpoint, submits the job, then **blocks** (in-process poll loop via `DataSourceStatusChecker.awaitSingle()`, never `waitUntilFinish()`) until the source reaches `COMPLETED` or a terminal failure/timeout. One call, no external poller needed. BnC/checkpoint-finalize still runs inside the Beam worker (`PostDownloadFinalizeTransform`), same as always. |
+| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | Transform downloaded data into reports. Runs entirely in the driver JVM (BQ jobs only) — no Beam pipeline involved. |
+| `PIPELINE` | `--processType=PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. One call: **submits** a batched Dataflow job for whichever datasources the report's own `datasources[]` declares and aren't already `COMPLETED`, **blocks** until every required one reaches `COMPLETED` (`DataSourceStatusChecker.awaitPipeline()`), then runs the report and sends its completion email before returning. |
+| `STATUS_CHECK` | `--processType=STATUS_CHECK` | Fast, synchronous, DB-only readiness poll — reads `DaRefer` via `DataSourceStatusChecker`, never blocks or sleeps. `--reportName` set → checks a `PIPELINE` run's required datasources; blank → checks a single `DATA_SOURCE_DOWNLOAD` run. Exit `0` = ready, exit `75` = still pending (not an error), any other non-zero = terminal failure (already routed through `FailureNotifier`). **Optional diagnostic only** — `DATA_SOURCE_DOWNLOAD`/`PIPELINE` no longer need an external caller to invoke this. |
 
 ```bash
 # Download raw trades from an external API
@@ -113,15 +112,14 @@ step-level `query_params_json` — on a key collision, `--customParamsJson` wins
 reference `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}`, resolved first. Malformed JSON
 or a non-object root fails the run immediately rather than silently resolving to nothing.
 
-### Pipeline selection (PIPELINE and PIPELINE_SYNC)
+### Pipeline selection (PIPELINE only)
 
-No separate flags — `PIPELINE` and `PIPELINE_SYNC` both reuse the exact same
-`--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` (see above). There is no separate
-pipeline config to look up: the report's own `datasources[]` (with each entry's `is_required`)
-already declares which datasources feed it and which are mandatory. `PIPELINE` only **submits**
-the batched datasource job and returns (see `--processType=STATUS_CHECK` above for how a caller
-learns when it's ready, then invokes `REPORT_PROCESSING` itself); `PIPELINE_SYNC` chains all of
-that plus the report run into one blocking call via `PipelineSyncRunner` — see below.
+No separate flags — `PIPELINE` reuses the exact same `--reportName`/`--reportSubprocess` as
+`REPORT_PROCESSING` (see above). There is no separate pipeline config to look up: the report's
+own `datasources[]` (with each entry's `is_required`) already declares which datasources feed it
+and which are mandatory, so `PipelineSequenceFactory` reads that directly, submits them batched
+into one Dataflow job, blocks until every required one is `COMPLETED`, then runs the report via
+the unchanged `ReportPipelineFactory` — all within the one `--processType=PIPELINE` call.
 
 > **Source, sink, transform chain, and retry/DLQ settings** are no longer CLI flags.
 > They are fetched per-datasource from `parameter_store` via `PipelineRunConfig`.
@@ -130,15 +128,16 @@ that plus the report run into one blocking call via `PipelineSyncRunner` — see
 > on `SourceConfig.failureEmailConfig` (`SourceFailureEmailConfig`, `failure_email_*` keys), not on
 > `PipelineRunConfig`. `--calendarName` is a whole-run CLI flag — see below.
 
-### PIPELINE_SYNC poll loop
+### Job completion poll loop
 ```
---pipelineSyncPollIntervalSeconds=30   # default 30 — sleep between each DaRefer readiness poll
---pipelineSyncTimeoutMinutes=180       # default 180 — give up and throw PipelineException(TIMEOUT)
+--jobPollIntervalSeconds=30   # default 30 — sleep between each DaRefer readiness poll
+--jobPollTimeoutMinutes=180   # default 180 — give up and throw *Exception(TIMEOUT)
 ```
-Only read by `--processType=PIPELINE_SYNC` (`PipelineSyncRunner`) — the one call in this framework
-that blocks in-process, looping `DataSourceStatusChecker.checkPipeline()` until every required
-datasource reaches `COMPLETED` or this deadline elapses, then running the report. `PIPELINE` and
-`STATUS_CHECK` never read these — they don't sleep or loop themselves.
+Read by `DATA_SOURCE_DOWNLOAD` and `PIPELINE` — both submit their Beam job, then block in-process
+(`DataSourceStatusChecker.awaitSingle()`/`awaitPipeline()`), re-reading `DaRefer` on this interval
+until every relevant datasource reaches `COMPLETED` or this deadline elapses, instead of calling
+the unavailable `PipelineResult.waitUntilFinish()`. `STATUS_CHECK` never reads these — it's a
+single check, not a wait.
 
 ### Global failure notification (all process types)
 ```

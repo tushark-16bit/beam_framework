@@ -312,24 +312,25 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setOpsFailureFromAddress(String value);
 
     // =========================================================================
-    // PIPELINE_SYNC POLL LOOP
-    // Only read by --processType=PIPELINE_SYNC (PipelineSyncRunner) — the one call chain that
-    // blocks in-process, re-polling DataSourceStatusChecker.checkPipeline() until every required
-    // datasource reaches COMPLETED or this deadline elapses. Not used by PIPELINE/STATUS_CHECK,
-    // which never sleep or loop themselves.
+    // JOB COMPLETION POLL LOOP
+    // Read by DATA_SOURCE_DOWNLOAD and PIPELINE (via DataSourceStatusChecker.awaitSingle()/
+    // awaitPipeline()) — both submit a Beam job then block in-process, re-reading DaRefer on this
+    // interval until every relevant datasource reaches COMPLETED or this deadline elapses, instead
+    // of calling the unavailable PipelineResult.waitUntilFinish(). Not used by STATUS_CHECK, which
+    // never sleeps or loops — it's a single check, not a wait.
     // =========================================================================
 
-    @Description("PIPELINE_SYNC only: seconds to sleep between each DaRefer readiness poll while "
-                 + "waiting for the submitted datasource job to finish.")
+    @Description("DATA_SOURCE_DOWNLOAD and PIPELINE only: seconds to sleep between each DaRefer "
+                 + "readiness poll while blocking for the submitted job to finish.")
     @Default.Integer(30)
-    int getPipelineSyncPollIntervalSeconds();
-    void setPipelineSyncPollIntervalSeconds(int value);
+    int getJobPollIntervalSeconds();
+    void setJobPollIntervalSeconds(int value);
 
-    @Description("PIPELINE_SYNC only: total minutes to keep polling before giving up and throwing "
-                 + "PipelineException(TIMEOUT) instead of running the report.")
+    @Description("DATA_SOURCE_DOWNLOAD and PIPELINE only: total minutes to keep polling before "
+                 + "giving up and throwing *Exception(TIMEOUT) instead of completing normally.")
     @Default.Integer(180)
-    int getPipelineSyncTimeoutMinutes();
-    void setPipelineSyncTimeoutMinutes(int value);
+    int getJobPollTimeoutMinutes();
+    void setJobPollTimeoutMinutes(int value);
 
     // =========================================================================
     // RUN DATE + CALENDAR CONFIGURATION

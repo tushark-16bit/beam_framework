@@ -4,14 +4,13 @@ package com.yourco.beam.exception;
  * Thrown for a DATA_SOURCE_DOWNLOAD failure, carrying enough detail for {@code Main} to log and
  * notify on without re-deriving it from a raw stack trace.
  *
- * <p>Thrown from {@code DataSourcePipelineFactory} (config/graph-assembly failures, and
- * submission failures in {@code Main.runDataSourceDownload()} /
- * {@code PipelineSequenceFactory.submitDataSourceSteps()}), and from
- * {@code DataSourceStatusChecker.checkSingle()} when a {@code STATUS_CHECK} invocation observes a
- * terminal non-COMPLETED row in {@code DaRefer}. That last case is the common one: this
- * framework's runner platform forbids {@code PipelineResult.waitUntilFinish()}, so job outcome is
- * discovered later, by an external poller, rather than as a synchronous exception from the
- * submitting call — see {@code Main}'s class javadoc.
+ * <p>Thrown from {@code DataSourcePipelineFactory} (config/graph-assembly and submission
+ * failures) and from {@code DataSourceStatusChecker.checkSingle()}/{@code awaitSingle()} — the
+ * common case now, since this framework's runner platform forbids
+ * {@code PipelineResult.waitUntilFinish()}: {@code Main.runDataSourceDownload()} submits the job
+ * then blocks in {@code awaitSingle()}'s own poll loop (plain {@code Thread.sleep}, re-reading
+ * {@code DaRefer} — never {@code waitUntilFinish()}) until the source reaches {@code COMPLETED}
+ * or a terminal failure is observed. See {@code Main}'s class javadoc.
  */
 public final class DataSourceDownloadException extends RuntimeException {
 
@@ -26,6 +25,9 @@ public final class DataSourceDownloadException extends RuntimeException {
         CONNECTIVITY_FAILURE,
         /** The Beam job itself failed or was cancelled, cause not further classified. */
         JOB_FAILURE,
+        /** {@code DataSourceStatusChecker.awaitSingle()}'s poll loop ran past
+         *  {@code --jobPollTimeoutMinutes} without the source reaching COMPLETED. */
+        TIMEOUT,
         /** Doesn't match any of the above. */
         UNKNOWN
     }

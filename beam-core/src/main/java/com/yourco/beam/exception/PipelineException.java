@@ -1,25 +1,22 @@
 package com.yourco.beam.exception;
 
 /**
- * Thrown for a PIPELINE (composed DATA_SOURCE_DOWNLOAD submission + STATUS_CHECK readiness gate +
- * REPORT_PROCESSING) failure that isn't already a {@link DataSourceDownloadException} or
- * {@link ReportProcessingException}.
+ * Thrown for a PIPELINE (composed DATA_SOURCE_DOWNLOAD submission + poll-to-ready +
+ * REPORT_PROCESSING, all within one blocking call) failure that isn't already a
+ * {@link DataSourceDownloadException} or {@link ReportProcessingException}.
  *
- * <p>{@code PipelineSequenceFactory.execute()} — which only submits the batched data-source job,
- * see its class javadoc for why it can no longer also wait or run the report — follows one rule:
- * a {@link DataSourceDownloadException} raised while submitting propagates <b>unchanged</b>; it
+ * <p>{@code PipelineSequenceFactory.execute()} follows one rule: a
+ * {@link DataSourceDownloadException} raised while submitting propagates <b>unchanged</b>; it
  * already carries the right specific detail. Anything else (PIPELINE's own config lookup, or any
  * exception type it doesn't recognize) gets wrapped here instead.
  *
- * <p>{@link Reason#ABORTED_REQUIRED_DATASOURCE} is no longer thrown from
- * {@code PipelineSequenceFactory} itself — that required/optional gate moved to
- * {@code DataSourceStatusChecker.checkPipeline()}, invoked later via
- * {@code --processType=STATUS_CHECK} once the batched job is expected to have finished (see
- * {@code Main}'s class javadoc for why the wait moved out-of-process).
- *
- * <p>{@link Reason#TIMEOUT} is specific to {@code --processType=PIPELINE_SYNC}
- * ({@code PipelineSyncRunner}) — the one call chain that blocks, polling {@code checkPipeline()}
- * in a loop until ready or a configured deadline elapses.
+ * <p>{@link Reason#ABORTED_REQUIRED_DATASOURCE} and {@link Reason#TIMEOUT} are thrown by
+ * {@code DataSourceStatusChecker.awaitPipeline()} — the poll loop
+ * {@code PipelineSequenceFactory.execute()} calls, in-process, after submitting and before running
+ * the report. This platform forbids {@code PipelineResult.waitUntilFinish()}, so that loop is a
+ * plain {@code Thread.sleep} re-reading {@code DaRefer} (via
+ * {@code DataSourceStatusChecker.checkPipeline()}) rather than a blocking call on the Beam
+ * {@code PipelineResult} itself — see {@code Main}'s class javadoc.
  */
 public final class PipelineException extends RuntimeException {
 
@@ -36,8 +33,8 @@ public final class PipelineException extends RuntimeException {
         DATASOURCE_PHASE_FAILURE,
         /** The terminal report phase failed with something other than ReportProcessingException. */
         REPORT_PHASE_FAILURE,
-        /** PIPELINE_SYNC's poll loop ran past {@code --pipelineSyncTimeoutMinutes} without every
-         *  required datasource reaching COMPLETED. */
+        /** {@code DataSourceStatusChecker.awaitPipeline()}'s poll loop ran past
+         *  {@code --jobPollTimeoutMinutes} without every required datasource reaching COMPLETED. */
         TIMEOUT,
         /** Doesn't match any of the above. */
         UNKNOWN
