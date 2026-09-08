@@ -1,6 +1,5 @@
 package com.yourco.beam.io.sink;
 
-import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.WriteDispositionType;
 import com.google.api.services.bigquery.model.TableRow;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
@@ -33,12 +32,11 @@ public final class BigQuerySinkTransform extends PTransform<PCollection<Row>, Wr
     private final String destinationTable;
     private final BigQueryIO.Write.WriteDisposition writeDisposition;
 
-    public BigQuerySinkTransform(FrameworkOptions options) {
-        Objects.requireNonNull(options, "options must not be null");
-        this.destinationTable = Objects.requireNonNull(
-                options.getBqSinkTable(),
-                "sinkType=BQ requires --bqSinkTable, e.g. project:dataset.table");
-        this.writeDisposition = toBeamDisposition(options.getWriteDisposition());
+    public BigQuerySinkTransform(String destinationTable, WriteDispositionType writeDisposition) {
+        this.destinationTable = Objects.requireNonNull(destinationTable,
+                "sinkType=BQ requires bq_sink_table in parameter_store");
+        this.writeDisposition = toBeamDisposition(
+                writeDisposition != null ? writeDisposition : WriteDispositionType.TRUNCATE);
     }
 
     @Override

@@ -27,8 +27,8 @@ is written to the per-source output table.
 | `LookupEnrichTransform` | `LOOKUP` | Left-joins rows with a pre-built side input. Accepts `PCollectionView<Map<String,String>>` (key → JSON of lookup row). Name collisions prefixed with `lookup_`. |
 
 The side input for `LookupEnrichTransform` is built by `SourceTransformChainAssembler`:
-- `JDBC` lookup: loaded in driver JVM via `DatabaseAdapterFactory`, wrapped in `Create.of()` + `View.asMap()`
-- `BQ` lookup: read via `BigQueryIO.readTableRows()` as part of the pipeline graph
+- `BQ` lookup: read via `BigQueryIO.readTableRows()` as part of the pipeline graph (the only
+  lookup source type — there is no JDBC in this framework, see `CLAUDE.md` §12)
 
 ## Side-effect transforms
 
@@ -37,13 +37,13 @@ Side effects branch off the main pipeline and run concurrently — they produce 
 
 | Class | Input Row schema | What it does |
 |---|---|---|
-| `side/SideEffectEmailTransform` | `to`, `subject`, `body`, `cc` (optional) | Sends SMTP email per row; credentials from Secret Manager via `--smtpPasswordSecretId` |
-| `side/SideEffectDbWriteTransform` | any Row (columns mapped to DB columns) | Inserts each row into a JDBC table; credentials from `--paramDb*` options |
+| `side/SideEffectEmailTransform` | `to`, `subject`, `body`, `cc` (optional) | Sends SMTP email per row; SMTP host/port/secret-id/from-address passed to its constructor (e.g. from a `SourceFailureEmailConfig`), Secret Manager fetched per worker in `@Setup` |
 
 ```java
 // Wire a side effect into any pipeline factory:
 PCollection<Row> notifications = successRows.apply("BuildNotification", myTransform);
-notifications.apply("SendEmail", new SideEffectEmailTransform(options));
+notifications.apply("SendEmail",
+    new SideEffectEmailTransform(smtpHost, smtpPort, smtpPasswordSecretId, fromAddress));
 ```
 
 ## SideInputFactory — sharing data with transforms

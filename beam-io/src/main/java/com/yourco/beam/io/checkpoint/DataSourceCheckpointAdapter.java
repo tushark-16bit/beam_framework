@@ -24,35 +24,45 @@ import java.util.Optional;
 public interface DataSourceCheckpointAdapter {
 
     /**
-     * Inserts a LOADING row into {@code DaRefer} and returns the generated {@code DaId}.
+     * Inserts a LOADING row into {@code DaRefer} and returns the generated {@code da_id}.
      *
-     * <p>{@code DaId} is {@code MAX(DaId)+1} across the table.
-     * {@code VsnNo} is auto-incremented per (SrceNm, PerId).
+     * <p>{@code da_id} is {@code MAX(da_id)+1} across the table.
+     * {@code vsn_no} is auto-incremented per (srce_nm, per_id).
      *
-     * @param SrceNm data source or report name
-     * @param PerId  period identifier (from MSTR_Per)
-     * @param FlNm   source location — BQ table ref, file path, or API endpoint
-     * @return the new {@code DaId} to pass to all DaRec rows and the final status update
+     * @param srceNm data source or report name
+     * @param perId  period identifier (from MSTR_Per)
+     * @param flNm   source location — BQ table ref, file path, or API endpoint
+     * @return the new {@code da_id} to pass to all DaRec rows and the final status update
      */
-    long createCheckpoint(String SrceNm, String PerId, String FlNm);
+    long createCheckpoint(String srceNm, int perId, String flNm);
 
     /**
-     * Updates the StaCd (and optionally BalAndCntlSmryTx) of an existing DaRefer row.
+     * Updates the sta_cd (and optionally bal_and_cntl_smry_tx) of an existing DaRefer row.
      *
-     * @param DaId              id returned by {@link #createCheckpoint}
-     * @param StaCd             {@code DataSourceCheckpoint.STA_*} constant
+     * @param daId              id returned by {@link #createCheckpoint}
+     * @param staCd             {@code DataSourceCheckpoint.STA_*} constant
      * @param balAndCntlSmryTx  BnC summary JSON, or null if not applicable
      */
-    void updateStatus(long DaId, String StaCd, String balAndCntlSmryTx);
+    void updateStatus(long daId, String staCd, String balAndCntlSmryTx);
 
     /**
-     * Returns true if DaRefer has a COMPLETED row for (SrceNm, PerId) —
+     * Returns true if DaRefer has a COMPLETED row for (srce_nm, per_id) —
      * used to skip already-finished sources.
      */
-    boolean isCompleted(String SrceNm, String PerId);
+    boolean isCompleted(String srceNm, int perId);
 
     /**
-     * Returns the most recent DaRefer row for (SrceNm, PerId), if any.
+     * Returns the most recent DaRefer row for (srce_nm, per_id), if any.
      */
-    Optional<DataSourceCheckpoint> getLatest(String SrceNm, String PerId);
+    Optional<DataSourceCheckpoint> getLatest(String srceNm, int perId);
+
+    /**
+     * Returns the {@code da_id} of the most recent COMPLETED DaRefer row for a datasource.
+     *
+     * <p>Used by REPORT_PROCESSING alias-registry building to resolve which DaRec rows
+     * to stage into {@code RptStageDa} for this report run.
+     *
+     * @throws IllegalArgumentException if no COMPLETED row exists for (srce_nm, per_id)
+     */
+    long fetchLatestCompletedDaId(String srceNm, int perId);
 }

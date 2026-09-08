@@ -46,20 +46,36 @@ flowchart TD
     A["java -jar beam-runner-bundled.jar\n--processType=X ..."] --> B["PipelineOptionsFactory\n.fromArgs(args)\n.as(FrameworkOptions.class)"]
     B --> C{processType?}
 
-    C -->|DATA_SOURCE_DOWNLOAD| D["DataSourcePipelineFactory\n.assemble(options)\npipeline.run()\n.waitUntilFinish()\nrunPostPipelineSteps()"]
+    C -->|DATA_SOURCE_DOWNLOAD| D["DataSourcePipelineFactory\n.assemble(options)\npipeline.run(), then BLOCKS in\nDataSourceStatusChecker.awaitSingle()\n(poll loop — waitUntilFinish() is\nforbidden on this runner platform)"]
 
     C -->|REPORT_PROCESSING| E{reportName\nset?}
     E -->|yes| F["ReportPipelineFactory\n.execute(options)\ndriver-JVM only\nno Beam pipeline"]
-    E -->|no legacy mode| G["PipelineFactory\n.assemble(options)\npipeline.run()\nwaitUntilFinish if batch"]
+    E -->|no legacy mode| G["PipelineFactory\n.assemble(options)\npipeline.run()\nwaitUntilFinish if batch\n(known gap — no checkpoint\nto poll instead)"]
+
+    C -->|PIPELINE| P["PipelineSequenceFactory\n.execute(options)\nsame reportName/reportSubprocess\nas REPORT_PROCESSING — submits\nreport's own datasources[] (batched,\none job), BLOCKS via awaitPipeline(),\nthen runs the report — ONE call"]
+    P -.calls internally.-> D
+    P -.calls internally.-> S
+    P -.calls internally.-> F
+
+    C -->|STATUS_CHECK| S["DataSourceStatusChecker\ncheckSingle() / checkPipeline()\nfast DB-only poll of DaRefer\nnever blocks — one BQ read.\nOptional diagnostic only"]
 
     D --> H[("DaRefer\nBQ table")]
     F --> H
     D --> I[("DaRec\nBQ table")]
+    S --> H
 
     style F fill:#e8f5e9,stroke:#4CAF50
     style D fill:#e3f2fd,stroke:#2196F3
     style G fill:#fafafa,stroke:#999
+    style P fill:#fff3e0,stroke:#FB8C00
+    style S fill:#fce4ec,stroke:#E91E63
 ```
+
+`DATA_SOURCE_DOWNLOAD` and `PIPELINE` both block until fully done — this platform can't call
+`waitUntilFinish()` on the submitted job's own `PipelineResult`, but the JVM process itself can be
+held open as long as needed, so both submit and then poll `DaRefer` in a plain sleep loop instead.
+`STATUS_CHECK` is the only branch here that never blocks — an optional single-check diagnostic,
+not required for either of the two paths above.
 
 ---
 
@@ -80,51 +96,50 @@ sequenceDiagram
 
     Main->>DSF: assemble(options)
     DSF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
-    Per-->>DSF: Period (PerDt, MoNo, YrNo, PerTypeCd)
-    DSF->>BQCfg: BigQuerySourceConfigRepository.getMissingParameters(parentId, datasource, subprocess, period)
-    BQCfg-->>DSF: [] or list of missing keys (fail fast if non-empty)
+    Per-->>DSF: Period (per_dt, mo_no, yr_no, per_typ_cd)
     DSF->>BQCfg: BigQuerySourceConfigRepository.fetchSourceConfigs(parentId, datasource, subprocess, period)
-    BQCfg-->>DSF: List<SourceConfig>
+    BQCfg-->>DSF: List<SourceConfig>  (throws IllegalStateException if row missing)
 
     loop for each SourceConfig
-        DSF->>Checkpoint: isCompleted(SrceNm, PerId)
+        DSF->>Checkpoint: isCompleted(srce_nm, per_id)
         Checkpoint-->>DSF: true / false
         alt already COMPLETED and not overrideDownload
             DSF->>DSF: skip this source
         else
-            DSF->>Checkpoint: createCheckpoint(SrceNm, PerId, FlNm)
-            Checkpoint-->>DSF: DaId (MAX(DaId)+1 across DaRefer)
+            DSF->>Checkpoint: createCheckpoint(srce_nm, per_id, fl_nm)
+            Checkpoint-->>DSF: da_id (MAX(da_id)+1 across DaRefer)
             DSF->>Beam: SourceRouter.routeFromConfig() → PCollection<Row>
             DSF->>Beam: SourceTransformChainAssembler.assemble() → PCollection<Row>
-            DSF->>Beam: DataSourceRecordSinkTransform(DaId)
+            DSF->>Beam: DataSourceRecordSinkTransform(da_id)
         end
     end
 
     DSF-->>Main: Pipeline (graph assembled, no data moved yet)
 
     Main->>Beam: pipeline.run()
-    Beam->>DaRec: streams rows as JSON blobs (RecId, DaId, RowDaJsonTx, LoadDt)
+    Beam->>DaRec: streams rows as JSON blobs (rec_id, da_id, row_da_json_tx, load_dt)
     Beam-->>Main: PipelineResult
 
-    Main->>Main: result.waitUntilFinish()
-    Main->>DSF: runPostPipelineSteps(finalState, error)
+    Note over Main: Main does NOT call waitUntilFinish() (forbidden on this runner platform) —<br/>instead it BLOCKS in DataSourceStatusChecker.awaitSingle(), a plain Thread.sleep<br/>poll loop re-reading DaRefer. Everything below runs inside the Beam worker<br/>(PostDownloadFinalizeTransform), and awaitSingle() notices as soon as it happens.
 
     loop for each SourceConfig that ran
         alt pipeline DONE or UPDATED
-            DSF->>DaRec: COUNT(*) WHERE DaId = X
+            DSF->>DaRec: COUNT(*) WHERE da_id = X
             DaRec-->>DSF: rowCount
-            DSF->>DaRec: SUM(JSON_VALUE(RowDaJsonTx, @field)) WHERE DaId = X (BnC)
+            DSF->>DaRec: SUM(JSON_VALUE(row_da_json_tx, @field)) WHERE da_id = X (BnC)
             DaRec-->>DSF: actual sum
             DSF->>DSF: ValidationConfig checks (min/max rows, BnC tolerance%)
             alt all checks pass
-                DSF->>Checkpoint: updateStatus(DaId, COMPLETED, bncJson)
+                DSF->>Checkpoint: updateStatus(da_id, COMPLETED, bncJson)
             else validation failed
-                DSF->>Checkpoint: updateStatus(DaId, FAILED_BNC, bncJson)
+                DSF->>Checkpoint: updateStatus(da_id, FAILED_BNC, bncJson)
             end
         else pipeline FAILED
-            DSF->>Checkpoint: updateStatus(DaId, FAILED, null)
+            DSF->>Checkpoint: updateStatus(da_id, FAILED, null)
         end
     end
+
+    Note over Checkpoint: awaitSingle()'s poll loop (still running back in Main) reads this<br/>same DaRefer row: COMPLETED → returns, Main.runDataSourceDownload() returns to<br/>Airflow. FAILED/FAILED_BNC/FAILED_TRANSFORM → throws DataSourceDownloadException,<br/>routed through Main's one catch block → FailureNotifier, same call, same process.
 ```
 
 ---
@@ -151,8 +166,8 @@ flowchart TD
         D1 --> D2["GROUP_BY transform\n(if configured)\nGroupByTransform\nMapElements → GroupByKey → AggregateDoFn"]
         D2 --> D3["SORT_BY transform\n(if configured)\nSortByTransform\nper-bundle sort only"]
 
-        D3 --> F["DataSourceRecordSinkTransform\nserialize Row → JSON (JsonUtils.rowToJson)\nset RecId=UUID, DaId, LoadDt\nBigQueryIO.writeTableRows() APPEND"]
-        F --> RecTab[("DaRec\nRecId, DaId\nRowDaJsonTx, LoadDt")]
+        D3 --> F["DataSourceRecordSinkTransform\nserialize Row → JSON (JsonUtils.rowToJson)\nset rec_id=UUID, da_id, load_dt\nBigQueryIO.writeTableRows() APPEND"]
+        F --> RecTab[("DaRec\nrec_id, da_id\nrow_da_json_tx, load_dt")]
     end
 
     subgraph "Driver JVM (before pipeline.run)"
@@ -160,10 +175,10 @@ flowchart TD
         H --> A
     end
 
-    subgraph "Driver JVM (after waitUntilFinish)"
-        RecTab --> I["DataSourceRecordAdapter\n.countRecords(DaId)\n.sumField(DaId, field)"]
+    subgraph "Still inside the Beam worker (PostDownloadFinalizeTransform — driver blocks in a poll loop, not waitUntilFinish())"
+        RecTab --> I["DataSourceRecordAdapter\n.countRecords(da_id)\n.sumField(da_id, field)"]
         I --> J["ValidationConfig\nmin/max row count\nBnC JSON_VALUE SUM checks"]
-        J --> K[("DaRefer\nCOMPLETED / FAILED_BNC / FAILED\n+ BalAndCntlSmryTx JSON")]
+        J --> K[("DaRefer\nCOMPLETED / FAILED_BNC / FAILED\n+ bal_and_cntl_smry_tx JSON")]
     end
 ```
 
@@ -196,42 +211,40 @@ flowchart LR
 
 Report processing runs entirely in the **driver JVM** — no Dataflow job is submitted.
 All configuration is loaded from **BigQuery** (no JDBC). Two config patterns coexist:
-- **Structured** (6 BQ tables via `BigQueryReportRepository`) — used by `ReportPipelineFactory`
-- **Key-value** (`parameter_store` via `BigQueryParameterAdapter`) — used by `ExampleWorkflow` and custom runners
+- **Nested JSON** (`parameter_store` via `BigQueryReportRepository`) — used by `ReportPipelineFactory`
+- **Flat key-value** (`parameter_store` via `BigQueryParameterAdapter`) — used by `ExampleWorkflow`
 
-### 6a. ReportPipelineFactory — structured 6-table BQ config
+Both read the same `parameter_store` table; they differ only in how `parameters_val_json` is structured.
+
+### 6a. ReportPipelineFactory — parameter_store nested JSON config
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Main
     participant RPF as ReportPipelineFactory
-    participant Per as BigQuery<br/>(MSTR_Per)
     participant BQRepo as BigQueryReportRepository
-    participant CfgBQ as BigQuery<br/>(pipeline_config)
-    participant Checkpoint as BigQueryDataSourceCheckpointAdapter<br/>(DaRefer)
+    participant CfgBQ as BigQuery<br/>(parameter_store)
+    participant RptAdapter as BigQueryReportCheckpointAdapter<br/>(RptRefer / RptDaMap / RptStageDa / RptOutput)
+    participant DsAdapter as BigQueryDataSourceCheckpointAdapter<br/>(DaRefer)
     participant BQJob as BigQueryJobService
     participant DataBQ as BigQuery<br/>(data / report tables)
     participant DaRec as BigQuery<br/>(DaRec)
-    participant CmnRpt as BigQueryCommonReportDetailAdapter<br/>(COM_CmnRptDtl)
-    participant Router as ReportOutputSinkRouter
     participant GCS as Cloud Storage
-    participant SMTP as SMTP Server
+    participant EmailUtil as EmailSendUtility<br/>(SPI-discovered or injected)
 
     Main->>RPF: execute(options)
 
     rect rgb(230, 240, 255)
-        Note over RPF,Per: Phase 1 — Period + config load
-        RPF->>Per: BigQueryPeriodRepository.fetchPeriod(periodId)
-        Per-->>RPF: Period (PerDt, MoNo, YrNo, PerTypeCd)
+        Note over RPF,CfgBQ: Phase 1 — Config load
         RPF->>BQRepo: fetchReportConfig(reportName, subprocess, periodId)
-        BQRepo->>CfgBQ: SELECT FROM report_config, report_datasource_ref,<br/>report_preprocessing_config, report_transformation_config,<br/>report_output_config, report_email_config
-        CfgBQ-->>BQRepo: rows
-        BQRepo-->>RPF: ReportConfig
+        BQRepo->>CfgBQ: SELECT parameters_val_json FROM parameter_store<br/>WHERE parameter_group_name=parentId AND parameter_data_source=subprocess<br/>AND parameter_name=reportName
+        CfgBQ-->>BQRepo: parameters_val_json (nested JSON blob)
+        BQRepo-->>RPF: ReportConfig (parsed from JSON)
     end
 
-    RPF->>Checkpoint: createCheckpoint(SrceNm=reportName, PerId, FlNm=reportName)
-    Checkpoint-->>RPF: DaId (LOADING row inserted into DaRefer)
+    RPF->>RptAdapter: createCheckpoint(rptNm=reportName, perId, rptDs=reportName)
+    RptAdapter-->>RPF: rpt_id (LOADING row inserted into RptRefer)
 
     rect rgb(255, 245, 220)
         Note over RPF,DataBQ: Phase 2 — Preprocessing (optional)
@@ -244,32 +257,35 @@ sequenceDiagram
     end
 
     rect rgb(255, 235, 235)
-        Note over RPF,Checkpoint: Phase 3 — Datasource availability check
+        Note over RPF,DsAdapter: Phase 3 — Datasource availability check
         loop each required ReportDatasourceRef
-            RPF->>Checkpoint: isCompleted(SrceNm=datasourceName, PerId)
-            Checkpoint->>DaRec: SELECT DaId FROM DaRefer WHERE SrceNm=? AND PerId=? AND StaCd='COMPLETED'
-            DaRec-->>Checkpoint: DaId or empty
+            RPF->>DsAdapter: isCompleted(srce_nm=datasourceName, per_id)
+            DsAdapter->>DataBQ: SELECT sta_cd FROM DaRefer WHERE srce_nm=? AND per_id=? AND sta_cd='COMPLETED'
+            DataBQ-->>DsAdapter: row or empty
             alt no COMPLETED row
-                RPF->>Checkpoint: updateStatus(DaId, FAILED, null)
-                RPF-->>Main: throws RuntimeException
+                RPF->>RptAdapter: updateStatus(rpt_id, FAILED)
+                RPF-->>Main: throws ReportProcessingException(DATASOURCE_UNAVAILABLE)
             end
         end
     end
 
     rect rgb(230, 255, 235)
-        Note over RPF,DaRec: Phase 4 — Build alias registry
+        Note over RPF,DaRec: Phase 4 — Map datasources + stage data
         loop each ReportDatasourceRef
-            RPF->>BQRepo: fetchDatasourceDaId(datasourceName, periodId)
-            BQRepo->>DaRec: SELECT DaId FROM DaRefer WHERE SrceNm=? AND PerId=? AND StaCd='COMPLETED'
-            DaRec-->>BQRepo: DaId
-            RPF->>RPF: aliasRegistry.put(alias, "SELECT RowDaJsonTx FROM DaRec WHERE DaId=X")
+            RPF->>DsAdapter: fetchLatestCompletedDaId(datasourceName, periodId)
+            DsAdapter-->>RPF: da_id
+            RPF->>RptAdapter: addDaMapping(rpt_id, da_id)
+            RptAdapter-->>RPF: map_id (row inserted into RptDaMap)
+            RPF->>RptAdapter: stageFromDaRec(map_id, da_id)
+            RptAdapter->>DaRec: INSERT INTO RptStageDa SELECT ... FROM DaRec WHERE da_id=? (page copy, one RptStageDa row per DaRec page)
+            RPF->>RPF: aliasRegistry.put(alias, stagedDataSubquery(map_id)) — subquery un-nests RptStageDa's pages back into individual records
         end
     end
 
     rect rgb(240, 230, 255)
         Note over RPF,DataBQ: Phase 5 — Transformation chain
         loop each ReportTransformStep (by step_order)
-            RPF->>RPF: resolveAliasTokens({alias} → DaRec subquery or prior output table)
+            RPF->>RPF: resolveAliasTokens({alias} → RptStageDa subquery or prior output table)
             RPF->>BQJob: runQueryToTable(resolvedSQL, step.outputBqTable)
             BQJob->>DataBQ: CREATE QueryJob → materialise to outputBqTable
             RPF->>RPF: aliasRegistry.put(step.outputAlias, step.outputBqTable)
@@ -277,38 +293,45 @@ sequenceDiagram
     end
 
     rect rgb(255, 250, 220)
-        Note over RPF,GCS: Phase 6 — Output sink routing (per ReportOutputConfig)
+        Note over RPF,GCS: Phase 6 — Export outputs
         loop each ReportOutputConfig (by output_order)
             RPF->>RPF: aliasRegistry.get(inputAlias) → sourceTable
-            RPF->>Router: route(outputConfig, sourceTable, config, options)
-            alt sinkType = GCS
-                Router->>BQJob: exportToCsv / exportToJson(sourceTable, gcsUri)
-                BQJob->>GCS: write file
-                Router-->>RPF: OutputResult(GCS, gcsUri, fileName, hasAttachment=true)
-            else sinkType = BQ
-                Router->>BQJob: copyTable(sourceTable, bqSinkTable)
-                Router-->>RPF: OutputResult(BQ, bqSinkTable, hasAttachment=false)
-            else sinkType = API
-                Router->>DataBQ: SELECT TO_JSON_STRING(t) FROM sourceTable
-                Router->>Router: POST JSON array (auth from Secret Manager)
-                Router-->>RPF: OutputResult(API, endpoint, rowCount, hasAttachment=false)
+            alt outputFormat = CSV
+                RPF->>BQJob: exportToCsv(sourceTable, gcsUri, includeHeader)
+                BQJob->>GCS: write CSV file
+            else outputFormat = JSON
+                RPF->>BQJob: exportToJson(sourceTable, gcsUri)
+                BQJob->>GCS: write JSON file
             end
-            RPF->>CmnRpt: insertDetail(SrceSysNm=reportName, FlNm, RecCt, userId)
         end
+    end
+
+    rect rgb(255, 235, 210)
+        Note over RPF,RptAdapter: Phase 7 — Write RptOutput + clear staged data
+        loop each ReportOutputConfig
+            RPF->>RptAdapter: writeOutput(rpt_id, outptCd, outputDs, lineReferCd, schedTx, balAm, rptTypeCd)
+            RptAdapter->>DataBQ: INSERT INTO RptOutput (vsn_no = MAX(vsn_no)+1)
+        end
+        RPF->>RptAdapter: clearStagedData(rpt_id)
+        RptAdapter->>DataBQ: DELETE FROM RptStageDa WHERE map_id IN (SELECT map_id FROM RptDaMap WHERE rpt_id=?)
     end
 
     rect rgb(220, 245, 255)
-        Note over RPF,SMTP: Phase 7 — Email (GCS outputs only, optional)
-        opt hasEmail
-            loop each OutputResult where hasAttachment=true
-                RPF->>GCS: GcsUtils.readBytes(gcsUri)
-                GCS-->>RPF: byte[]
+        Note over RPF,EmailUtil: Phase 8 — Email (optional; skipped with a warning if no EmailSendUtility is available)
+        opt hasEmail and emailUtility != null
+            loop each exported GCS file
+                RPF->>EmailUtil: FetchFileFromGcs(gcsUri)
+                EmailUtil->>GCS: read object
+                GCS-->>EmailUtil: bytes
+                EmailUtil-->>RPF: InputStream (wrapped as model.EmailAttachment)
             end
-            RPF->>SMTP: SmtpReportEmailAdapter.send(subject, body, to, cc, gcsAttachments)
+            RPF->>EmailUtil: SetEmailParams(fromAddress, subject, toList, ccList, encrypted)
+            EmailUtil-->>RPF: EmailParams
+            RPF->>EmailUtil: CreateEmailRequest(emailParams, body, attachments)
         end
     end
 
-    RPF->>Checkpoint: updateStatus(DaId, COMPLETED, null) or (FAILED, null)
+    RPF->>RptAdapter: updateStatus(rpt_id, COMPLETED) or updateStatus(rpt_id, FAILED)
 ```
 
 ### 6b. ExampleWorkflow — key-value BigQueryParameterAdapter pattern
@@ -322,7 +345,7 @@ sequenceDiagram
     autonumber
     participant EW as ExampleWorkflow
     participant Adapter as BigQueryParameterAdapterImpl
-    participant CfgBQ as BigQuery<br/>(pipeline_config dataset)
+    participant CfgBQ as BigQuery<br/>(dw dataset)
     participant BQJob as BigQueryJobService
     participant DataBQ as BigQuery<br/>(data / report tables)
     participant GCS as Cloud Storage
@@ -331,14 +354,14 @@ sequenceDiagram
 
     rect rgb(230, 240, 255)
         Note over Adapter,CfgBQ: Step 1 — Fetch the parameter_store row (single BQ query)
-        Adapter->>CfgBQ: SELECT ParametersValJson, SchemaOfJson<br/>FROM parameter_store<br/>WHERE ParameterGroupName=@groupName<br/>AND ParameterDataSource=@dataSource<br/>AND ParameterName=@paramName LIMIT 1
+        Adapter->>CfgBQ: SELECT parameters_val_json, schema_of_json<br/>FROM parameter_store<br/>WHERE parameter_group_name=@groupName<br/>AND parameter_data_source=@dataSource<br/>AND parameter_name=@paramName LIMIT 1
         CfgBQ-->>Adapter: one row
     end
 
     rect rgb(230, 255, 235)
         Note over Adapter,Adapter: Step 2 — Parse and validate in driver JVM
-        Adapter->>Adapter: parse SchemaOfJson → find fields where "required"=true<br/>[source_bq_table, transform_query, transform_output_table,<br/>output_gcs_path, output_file_name]
-        Adapter->>Adapter: parse ParametersValJson →<br/>{source_bq_table: "proj.raw.trades",<br/>transform_query: "SELECT ...",<br/>transform_output_table: "proj.reports.summary",<br/>output_gcs_path: "gs://bucket/reports/",<br/>output_file_name: "report_{periodId}.csv"}
+        Adapter->>Adapter: parse schema_of_json → find fields where "required"=true<br/>[source_bq_table, transform_query, transform_output_table,<br/>output_gcs_path, output_file_name]
+        Adapter->>Adapter: parse parameters_val_json →<br/>{source_bq_table: "proj.raw.trades",<br/>transform_query: "SELECT ...",<br/>transform_output_table: "proj.reports.summary",<br/>output_gcs_path: "gs://bucket/reports/",<br/>output_file_name: "report_{periodId}.csv"}
         Adapter->>Adapter: validate all required fields non-null (throws if any missing)
         Adapter-->>EW: Map<String, String> params
     end
@@ -391,36 +414,59 @@ flowchart TD
 
 ---
 
-## 8. DaRefer State Machine
+## 8. Checkpoint State Machines
 
-Both `DATA_SOURCE_DOWNLOAD` (per source) and `REPORT_PROCESSING` write to `DaRefer`.
-Each run creates one row (`StaCd=LOADING`), then updates it to a terminal state.
+### DaRefer — DATA_SOURCE_DOWNLOAD
+
+`DATA_SOURCE_DOWNLOAD` writes one `DaRefer` row per source per run.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> LOADING : createCheckpoint() before pipeline.run() / report.execute()
+    [*] --> LOADING : createCheckpoint() before pipeline.run()
 
-    LOADING --> COMPLETED : DATA_SOURCE_DOWNLOAD: pipeline DONE + row-count and BnC checks passed\nREPORT_PROCESSING: all outputs routed and COM_CmnRptDtl written
+    LOADING --> COMPLETED : pipeline DONE + row-count and BnC checks passed
 
-    LOADING --> FAILED_BNC : DATA_SOURCE_DOWNLOAD only:\npipeline DONE but row count outside min/max\nor BnC SUM exceeds tolerance %
+    LOADING --> FAILED_BNC : pipeline DONE but row count outside min/max\nor BnC SUM exceeds tolerance %
 
-    LOADING --> FAILED : pipeline threw exception\nor required datasource has no COMPLETED DaRefer row\nor any ReportPipelineFactory phase threw
+    LOADING --> FAILED : pipeline threw exception
 
     COMPLETED --> [*]
     FAILED_BNC --> [*]
     FAILED --> [*]
 
     note right of LOADING
-        createCheckpoint() inserts into DaRefer.
-        DaId = MAX(DaId)+1 across all DaRefer rows.
-        VsnNo = MAX(VsnNo)+1 per (SrceNm, PerId).
-        All DaRec rows for this run share the same DaId.
+        da_id = MAX(da_id)+1 across all DaRefer rows.
+        vsn_no = MAX(vsn_no)+1 per (srce_nm, per_id).
+        All DaRec rows for this run share the same da_id.
     end note
 
     note right of COMPLETED
-        updateStatus() sets StaCd and BalAndCntlSmryTx.
-        BalAndCntlSmryTx JSON: {status, srcCount, dstCount,
+        updateStatus() sets sta_cd and bal_and_cntl_smry_tx.
+        bal_and_cntl_smry_tx JSON: {status, srcCount, dstCount,
         srcAmount_X, dstAmount_X} per BnC field.
+    end note
+```
+
+### RptRefer — REPORT_PROCESSING
+
+`REPORT_PROCESSING` writes one `RptRefer` row per report run.
+
+```mermaid
+stateDiagram-v2
+    [*] --> LOADING : createCheckpoint() before execute()
+
+    LOADING --> COMPLETED : all phases complete (transforms + exports + email)
+
+    LOADING --> FAILED : any phase threw (datasource unavailable, BQ job error, etc.)
+
+    COMPLETED --> [*]
+    FAILED --> [*]
+
+    note right of LOADING
+        rpt_id = MAX(rpt_id)+1 across all RptRefer rows.
+        RptDaMap rows added after LOADING (one per datasource).
+        RptStageDa rows populated from DaRec; cleared after export.
+        RptOutput rows written per output step.
     end note
 ```
 
@@ -432,7 +478,7 @@ stateDiagram-v2
 classDiagram
     class SourceConfig {
         +String datasourceName
-        +String periodId
+        +int periodId
         +String subprocessName
         +SourceType sourceType
         +ApiSourceConfig apiConfig
@@ -471,20 +517,20 @@ classDiagram
     }
 
     class DataSourceCheckpoint {
-        +long DaId
-        +String SrceNm
-        +long VsnNo
-        +String PerId
-        +String FlNm
+        +long daId
+        +String srceNm
+        +long vsnNo
+        +String perId
+        +String flNm
         +String balAndCntlSmryTx
-        +String StaCd
-        +Instant CreatedTs
-        +Instant LstUpdtTs
+        +String staCd
+        +Instant createdTs
+        +Instant lstUpdtTs
         +static STA_LOADING
         +static STA_COMPLETED
         +static STA_FAILED_BNC
         +static STA_FAILED
-        +static loading(DaId, VsnNo, SrceNm, PerId, FlNm)
+        +static loading(daId, vsnNo, srceNm, perId, flNm)
     }
 
     class ReportConfig {
@@ -530,119 +576,54 @@ classDiagram
 ## 10. BigQuery Config Tables — Entity Relationship
 
 All configuration lives in BigQuery (`--paramBqProject.--paramBqDataset`). No JDBC.
-Two layouts coexist in the same dataset:
+A single `parameter_store` table holds all configuration for both pipeline types:
 
-- **Structured layout** (6 tables) — queried by `BigQueryReportRepository` for `ReportPipelineFactory`
-- **Key-value layout** (2 tables) — queried by `BigQueryParameterAdapter` for `ExampleWorkflow` and custom runners
+- **Source configs** (DATA_SOURCE_DOWNLOAD) — flat JSON in `parameters_val_json`, read by `BigQuerySourceConfigRepository`
+- **Report configs** (REPORT_PROCESSING) — nested JSON blob in `parameters_val_json`, read by `BigQueryReportRepository`
+
+The lookup key is always `(parameter_group_name, parameter_data_source, parameter_name)`.
+`periodId` is never a lookup key — configs are period-agnostic.
 
 ```mermaid
 erDiagram
     parameter_store {
-        STRING ParameterName PK
-        STRING ParameterGroupName PK
-        STRING ParameterDataSource PK
-        STRING SchemaOfJson
-        STRING ParametersValJson
-        STRING EditGrpNm
-        TIMESTAMP LastUpdtTs
-        STRING LstUpdateUserId
+        STRING parameter_name PK
+        STRING parameter_group_name PK
+        STRING parameter_data_source PK
+        STRING schema_of_json
+        STRING parameters_val_json
+        STRING edit_grp_nm
+        TIMESTAMP last_updt_ts
+        STRING lst_update_user_id
     }
 
     MSTR_Per {
-        STRING PerId PK
-        DATE PerDt
-        INT64 MoNo
-        STRING YrNo
-        STRING PerTypeCd
-        TIMESTAMP LstUpdtTs
+        STRING per_id PK
+        DATE per_dt
+        INT64 mo_no
+        STRING yr_no
+        STRING per_typ_cd
+        TIMESTAMP lst_updt_ts
     }
 
-    source_config {
-        STRING parent_id PK
-        STRING subprocess_name PK
-        STRING datasource_name PK
-        STRING period_id PK
-        STRING source_type
-        STRING bq_query
-        STRING query_params_json
-        STRING source_transforms_json
-        INT64 min_row_count
-        INT64 max_row_count
-        STRING required_headers_json
-        STRING bnc_rules_json
-    }
+    parameter_store ||--|| MSTR_Per : "per_id referenced at runtime"
+```
 
-    report_config {
-        STRING report_name PK
-        STRING report_subprocess PK
-        STRING period_id PK
-        BOOL override_key
-    }
+### parameters_val_json: source config (flat JSON)
+```json
+{"source_type": "BQ", "bq_query": "SELECT ...", "min_row_count": "1", ...}
+```
 
-    report_datasource_ref {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        STRING datasource_name PK
-        STRING datasource_subprocess PK
-        STRING transform_alias
-        BOOL is_required
-    }
-
-    report_preprocessing_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        INT64 step_order PK
-        STRING step_type
-        STRING bq_query
-        STRING bq_output_table
-        STRING query_params_json
-        STRING api_endpoint
-        STRING api_params_json
-    }
-
-    report_transformation_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        INT64 step_order PK
-        STRING input_alias
-        STRING output_alias
-        STRING query_template
-        STRING output_bq_table
-        STRING query_params_json
-    }
-
-    report_output_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        INT64 output_order PK
-        STRING input_alias
-        STRING output_format
-        STRING gcs_path
-        STRING file_prefix
-        STRING file_suffix
-        BOOL include_header
-    }
-
-    report_email_config {
-        STRING report_name PK,FK
-        STRING report_subprocess PK,FK
-        STRING period_id PK,FK
-        STRING to_list
-        STRING cc_list
-        STRING subject_template
-        STRING body_template
-    }
-
-    report_config ||--o{ report_datasource_ref : "has"
-    report_config ||--o{ report_preprocessing_config : "has"
-    report_config ||--o{ report_transformation_config : "has"
-    report_config ||--o{ report_output_config : "has"
-    report_config ||--o| report_email_config : "has"
-    report_datasource_ref }o--|| source_config : "references source of"
+### parameters_val_json: report config (nested JSON)
+```json
+{
+  "override_key": false,
+  "datasources":  [{"datasource_name": "trades", "transform_alias": "raw_trades", "is_required": true, ...}],
+  "preprocessing": [],
+  "transforms":   [{"step_order": 1, "input_alias": "raw_trades", "output_alias": "summary", "query_template": "...", ...}],
+  "outputs":      [{"output_order": 1, "input_alias": "summary", "sink_type": "GCS", "output_format": "CSV", ...}],
+  "email":        {"to_list": ["analyst@example.com"], "subject_template": "Report {periodId}", ...}
+}
 ```
 
 ---
@@ -650,64 +631,92 @@ erDiagram
 ## 11. BigQuery Tables — Runtime State
 
 These tables are written at runtime (in `--checkpointBqDataset`, default `pipeline_metadata`).
-Both process types use `DaRefer`. `DATA_SOURCE_DOWNLOAD` writes `DaRec`. `REPORT_PROCESSING` writes `COM_CmnRptDtl`.
+`DATA_SOURCE_DOWNLOAD` uses `DaRefer` + `DaRec`. `REPORT_PROCESSING` uses `DaRefer` (read-only, availability check) + `RptRefer` / `RptDaMap` / `RptStageDa` / `RptOutput`.
 
 ```mermaid
 erDiagram
     DaRefer {
-        INT64 DaId PK
-        STRING SrceNm
-        INT64 VsnNo
-        STRING PerId
-        STRING FlNm
-        STRING BalAndCntlSmryTx
-        STRING StaCd
-        TIMESTAMP CreatedTs
-        TIMESTAMP LstUpdtTs
+        INT64 da_id PK
+        STRING srce_nm
+        INT64 vsn_no
+        INT64 per_id
+        STRING fl_nm
+        STRING bal_and_cntl_smry_tx
+        STRING sta_cd
+        DATETIME created_ts
+        DATETIME lst_updt_ts
     }
 
     DaRec {
-        STRING RecId PK
-        INT64 DaId FK
-        STRING RowDaJsonTx
-        DATE LoadDt
-        TIMESTAMP LstUpdtTs
+        STRING rec_id PK
+        INT64 da_id FK
+        STRING row_da_json_tx
+        DATE load_dt
+        DATETIME lst_updt_ts
     }
 
-    COM_CmnRptDtl {
-        STRING SrceSysNm
-        STRING FlNm
-        TIMESTAMP SrceFlCreateTs
-        STRING FlDaJsonTx
-        INT64 RecCt
-        TIMESTAMP CreatTs
-        STRING CreateUserId
-        TIMESTAMP LstUpdtTs
-        STRING LstUpdtUserId
+    RptRefer {
+        INT64 rpt_id PK
+        STRING rpt_nm
+        INT64 per_id
+        STRING rpt_ds
+        STRING sta_cd
+        DATETIME creat_ts
+        DATETIME lst_updt_ts
     }
 
-    DaRefer ||--o{ DaRec : "DaId (DATA_SOURCE_DOWNLOAD rows)"
-    DaRefer ||--o{ COM_CmnRptDtl : "SrceNm = SrceSysNm (REPORT_PROCESSING outputs)"
+    RptDaMap {
+        INT64 map_id PK
+        INT64 rpt_id FK
+        INT64 da_id FK
+        DATETIME lst_updt_ts
+    }
+
+    RptStageDa {
+        INT64 stage_id PK
+        INT64 map_id FK
+        STRING stage_ds_json_tx
+        STRING query_config_tx
+        DATE load_dt
+        DATETIME lst_updt_ts
+    }
+
+    RptOutput {
+        STRING outpt_cd
+        DATETIME rpt_dt
+        INT64 vsn_no
+        STRING output_ds
+        STRING line_refer_cd
+        STRING sched_tx
+        FLOAT64 bal_am
+        STRING rpt_type_cd
+        INT64 rpt_id FK
+        DATETIME lst_updt_ts
+    }
+
+    DaRefer ||--o{ DaRec : "da_id (DATA_SOURCE_DOWNLOAD rows)"
+    RptRefer ||--o{ RptDaMap : "rpt_id"
+    RptDaMap ||--o{ RptStageDa : "map_id"
+    RptRefer ||--o{ RptOutput : "rpt_id"
+    DaRefer ||--o{ RptDaMap : "da_id (read from DaRefer by REPORT_PROCESSING)"
 ```
 
-`StaCd` values: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`.
+**DaRefer** — `sta_cd` values: `LOADING` | `COMPLETED` | `FAILED_BNC` | `FAILED`. Written by `DATA_SOURCE_DOWNLOAD` only; read by `REPORT_PROCESSING` to check datasource availability.
 
-For `DATA_SOURCE_DOWNLOAD`: `SrceNm` = datasource name, `FlNm` = BQ table ref / file path / API endpoint.
-For `REPORT_PROCESSING`: `SrceNm` = report name, `FlNm` = report name.
+`vsn_no` increments each time the same `(srce_nm, per_id)` is re-run.
 
-`VsnNo` increments each time the same `(SrceNm, PerId)` is re-run (e.g. after `--overrideDownload=true`).
-
-`BalAndCntlSmryTx` (BnC summary JSON, DATA_SOURCE_DOWNLOAD only):
+`bal_and_cntl_smry_tx` (BnC summary JSON, DATA_SOURCE_DOWNLOAD only):
 ```json
 { "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
 ```
 
-`COM_CmnRptDtl` — one row per output step, written by `REPORT_PROCESSING` for all sink types (GCS, BQ, API).
-`FlNm` = GCS file name, destination BQ table, or API endpoint. `RecCt` = row count written to that sink.
+**RptRefer** — `sta_cd` values: `LOADING` | `COMPLETED` | `FAILED`. Written and updated by `REPORT_PROCESSING` only.
+
+**RptStageDa** — transient. Rows are copied from `DaRec` before the transform chain runs and deleted after all outputs are exported. They exist only for the duration of one report execution. Batched like `DaRec`: one `RptStageDa` row per `DaRec` page (≤250 records), not one row per source record — `stagedDataSubquery()` un-nests those pages back into individual records when a transform's `{alias}` resolves, so this batching is invisible to every `query_template`.
 
 ---
 
-## 12. Email Adapter — Class Structure
+## 12. Email — Two Separate Contracts, Two Different Callers
 
 ```mermaid
 classDiagram
@@ -719,11 +728,11 @@ classDiagram
     class SmtpReportEmailAdapter {
         -Session session
         -String fromAddress
-        +SmtpReportEmailAdapter(FrameworkOptions options)
+        +SmtpReportEmailAdapter(String smtpHost, int smtpPort, String smtpPasswordSecretId, String fromAddress)
         +send(subject, body, to, cc, attachments) void
     }
 
-    class EmailAttachment {
+    class IoEmailAttachment["EmailAttachment (io/email)"] {
         +InputStream content
         +String fileName
         +String contentType
@@ -737,11 +746,41 @@ classDiagram
     }
 
     ReportEmailAdapter <|.. SmtpReportEmailAdapter : implements
-    SmtpReportEmailAdapter ..> EmailAttachment : uses
-    ReportEmailAdapter ..> EmailAttachment : parameter
+    SmtpReportEmailAdapter ..> IoEmailAttachment : uses
+    ReportEmailAdapter ..> IoEmailAttachment : parameter
 
-    note for SmtpReportEmailAdapter "Reads SMTP config from FrameworkOptions.\nFetches password from Secret Manager.\nUses jakarta.mail MimeMultipart\nfor file attachments."
+    note for SmtpReportEmailAdapter "Constructor args come straight from\nSourceFailureEmailConfig — used only by\nPostDownloadFinalizeTransform's\nDATA_SOURCE_DOWNLOAD failure email.\nFetches password from Secret Manager.\nUses jakarta.mail MimeMultipart\nfor file attachments."
+
+    class EmailSendUtility {
+        <<interface>>
+        +SetEmailParams(fromAddress, subject, toList, ccList, encryptedOrNot) EmailParams
+        +CreateEmailRequest(EmailParams, emailBodyHtml, emailAttachments) void
+        +FetchFileFromGcs(fileLocation) InputStream
+    }
+
+    class EmailParams {
+        +String fromEmailAddress
+        +String subject
+        +List~String~ toList
+        +List~String~ ccList
+        +boolean encryptedOrNot
+    }
+
+    class ModelEmailAttachment["EmailAttachment (model)"] {
+        +String fileName
+        +InputStream content
+        +String type
+    }
+
+    EmailSendUtility ..> EmailParams : returns / consumes
+    EmailSendUtility ..> ModelEmailAttachment : parameter
+
+    note for EmailSendUtility "No implementation ships in this repo.\nReportPipelineFactory discovers one via\nServiceLoader SPI, or accepts one via\nconstructor injection. Used only for\nREPORT_PROCESSING/PIPELINE\nreport-completion email — if none is\navailable, sending is skipped with a\nwarning, not a failure."
 ```
+
+`ReportEmailAdapter`/`SmtpReportEmailAdapter` and `EmailSendUtility` are unrelated interfaces for
+two different callers — `ReportPipelineFactory` no longer touches `SmtpReportEmailAdapter` at
+all (its one call site there had a real constructor-signature bug and has been replaced).
 
 ---
 
@@ -757,12 +796,12 @@ DataflowStartJobOperator(
         "--parentId":            "TRADING",      # → parent_id in source_config
         "--datasourceName":      "trades",
         "--subprocessName":      "eod",
-        "--periodId":            "202401",        # MONTHLY YYYYMM — must exist in MSTR_Per
+        "--periodId":            "202401",        # integer period id, e.g. YYYYMM or YYYYMMDD
         "--periodStart":         "2024-01-01",
         "--periodEnd":           "2024-01-31",
         "--runDate":             "{{ ds }}",
         "--paramBqProject":      "my-gcp-project",
-        "--paramBqDataset":      "pipeline_config",
+        "--paramBqDataset":      "dw",
         "--checkpointBqProject": "my-gcp-project",
         "--checkpointBqDataset": "pipeline_metadata",
         "--daReferTable":        "DaRefer",
@@ -782,26 +821,29 @@ DataflowStartJobOperator(
     jar="gs://bucket/jars/beam-runner-bundled.jar",
     options={
         "--processType":         "REPORT_PROCESSING",
-        "--parentId":            "TRADING",      # → ParameterGroupName in parameter_store
+        "--parentId":            "TRADING",      # → parameter_group_name in parameter_store
         "--reportName":          "daily_trades_summary",
         "--reportSubprocess":    "eod",
-        "--periodId":            "202401",        # MONTHLY YYYYMM — must exist in MSTR_Per
+        "--periodId":            "202401",        # integer period id, e.g. YYYYMM or YYYYMMDD
         "--periodStart":         "2024-01-01",
         "--periodEnd":           "2024-01-31",
         "--runDate":             "{{ ds }}",
         "--paramBqProject":      "my-gcp-project",
-        "--paramBqDataset":      "pipeline_config",
+        "--paramBqDataset":      "dw",
         "--checkpointBqProject": "my-gcp-project",
         "--checkpointBqDataset": "pipeline_metadata",
         "--daReferTable":        "DaRefer",
         "--daRecTable":          "DaRec",
-        "--cmnRptDtlTable":      "COM_CmnRptDtl",
+        "--rptReferTable":       "RptRefer",
+        "--rptDaMapTable":       "RptDaMap",
+        "--rptStageDaTable":     "RptStageDa",
+        "--rptOutputTable":      "RptOutput",
         "--emailSmtpHost":       "smtp.gmail.com",
         "--emailSmtpPort":       "587",
         "--smtpPasswordSecretId": "projects/p/secrets/smtp-password/versions/latest",
         "--devErrorEmail":       "reports@company.com",
         # --sinkType / --sourceType / --transformChain are NOT used here;
-        # all output routing comes from report_output_config.sink_type (GCS | BQ | API)
+        # all output routing comes from parameter_store outputs[].sink_type (GCS | BQ | API)
     }
 )
 ```
@@ -821,6 +863,8 @@ Where to find things in the source tree:
 | Entry point | [`beam-runner/.../runner/Main.java`](beam-runner/src/main/java/com/yourco/beam/runner/Main.java) |
 | DATA_SOURCE_DOWNLOAD orchestration | [`beam-runner/.../runner/DataSourcePipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourcePipelineFactory.java) |
 | REPORT_PROCESSING orchestration | [`beam-runner/.../runner/ReportPipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/ReportPipelineFactory.java) |
+| PIPELINE orchestration (submits DATA_SOURCE_DOWNLOAD's batched job, reuses ReportConfig.datasources[]) | [`beam-runner/.../runner/PipelineSequenceFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/PipelineSequenceFactory.java) |
+| STATUS_CHECK readiness poll + the poll loop behind DATA_SOURCE_DOWNLOAD/PIPELINE (replacement for waitUntilFinish()) | [`beam-runner/.../runner/DataSourceStatusChecker.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourceStatusChecker.java) |
 | Source routing | [`beam-io/.../io/source/SourceRouter.java`](beam-io/src/main/java/com/yourco/beam/io/source/SourceRouter.java) |
 | Per-source transform chain | [`beam-runner/.../runner/SourceTransformChainAssembler.java`](beam-runner/src/main/java/com/yourco/beam/runner/SourceTransformChainAssembler.java) |
 | Lookup transform (side input) | [`beam-transforms/.../transforms/source/LookupEnrichTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/LookupEnrichTransform.java) |
@@ -834,5 +878,221 @@ Where to find things in the source tree:
 | Checkpoint lifecycle (LOADING→COMPLETED/FAILED) | [`beam-io/.../io/checkpoint/BigQueryDataSourceCheckpointAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/checkpoint/BigQueryDataSourceCheckpointAdapter.java) |
 | Record table sink (all sources → JSON blobs) | [`beam-io/.../io/sink/DataSourceRecordSinkTransform.java`](beam-io/src/main/java/com/yourco/beam/io/sink/DataSourceRecordSinkTransform.java) |
 | Record validation (BnC via JSON_VALUE) | [`beam-io/.../io/records/BigQueryDataSourceRecordAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/records/BigQueryDataSourceRecordAdapter.java) |
-| Email interface | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
+| Email interface (DATA_SOURCE_DOWNLOAD failure email) | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
 | Email SMTP implementation | [`beam-runner/.../runner/SmtpReportEmailAdapter.java`](beam-runner/src/main/java/com/yourco/beam/runner/SmtpReportEmailAdapter.java) |
+| Email interface (REPORT_PROCESSING/PIPELINE completion email) | [`beam-io/.../io/email/EmailSendUtility.java`](beam-io/src/main/java/com/yourco/beam/io/email/EmailSendUtility.java) |
+| Exception hierarchy (one per process type) | [`beam-core/.../exception/`](beam-core/src/main/java/com/yourco/beam/exception/) |
+| Failure notification entry point | [`beam-runner/.../runner/FailureNotifier.java`](beam-runner/src/main/java/com/yourco/beam/runner/FailureNotifier.java) |
+
+---
+
+## 16. PIPELINE — One Call: Submit, Wait, Run the Report
+
+Composes section 3 (`DATA_SOURCE_DOWNLOAD`), section 16a (the poll loop), and section 6 (the
+report) into a single blocking call. There is no separate pipeline config: `PipelineSequenceFactory`
+takes the exact same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, reads that
+report's own `ReportConfig.datasources[]` (already declaring which datasources feed it and which
+are mandatory via `is_required`), batches whichever aren't `COMPLETED` into one Dataflow job,
+submits it, blocks until every required one completes, then runs the report.
+
+```mermaid
+sequenceDiagram
+    participant Main
+    participant PSF as PipelineSequenceFactory
+    participant RR as BigQueryReportRepository
+    participant SCR as BigQuerySourceConfigRepository
+    participant DSF as DataSourcePipelineFactory
+    participant Beam as Apache Beam / Dataflow
+    participant DSC as DataSourceStatusChecker
+    participant RPF as ReportPipelineFactory
+    participant FN as FailureNotifier
+
+    Main->>PSF: execute(options)
+    PSF->>RR: fetchReportConfig(reportName, reportSubprocess, periodId)
+    RR-->>PSF: ReportConfig.datasources[] (List<ReportDatasourceRef>)
+
+    loop each declared datasource
+        PSF->>SCR: fetchSourceConfigs(parent, dsName, subprocess, periodId)
+        SCR-->>PSF: SourceConfig
+    end
+
+    PSF->>DSF: assembleForConfigs(options, allFetchedConfigs)
+    Note over DSF: skips any datasource already COMPLETED —<br/>same DaRefer skip-logic as standalone<br/>DATA_SOURCE_DOWNLOAD. Throws DataSourceDownloadException<br/>directly on a config/assembly failure.
+    DSF-->>PSF: Pipeline (ONE job, every declared datasource as its own branch)
+    PSF->>Beam: pipeline.run()
+
+    PSF->>DSC: awaitPipeline(options)   [BLOCKS here — see section 16a]
+    alt any required datasource terminal-failed
+        DSC-->>PSF: throw PipelineException(ABORTED_REQUIRED_DATASOURCE)
+        PSF-->>Main: rethrown unchanged
+        Main->>FN: notify(options, e) — ops failure email if configured
+    else poll loop exceeds --jobPollTimeoutMinutes
+        DSC-->>PSF: throw PipelineException(TIMEOUT)
+        PSF-->>Main: rethrown unchanged
+        Main->>FN: notify(options, e)
+    else every required datasource COMPLETED
+        DSC-->>PSF: returns
+        PSF->>RPF: execute(options)   [report — unchanged, see section 6]
+        RPF-->>PSF: RptRefer COMPLETED / FAILED
+        PSF-->>Main: PIPELINE completed
+    end
+```
+
+**Why no separate required/optional flag anywhere else**: the terminal report already declares
+required datasources via `ReportDatasourceRef.required`, enforced both by
+`DataSourceStatusChecker.checkPipeline()` (the poll gate above) and by
+`ReportPipelineFactory.checkDatasourceAvailability()` (a belt-and-suspenders re-check when the
+report actually runs — section 6). A second, independently-set flag anywhere in a
+pipeline-specific config could disagree with the first about the same datasource — there is
+exactly one place "is this datasource required" is declared.
+
+**Why one batched job instead of one job per datasource**: sources are independent Beam branches
+— the "never merged" rule from section 4 still holds, no `Flatten.pCollections()` across sources
+— so submitting every declared datasource as one Dataflow job is just `DataSourcePipelineFactory`'s
+existing multi-source behavior (`assembleForConfigs`), reused rather than reinvented.
+
+### 16a. Why blocking is a poll loop, not `waitUntilFinish()`
+
+This framework's runner platform cannot reliably call `PipelineResult.waitUntilFinish()` on the
+submitted job — that call specifically does not work here. The JVM process itself, though, can be
+held open for as long as needed, so `DataSourceStatusChecker.awaitSingle()`/`awaitPipeline()` — a
+plain `Thread.sleep` loop re-reading `DaRefer` — is what `Main.runDataSourceDownload()` and
+`PipelineSequenceFactory.execute()` actually block in.
+
+```mermaid
+sequenceDiagram
+    participant Caller as Main.runDataSourceDownload() / PipelineSequenceFactory.execute()
+    participant DSC as DataSourceStatusChecker
+    participant RR as BigQueryReportRepository
+    participant CKA as BigQueryDataSourceCheckpointAdapter (DaRefer)
+
+    Caller->>DSC: awaitSingle(options) / awaitPipeline(options)
+    loop every --jobPollIntervalSeconds, up to --jobPollTimeoutMinutes
+        DSC->>DSC: checkSingle(options) / checkPipeline(options)
+        Note over DSC,RR: checkPipeline() only: fetchReportConfig() → datasources[]
+        DSC->>CKA: getLatest(dsName, periodId)  [once, or once per declared datasource]
+        CKA-->>DSC: DataSourceCheckpoint (sta_cd) or empty
+        alt terminal failure on a required datasource
+            DSC-->>Caller: throw DataSourceDownloadException / PipelineException(ABORTED_REQUIRED_DATASOURCE)
+        else still LOADING / no row
+            alt elapsed >= --jobPollTimeoutMinutes
+                DSC-->>Caller: throw *Exception(TIMEOUT)
+            else
+                DSC->>DSC: Thread.sleep(--jobPollIntervalSeconds)
+            end
+        else COMPLETED (all required, for checkPipeline)
+            DSC-->>Caller: return (Outcome.READY)
+        end
+    end
+```
+
+An optional, single-check, non-blocking variant of the same logic (`checkSingle()`/
+`checkPipeline()` called once, not in a loop) is `--processType=STATUS_CHECK` — useful for an ops
+dashboard or a manual look, but not part of the flow above; `DATA_SOURCE_DOWNLOAD`/`PIPELINE`
+never need an external caller to invoke it. Either way, a thrown failure hits the exact same
+`Main.main()` catch block a synchronous failure always used to — it's thrown from inside the same
+call that's been blocked in the poll loop, not from some separate later invocation.
+
+---
+
+## 17. Exception Hierarchy — Class Structure
+
+```mermaid
+classDiagram
+    class DataSourceDownloadException {
+        <<RuntimeException>>
+        +Reason reason
+        +String datasourceName
+        +String subprocessName
+        +int periodId
+        +static wrap(reason, datasourceName, subprocessName, periodId, cause) DataSourceDownloadException
+    }
+    class DataSourceDownloadException_Reason["Reason"] {
+        <<enumeration>>
+        FILE_NOT_FOUND
+        INVALID_INPUT
+        CONNECTIVITY_FAILURE
+        JOB_FAILURE
+        TIMEOUT
+        UNKNOWN
+    }
+
+    class ReportProcessingException {
+        <<RuntimeException>>
+        +Reason reason
+        +String reportName
+        +String reportSubprocess
+        +int periodId
+        +static wrap(reason, reportName, reportSubprocess, periodId, cause) ReportProcessingException
+    }
+    class ReportProcessingException_Reason["Reason"] {
+        <<enumeration>>
+        CONFIG_NOT_FOUND
+        PREPROCESSING_FAILURE
+        DATASOURCE_UNAVAILABLE
+        STAGING_FAILURE
+        TRANSFORM_FAILURE
+        OUTPUT_FAILURE
+        EMAIL_FAILURE
+        UNKNOWN
+    }
+
+    class PipelineException {
+        <<RuntimeException>>
+        +Reason reason
+        +String reportName
+        +String reportSubprocess
+        +int periodId
+        +static wrap(reason, reportName, reportSubprocess, periodId, cause) PipelineException
+    }
+    class PipelineException_Reason["Reason"] {
+        <<enumeration>>
+        CONFIGURATION_ERROR
+        CONFIG_NOT_FOUND
+        ABORTED_REQUIRED_DATASOURCE
+        DATASOURCE_PHASE_FAILURE
+        REPORT_PHASE_FAILURE
+        TIMEOUT
+        UNKNOWN
+    }
+
+    DataSourceDownloadException *-- DataSourceDownloadException_Reason
+    ReportProcessingException *-- ReportProcessingException_Reason
+    PipelineException *-- PipelineException_Reason
+
+    class DataSourceStatusChecker {
+        <<beam-runner, package-private>>
+        +checkSingle(options) Outcome
+        +checkPipeline(options) Outcome
+        +awaitSingle(options) void
+        +awaitPipeline(options) void
+        note "checkSingle/checkPipeline: one\nnon-blocking DaRefer read — STATUS_CHECK's\nimplementation. awaitSingle/awaitPipeline:\na Thread.sleep loop around the check above —\nwhat Main/PipelineSequenceFactory actually\nblock in. Never waitUntilFinish() — that\ncall specifically doesn't work on this\nplatform, even though the JVM process can\nblock as long as needed."
+    }
+
+    class FailureNotifier {
+        <<beam-runner, package-private>>
+        +static notify(options, Throwable) void
+        note "Main's single failure-notification\nentry point. Template by exception\ntype, plus a default for anything\nelse. Always logs; emails only if\n--opsFailureEmail is set and an\nEmailSendUtility is available."
+    }
+
+    DataSourceStatusChecker ..> DataSourceDownloadException : throws (checkSingle/awaitSingle)
+    DataSourceStatusChecker ..> PipelineException : throws (checkPipeline/awaitPipeline)
+    FailureNotifier ..> DataSourceDownloadException : templates
+    FailureNotifier ..> ReportProcessingException : templates
+    FailureNotifier ..> PipelineException : templates
+```
+
+**Thrown from:**
+
+| Exception | Factory | Mechanism |
+|---|---|---|
+| `DataSourceDownloadException` | `DataSourcePipelineFactory.assemble()`/`assembleForConfigs()` | direct try/catch around config load, graph assembly, and submission |
+| `DataSourceDownloadException` | `DataSourceStatusChecker.checkSingle()`/`awaitSingle()` | maps an observed terminal `sta_cd` in `DaRefer` to `JOB_FAILURE`, or a poll-loop timeout to `TIMEOUT` — the common case now, called from `Main.runDataSourceDownload()`'s in-process poll loop after submitting |
+| `ReportProcessingException` | `ReportPipelineFactory.execute()` | a `currentReason` local, updated before each of the 7 phases runs |
+| `PipelineException` | `PipelineSequenceFactory.execute()` | wraps anything that isn't already `DataSourceDownloadException`/`ReportProcessingException`/`PipelineException` |
+| `PipelineException` (`ABORTED_REQUIRED_DATASOURCE`, `TIMEOUT`) | `DataSourceStatusChecker.checkPipeline()`/`awaitPipeline()`, called from `PipelineSequenceFactory.execute()`'s in-process poll loop | a required datasource's `sta_cd` is a terminal failure, or the poll loop exceeded `--jobPollTimeoutMinutes` |
+
+**Caught in:** `Main.main()` — one `catch (Exception e)` around the whole process-type dispatch,
+calling `FailureNotifier.notify(options, e)` then rethrowing `e` unchanged. See section 12's
+pattern (two separate contracts for two different callers) — this is the same idea one layer up:
+three separate exception types for three different process types, all converging on one handler.

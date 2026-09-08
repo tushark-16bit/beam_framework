@@ -1,6 +1,7 @@
 package com.yourco.beam.transforms;
 
 import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.transform.BeamTransform;
 import org.apache.beam.sdk.metrics.Counter;
@@ -45,9 +46,8 @@ public final class MaskPiiTransform implements BeamTransform {
     }
 
     @Override
-    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options) {
-        // Parse the comma-separated PII field list from options (I4 fix)
-        List<String> piiFields = Arrays.stream(options.getPiiFields().split(","))
+    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig) {
+        List<String> piiFields = Arrays.stream(runConfig.getPiiFields().split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .toList();

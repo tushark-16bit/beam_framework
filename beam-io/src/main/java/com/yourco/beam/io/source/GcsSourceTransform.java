@@ -1,7 +1,6 @@
 package com.yourco.beam.io.source;
 
 import com.yourco.beam.model.Schemas;
-import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -10,8 +9,6 @@ import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
-
-import java.util.Objects;
 
 /**
  * Reads newline-delimited JSON files from GCS and produces a {@code PCollection<Row>}.
@@ -27,9 +24,8 @@ public final class GcsSourceTransform extends PTransform<PBegin, PCollection<Row
 
     private final String sourcePath;
 
-    public GcsSourceTransform(FrameworkOptions options) {
-        Objects.requireNonNull(options, "options must not be null");
-        this.sourcePath = options.getGcsSourcePath();
+    public GcsSourceTransform(String sourcePath) {
+        this.sourcePath = sourcePath;
         validateOptions();
     }
 

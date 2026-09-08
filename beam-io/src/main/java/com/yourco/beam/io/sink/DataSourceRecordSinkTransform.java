@@ -1,98 +1,245 @@
 package com.yourco.beam.io.sink;
 
 import com.google.api.services.bigquery.model.TableRow;
+import com.yourco.beam.io.util.FileHeaderLegend;
 import com.yourco.beam.io.util.JsonUtils;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
+import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
+import org.apache.beam.sdk.options.ValueProvider;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.Wait;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.Row;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.sdk.values.TypeDescriptors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
- * Writes a {@code PCollection<Row>} to the {@code DaRec} record table.
+ * Writes a {@code PCollection<Row>} to the {@code DaRec} record table as paginated JSON array blobs.
  *
- * <p>Every row is serialised as a JSON blob in {@code RowDaJsonTx}.
- * All rows from one run share the same {@code DaId} (FK → {@code DaRefer.DaId}).
+ * <h2>Storage format</h2>
+ * All rows from one run are collected globally, then written as pages of at most
+ * {@link PaginateAndBuildDoFn#PAGE_SIZE} rows per DaRec row. Each DaRec row stores one page:
+ * {@code row_da_json_tx} = {@code [{...},{...},...]} — a JSON array of all source rows in the page.
+ * For a 600-row source that means 3 DaRec rows: rows 1-250, 251-500, 501-600.
  *
- * <p>{@code LoadDt} and {@code LstUpdtTs} are captured once in the constructor so that
- * retried Beam bundles and runs spanning midnight all land in the same partition.
+ * <h2>Return value</h2>
+ * Returns a {@code PCollection<Long>} with exactly one element — the <em>total number of source rows</em>
+ * across all pages. This element is only emitted after all streaming inserts (successful and failed)
+ * are confirmed, making it a safe {@link Wait} signal for {@code PostDownloadFinalizeTransform}.
  *
- * <p>The DaRec table must already exist ({@code CREATE_NEVER}):
+ * <h2>Why streaming inserts</h2>
+ * Streaming inserts commit per-row and are immediately visible in {@code SELECT} queries.
+ * {@code PostDownloadFinalizeTransform} queries DaRec (via {@code BigQueryDataSourceRecordAdapter})
+ * from inside a Beam worker immediately after this signal fires — streaming inserts guarantee the
+ * rows are already visible at that point. FILE_LOADS would not.
+ *
+ * <h2>DaRec schema</h2>
  * <pre>{@code
  * CREATE TABLE pipeline_metadata.DaRec (
- *   RecId        STRING    NOT NULL,
- *   DaId         INT64     NOT NULL,
- *   RowDaJsonTx  STRING,
- *   LoadDt       DATE      NOT NULL,
- *   LstUpdtTs    TIMESTAMP NOT NULL
- * ) PARTITION BY LoadDt;
+ *   rec_id         STRING    NOT NULL,
+ *   da_id          INT64     NOT NULL,
+ *   page_no        INT64     NOT NULL,
+ *   row_da_json_tx STRING,
+ *   load_dt        DATE      NOT NULL,
+ *   lst_updt_ts    TIMESTAMP NOT NULL
+ * ) PARTITION BY load_dt;
  * }</pre>
+ *
+ * <h2>FILE-source header legend</h2>
+ * A FILE source with a header row (see {@code FileSourceAdapter}) emits one extra element
+ * alongside its data rows: a header-legend content object wrapped via
+ * {@link FileHeaderLegend#wrapLegend}. {@link PaginateAndBuildDoFn} detects and unwraps it,
+ * excludes it from {@code totalRows} and from page-size accounting, and builds each page for
+ * that source as {@code {"Data":[...rows...],"DataHeaders":[legend]}} instead of a flat array —
+ * appending a copy of the legend to <em>every</em> page so each is independently self-describing.
+ * It never counts as a source row. Headerless FILE pages, and all BQ/API pages, keep the
+ * original flat {@code [{...},{...},...]} shape; every DaRec reader extracts the row array with
+ * {@link FileHeaderLegend#dataArrayExpr}, which handles both shapes without needing to exclude
+ * anything, since {@code DataHeaders} is structurally separate and never gets unnested with
+ * {@code Data}.
  */
-public final class DataSourceRecordSinkTransform extends PTransform<PCollection<Row>, PDone> {
+public final class DataSourceRecordSinkTransform extends PTransform<PCollection<Row>, PCollection<Long>> {
 
     private static final long serialVersionUID = 1L;
 
-    private final String recordTableRef; // project:dataset.table — BigQueryIO format
-    private final long   DaId;
-    private final String loadDt;         // captured once — all rows in this run share the same date
-    private final String lstUpdtTs;      // captured once — avoids per-element clock calls
+    private final String              recordTableRef; // project:dataset.table — BigQueryIO format
+    private final ValueProvider<Long> daId;
+    private final String              loadDt;         // shared across all rows in this run
+    private final String              lstUpdtTs;      // shared across all rows in this run
 
-    public DataSourceRecordSinkTransform(FrameworkOptions options, long DaId) {
+    public DataSourceRecordSinkTransform(FrameworkOptions options, long daId) {
+        this(options, ValueProvider.StaticValueProvider.of(daId));
+    }
+
+    public DataSourceRecordSinkTransform(FrameworkOptions options, ValueProvider<Long> daId) {
         String project = options.getCheckpointBqProject() != null
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
         this.recordTableRef = project + ":" + options.getCheckpointBqDataset()
                             + "." + options.getDaRecTable();
-        this.DaId      = DaId;
+        this.daId      = daId;
         this.loadDt    = LocalDate.now(ZoneOffset.UTC).toString();
         this.lstUpdtTs = Instant.now().toString();
     }
 
     @Override
-    public PDone expand(PCollection<Row> input) {
-        input
-            .apply("Row-to-DaRecRow", MapElements
-                .into(TypeDescriptor.of(TableRow.class))
-                .via(new RowToDaRecFn(DaId, loadDt, lstUpdtTs)))
+    public PCollection<Long> expand(PCollection<Row> input) {
+        // Step 1: Convert each Row to its JSON string representation immediately.
+        // Working with String (StringUtf8Coder) rather than Row avoids schema-coder
+        // propagation issues through GroupByKey.
+        PCollection<String> jsonRows = input
+            .apply("RowsToJson", MapElements
+                .into(TypeDescriptors.strings())
+                .via(new RowToJsonFn()));
+
+        // Step 2: Assign a constant group key so GroupByKey collects ALL rows into one bundle.
+        PCollection<KV<String, String>> keyed = jsonRows
+            .apply("KeyAll", MapElements
+                .into(TypeDescriptors.kvs(TypeDescriptors.strings(), TypeDescriptors.strings()))
+                .via(new AddConstantKeyFn()));
+
+        // Step 3: Group globally.
+        PCollection<KV<String, Iterable<String>>> grouped = keyed
+            .apply("GroupAll", GroupByKey.create());
+
+        // Step 4: Chunk into pages; emit one TableRow per page (main) + total row count (side).
+        PCollectionTuple paginatedOut = grouped
+            .apply("PaginateAndBuild", ParDo
+                .of(new PaginateAndBuildDoFn(daId, loadDt, lstUpdtTs))
+                .withOutputTags(PaginateAndBuildDoFn.PAGES_TAG,
+                                TupleTagList.of(PaginateAndBuildDoFn.TOTAL_ROWS_TAG)));
+
+        PCollection<TableRow> pageRows   = paginatedOut.get(PaginateAndBuildDoFn.PAGES_TAG);
+        PCollection<Long>     totalRows  = paginatedOut.get(PaginateAndBuildDoFn.TOTAL_ROWS_TAG);
+
+        // Step 5: Write pages to DaRec using streaming inserts.
+        WriteResult writeResult = pageRows
             .apply("WriteTo-DaRec", BigQueryIO.writeTableRows()
                 .to(recordTableRef)
                 .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER));
-        return PDone.in(input.getPipeline());
+                .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER)
+                .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                .withExtendedErrorInfo()
+                .withSuccessfulInsertsPropagation(true));
+
+        // Step 6: Return total source-row count held until all streaming inserts complete.
+        // PostDownloadFinalizeTransform.FinalizeDoFn receives this Long as its input element.
+        return totalRows
+            .apply("WaitForDaRecWrites",
+                   Wait.on(writeResult.getSuccessfulInserts(),
+                           writeResult.getFailedInsertsWithErr()));
     }
 
-    /** Serializable — safe for Beam worker serialization. */
-    private static final class RowToDaRecFn implements SerializableFunction<Row, TableRow> {
+    // ── SerializableFunctions ─────────────────────────────────────────────────
+
+    private static final class RowToJsonFn implements SerializableFunction<Row, String> {
+        private static final long serialVersionUID = 1L;
+        @Override public String apply(Row row) { return JsonUtils.rowToJson(row); }
+    }
+
+    private static final class AddConstantKeyFn implements SerializableFunction<String, KV<String, String>> {
+        private static final long serialVersionUID = 1L;
+        @Override public KV<String, String> apply(String json) { return KV.of("__all__", json); }
+    }
+
+    // ── Paginator DoFn ────────────────────────────────────────────────────────
+
+    static final class PaginateAndBuildDoFn
+            extends DoFn<KV<String, Iterable<String>>, TableRow> {
 
         private static final long serialVersionUID = 1L;
+        private static final Logger LOG = LoggerFactory.getLogger(PaginateAndBuildDoFn.class);
 
-        private final long   DaId;
-        private final String loadDt;
-        private final String lstUpdtTs;
+        /** Maximum source rows stored per DaRec row. */
+        static final int PAGE_SIZE = 250;
 
-        RowToDaRecFn(long DaId, String loadDt, String lstUpdtTs) {
-            this.DaId      = DaId;
+        /** Main output: one TableRow per page. */
+        static final TupleTag<TableRow> PAGES_TAG      = new TupleTag<TableRow>() {};
+        /** Side output: one Long element = total source rows across all pages. */
+        static final TupleTag<Long>     TOTAL_ROWS_TAG = new TupleTag<Long>() {};
+
+        private final ValueProvider<Long> daId;
+        private final String              loadDt;
+        private final String              lstUpdtTs;
+
+        PaginateAndBuildDoFn(ValueProvider<Long> daId, String loadDt, String lstUpdtTs) {
+            this.daId      = daId;
             this.loadDt    = loadDt;
             this.lstUpdtTs = lstUpdtTs;
         }
 
-        @Override
-        public TableRow apply(Row row) {
-            return new TableRow()
-                .set("RecId",       UUID.randomUUID().toString())
-                .set("DaId",        DaId)
-                .set("RowDaJsonTx", JsonUtils.rowToJson(row))
-                .set("LoadDt",      loadDt)
-                .set("LstUpdtTs",   lstUpdtTs);
+        @ProcessElement
+        public void processElement(
+                @Element KV<String, Iterable<String>> element,
+                MultiOutputReceiver out) {
+
+            // Materialize all JSON strings — required to paginate. Pull out the FILE-source
+            // header legend (if any) rather than treating it as one more data row.
+            List<String> allJsonRows = new ArrayList<>();
+            String headerLegendContent = null;
+            for (String json : element.getValue()) {
+                if (FileHeaderLegend.isMarkerWrapped(json)) {
+                    if (headerLegendContent == null) {
+                        headerLegendContent = FileHeaderLegend.unwrapLegend(json);
+                    } else {
+                        // Defensive: one FILE source emits at most one legend. Never expected in
+                        // practice, but don't silently drop data if it somehow happens.
+                        LOG.warn("Multiple header-legend rows found for da_id={} — keeping the "
+                                 + "first, ignoring the rest", daId.get());
+                    }
+                } else {
+                    allJsonRows.add(json);
+                }
+            }
+
+            long totalRows = allJsonRows.size();
+            int  pageNo    = 1;
+
+            for (int start = 0; start < allJsonRows.size(); start += PAGE_SIZE) {
+                int end = Math.min(start + PAGE_SIZE, allJsonRows.size());
+                List<String> pageSlice = allJsonRows.subList(start, end);
+
+                // A FILE source with a header row builds {"Data":[...],"DataHeaders":[...]} — the
+                // legend is appended to EVERY page so each page is independently self-describing.
+                // Everything else (BQ/API, headerless FILE) keeps the original flat [{...},...]
+                // shape; FileHeaderLegend.dataArrayExpr() reads both shapes uniformly.
+                String pageJson = headerLegendContent != null
+                    ? FileHeaderLegend.buildPage(pageSlice, headerLegendContent)
+                    : "[" + String.join(",", pageSlice) + "]";
+
+                out.get(PAGES_TAG).output(new TableRow()
+                    .set("rec_id",         UUID.randomUUID().toString())
+                    .set("da_id",          daId.get())
+                    .set("page_no",        pageNo)
+                    .set("row_da_json_tx", pageJson)
+                    .set("load_dt",        loadDt)
+                    .set("lst_updt_ts",    lstUpdtTs));
+
+                pageNo++;
+            }
+
+            // Emit total source row count exactly once (one element, not one per page).
+            // Excludes the header legend — it isn't a source row.
+            out.get(TOTAL_ROWS_TAG).output(totalRows);
         }
     }
 }
