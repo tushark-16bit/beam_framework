@@ -627,6 +627,20 @@ ul.plain li{margin-bottom:6px;}
       </div>
 
       <div class="callout tradeoff">
+        <span class="lbl">Or: one blocking call instead of three &mdash; PIPELINE_SYNC</span>
+        <p>If whatever invokes this JAR can tolerate a long-running process (a VM, a long-timeout
+        batch job &mdash; not a short-lived Airflow operator), <code>--processType=PIPELINE_SYNC</code>
+        (<code>PipelineSyncRunner</code>) chains steps 1&ndash;4 above into one call: it submits,
+        then sleeps and re-polls <code>checkPipeline()</code> internally
+        (<code>--pipelineSyncPollIntervalSeconds</code>, <code>--pipelineSyncTimeoutMinutes</code>)
+        instead of returning, then runs the report itself once ready. A poll loop that exceeds the
+        timeout throws <code>PipelineException(TIMEOUT)</code>. This is the one place in the
+        framework that blocks &mdash; deliberately, via <code>Thread.sleep</code>, never
+        <code>waitUntilFinish()</code> &mdash; so it belongs behind a different kind of trigger than
+        <code>PIPELINE</code> itself.</p>
+      </div>
+
+      <div class="callout tradeoff">
         <span class="lbl">Why this is worth understanding, not just using</span>
         <p>This used to be a real, separate system: its own <code>{"steps":[...]}</code> JSON shape, its own
         <code>PipelineConfig</code>/<code>PipelineStepConfig</code>/<code>DataSourceStep</code>/<code>ReportStep</code>

@@ -17,6 +17,7 @@ You should rarely need to edit this module.
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline. Its non-streaming path still calls `waitUntilFinish()` — a known gap, not fixed alongside the rest of this section since it has no checkpoint table to poll instead (see "Why `waitUntilFinish()` is gone" below) |
 | `PipelineSequenceFactory` | `PIPELINE`: same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, no separate config — **submits** one batched Dataflow job for whichever not-yet-`COMPLETED` datasources the report's own `datasources[]` declares, then returns. Does **not** wait and does **not** run the report anymore — see its own section below for why and what replaced it. A `DataSourceDownloadException` from the submit phase passes through unchanged; anything else becomes `PipelineException` |
 | `DataSourceStatusChecker` | Package-private: fast, synchronous, DB-only readiness check — `STATUS_CHECK`'s implementation, and the replacement for `waitUntilFinish()`. Reads `DaRefer` directly; never sleeps or loops. See its own section below |
+| `PipelineSyncRunner` | Package-private: `PIPELINE_SYNC`'s implementation — chains `PipelineSequenceFactory` (submit) → a sleep loop around `DataSourceStatusChecker.checkPipeline()` → `ReportPipelineFactory` (report) into one **blocking** call. The one place in this module that sleeps; only appropriate from an invocation context that can tolerate a long-running process. See its own section below |
 | `FailureNotifier` | Package-private: `Main`'s single failure-notification entry point — templates by exception type, logs always, emails only if `--opsFailureEmail` is set and an `EmailSendUtility` is available — see its own section below |
 
 ### Why `waitUntilFinish()` is gone
@@ -30,6 +31,13 @@ repeatedly, on its own schedule. `PostDownloadFinalizeTransform` still writes `D
 status from inside the worker exactly as before, regardless of whether anything is watching — only
 how a caller learns about it changed. `REPORT_PROCESSING` (DB-configured) is unaffected — it never
 submits a Beam pipeline at all.
+
+`PIPELINE_SYNC` is the one deliberate exception: `PipelineSyncRunner` blocks in-process with its
+own `Thread.sleep` poll loop around `DataSourceStatusChecker.checkPipeline()` (never
+`waitUntilFinish()` — the constraint is against blocking on a Beam `PipelineResult` specifically,
+not against blocking in general). Use it only where the invoking context itself can tolerate a
+long-running process — never behind the same short-lived trigger `PIPELINE`/`STATUS_CHECK` are
+built for.
 
 ---
 
@@ -272,6 +280,49 @@ existing multi-source behavior, reused rather than reinvented.
   with — every invocation already inserts a fresh `RptRefer` row and re-runs, `--manualOverrun` or
   not.
 
+## PipelineSyncRunner — PIPELINE_SYNC
+
+The one call in this framework that blocks. Chains `PipelineSequenceFactory` (submit),
+`DataSourceStatusChecker.checkPipeline()` in a sleep loop instead of a single check, and
+`ReportPipelineFactory` (report) into a single invocation — the way `PipelineSequenceFactory`
+itself used to work before the `waitUntilFinish()` restriction split it into three separate calls.
+
+```
+PipelineSyncRunner.execute(options)
+    ├─ 1. PipelineSequenceFactory.execute(options)
+    │       submits the batched not-yet-COMPLETED-datasource job, returns fast (unchanged — this
+    │       is the exact same submit-only method PIPELINE calls)
+    │
+    ├─ 2. awaitReady(options)
+    │       loop:
+    │         DataSourceStatusChecker.checkPipeline(options)
+    │           READY   → return, proceed to step 3
+    │           PENDING → if elapsed >= --pipelineSyncTimeoutMinutes:
+    │                         throw PipelineException(TIMEOUT)
+    │                     else: Thread.sleep(--pipelineSyncPollIntervalSeconds), loop again
+    │           (throws) → a required datasource hit a terminal failure — propagates unchanged
+    │                       (PipelineException(ABORTED_REQUIRED_DATASOURCE), or
+    │                       PipelineException(CONFIG_NOT_FOUND) if the report config lookup itself failed)
+    │
+    └─ 3. ReportPipelineFactory.execute(options)
+            unchanged — same call PIPELINE's separate third invocation makes
+```
+
+**Only invoke this from a context that can tolerate a long-running process** — a VM, a
+long-timeout batch job. It is the opposite of `PIPELINE`/`STATUS_CHECK`, which are designed to
+return in milliseconds; do not put `PIPELINE_SYNC` behind the same short-lived trigger those are
+built for. `Thread.sleep` in a loop, not `waitUntilFinish()`, is what makes this legal on a
+platform that forbids blocking on a Beam `PipelineResult` — the restriction is specifically about
+that call, not about blocking in general.
+
+`--pipelineSyncPollIntervalSeconds` (default 30) and `--pipelineSyncTimeoutMinutes` (default 180)
+are read only here — `PIPELINE` and `STATUS_CHECK` never sleep or loop themselves, so they ignore
+both flags.
+
+Exception propagation follows the framework's usual rule: a `DataSourceDownloadException`,
+`ReportProcessingException`, or `PipelineException` from any composed step passes through
+unchanged; anything else becomes `PipelineException(UNKNOWN)`.
+
 ---
 
 ## Failure handling — the exception hierarchy
@@ -285,7 +336,7 @@ has to inspect a message string to know what happened.
 |---|---|---|
 | `DataSourceDownloadException` | `DataSourcePipelineFactory.assemble()`/`assembleForConfigs()` (config/assembly + submission failures); `DataSourceStatusChecker.checkSingle()` — the common case, a `STATUS_CHECK` invocation observing a terminal non-COMPLETED row in `DaRefer` | `FILE_NOT_FOUND`, `INVALID_INPUT`, `CONNECTIVITY_FAILURE`, `JOB_FAILURE`, `UNKNOWN` |
 | `ReportProcessingException` | `ReportPipelineFactory.execute()` | `CONFIG_NOT_FOUND`, `PREPROCESSING_FAILURE`, `DATASOURCE_UNAVAILABLE`, `STAGING_FAILURE`, `TRANSFORM_FAILURE`, `OUTPUT_FAILURE`, `EMAIL_FAILURE`, `UNKNOWN` |
-| `PipelineException` | `PipelineSequenceFactory.execute()` (submit phase only) and `DataSourceStatusChecker.checkPipeline()` (`ABORTED_REQUIRED_DATASOURCE`) | `CONFIGURATION_ERROR`, `CONFIG_NOT_FOUND`, `ABORTED_REQUIRED_DATASOURCE`, `DATASOURCE_PHASE_FAILURE`, `REPORT_PHASE_FAILURE`, `UNKNOWN` |
+| `PipelineException` | `PipelineSequenceFactory.execute()` (submit phase only), `DataSourceStatusChecker.checkPipeline()` (`ABORTED_REQUIRED_DATASOURCE`), and `PipelineSyncRunner.awaitReady()` (`TIMEOUT`) | `CONFIGURATION_ERROR`, `CONFIG_NOT_FOUND`, `ABORTED_REQUIRED_DATASOURCE`, `DATASOURCE_PHASE_FAILURE`, `REPORT_PHASE_FAILURE`, `TIMEOUT`, `UNKNOWN` |
 
 **Picking the `Reason`** — two different techniques, because the failure surfaces two different ways:
 - **Driver-JVM phase tracking** (`ReportPipelineFactory`): a `currentReason` local is updated right
@@ -306,9 +357,16 @@ wrapped in `PipelineException` here. `ABORTED_REQUIRED_DATASOURCE` is thrown sep
 `DataSourceStatusChecker.checkPipeline()` (a later, external-poller-driven `STATUS_CHECK` call),
 not by `PipelineSequenceFactory` itself anymore.
 
-**Catching, in `Main`** — `STATUS_CHECK` goes through the exact same catch as every other process
-type, which is what makes an *asynchronous* job failure still reach the ops failure email: the
-`STATUS_CHECK` invocation that observes it is itself a normal `Main.main()` call:
+**`PipelineSyncRunner`'s pass-through rule** is identical: a `DataSourceDownloadException`,
+`ReportProcessingException`, or `PipelineException` from any of its three composed steps
+propagates unchanged; only `PipelineException(TIMEOUT)` (its poll loop exceeding
+`--pipelineSyncTimeoutMinutes`) and `PipelineException(UNKNOWN)` (anything unrecognized) originate
+inside `PipelineSyncRunner` itself.
+
+**Catching, in `Main`** — `STATUS_CHECK` and `PIPELINE_SYNC` both go through the exact same catch
+as every other process type, which is what makes an *asynchronous* job failure still reach the ops
+failure email: the `STATUS_CHECK` invocation (or `PIPELINE_SYNC`'s internal poll) that observes it
+is itself a normal `Main.main()` call:
 ```java
 try {
     switch (options.getProcessType()) {
@@ -316,6 +374,7 @@ try {
         case REPORT_PROCESSING    -> runReportProcessing(options);
         case PIPELINE             -> runPipelineSequence(options);
         case STATUS_CHECK         -> runStatusCheck(options);
+        case PIPELINE_SYNC        -> PipelineSyncRunner.execute(options);
     }
 } catch (Exception e) {
     FailureNotifier.notify(options, e);

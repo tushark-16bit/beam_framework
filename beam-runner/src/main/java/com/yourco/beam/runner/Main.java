@@ -21,6 +21,11 @@ import org.slf4j.LoggerFactory;
  *                                            returns — does NOT wait and does NOT run the report)
  *   --processType=STATUS_CHECK          →  DataSourceStatusChecker (fast DB-only readiness poll;
  *                                            see below)
+ *   --processType=PIPELINE_SYNC         →  PipelineSyncRunner (chains PIPELINE's submit +
+ *                                            STATUS_CHECK's poll, looped with sleeps, + a
+ *                                            REPORT_PROCESSING run into one BLOCKING call — only
+ *                                            for a context that can tolerate a long-running
+ *                                            process; see its own class javadoc)
  * </pre>
  *
  * <h2>Why nothing here calls {@code PipelineResult.waitUntilFinish()}</h2>
@@ -29,14 +34,17 @@ import org.slf4j.LoggerFactory;
  * unobservable from this process synchronously, so {@code DATA_SOURCE_DOWNLOAD} and
  * {@code PIPELINE} both just submit and log, and completion/failure is discovered later by an
  * external poller (an Airflow sensor's poke loop) calling {@code --processType=STATUS_CHECK}
- * repeatedly against this same JAR. This does not weaken failure handling: the worker-side
+ * repeatedly against this same JAR. {@code PIPELINE_SYNC} is the one exception: it blocks
+ * in-process instead, using its own sleep loop (never {@code waitUntilFinish()}) around repeated
+ * {@code DataSourceStatusChecker.checkPipeline()} calls — appropriate only where the invoking
+ * context itself can tolerate that. None of this weakens failure handling: the worker-side
  * {@code PostDownloadFinalizeTransform} still writes {@code DaRefer}'s terminal status
  * (COMPLETED / FAILED_BNC / FAILED_TRANSFORM / FAILED) exactly as before regardless of whether
- * anything is watching, and {@link #runStatusCheck} throws the same typed exceptions a
- * synchronous {@code waitUntilFinish()} failure used to — so they still flow through this
- * class's one catch block below into {@link FailureNotifier}. Only the trigger for that catch
- * moves from "blocking call threw" to "a status-check invocation observed a terminal failure
- * row in DaRefer".
+ * anything is watching, and {@link #runStatusCheck} (like {@code PipelineSyncRunner}'s internal
+ * poll) throws the same typed exceptions a synchronous {@code waitUntilFinish()} failure used to
+ * — so they still flow through this class's one catch block below into {@link FailureNotifier}.
+ * Only the trigger for that catch moves from "blocking call threw" to "a status-check invocation
+ * observed a terminal failure row in DaRefer".
  *
  * <h2>DATA_SOURCE_DOWNLOAD lifecycle</h2>
  * <pre>
@@ -116,6 +124,7 @@ public final class Main {
                 case REPORT_PROCESSING    -> runReportProcessing(options);
                 case PIPELINE             -> runPipelineSequence(options);
                 case STATUS_CHECK         -> runStatusCheck(options);
+                case PIPELINE_SYNC        -> PipelineSyncRunner.execute(options);
             }
         } catch (Exception e) {
             // Single last-resort catch: DataSourcePipelineFactory/ReportPipelineFactory/
@@ -230,4 +239,10 @@ public final class Main {
                  options.getReportName(), options.getReportSubprocess(), options.getPeriodId());
         new PipelineSequenceFactory().execute(options);
     }
+
+    // ── PIPELINE_SYNC ────────────────────────────────────────────────────────
+    // No wrapper method here — PipelineSyncRunner.execute(options) is called directly from the
+    // switch above. See its own class javadoc: this is the one BLOCKING call chain in the
+    // framework (submit + poll loop + run the report), only appropriate from an invocation
+    // context that can tolerate a long-running process.
 }

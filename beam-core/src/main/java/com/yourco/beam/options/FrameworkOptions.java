@@ -312,6 +312,26 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     void setOpsFailureFromAddress(String value);
 
     // =========================================================================
+    // PIPELINE_SYNC POLL LOOP
+    // Only read by --processType=PIPELINE_SYNC (PipelineSyncRunner) — the one call chain that
+    // blocks in-process, re-polling DataSourceStatusChecker.checkPipeline() until every required
+    // datasource reaches COMPLETED or this deadline elapses. Not used by PIPELINE/STATUS_CHECK,
+    // which never sleep or loop themselves.
+    // =========================================================================
+
+    @Description("PIPELINE_SYNC only: seconds to sleep between each DaRefer readiness poll while "
+                 + "waiting for the submitted datasource job to finish.")
+    @Default.Integer(30)
+    int getPipelineSyncPollIntervalSeconds();
+    void setPipelineSyncPollIntervalSeconds(int value);
+
+    @Description("PIPELINE_SYNC only: total minutes to keep polling before giving up and throwing "
+                 + "PipelineException(TIMEOUT) instead of running the report.")
+    @Default.Integer(180)
+    int getPipelineSyncTimeoutMinutes();
+    void setPipelineSyncTimeoutMinutes(int value);
+
+    // =========================================================================
     // RUN DATE + CALENDAR CONFIGURATION
     // Used by report pipelines to determine which business date to process.
     // Consumed by CalendarUtils and DateUtils in beam-utils.

@@ -36,11 +36,22 @@ package com.yourco.beam.options;
  *       platform forbids {@code PipelineResult.waitUntilFinish()} — the driver JVM cannot block
  *       for a submitted job's full runtime, so job outcome must be polled externally instead.
  *       See {@code DataSourceStatusChecker} and {@code Main.runStatusCheck()}.</li>
+ *   <li>{@link #PIPELINE_SYNC} — same {@code --reportName}/{@code --reportSubprocess} as
+ *       {@link #PIPELINE}, but chains all three steps ({@link #PIPELINE}'s submit,
+ *       {@link #STATUS_CHECK}'s poll loop, then {@link #REPORT_PROCESSING}) into one call that
+ *       <b>does</b> block — internally sleeping and re-polling {@code DaRefer} on
+ *       {@code --pipelineSyncPollIntervalSeconds} until every required datasource reaches
+ *       {@code COMPLETED} (or {@code --pipelineSyncTimeoutMinutes} elapses), then running the
+ *       report itself. Use this only from an invocation context that can tolerate a long-running
+ *       process (a VM, a long-timeout batch job) — never from the same short-lived-trigger context
+ *       {@link #DATA_SOURCE_DOWNLOAD}/{@link #PIPELINE}/{@link #STATUS_CHECK} are designed for.
+ *       See {@code PipelineSyncRunner}.</li>
  * </ul>
  */
 public enum ProcessType {
     DATA_SOURCE_DOWNLOAD,
     REPORT_PROCESSING,
     PIPELINE,
-    STATUS_CHECK
+    STATUS_CHECK,
+    PIPELINE_SYNC
 }

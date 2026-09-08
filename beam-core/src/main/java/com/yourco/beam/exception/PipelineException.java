@@ -16,6 +16,10 @@ package com.yourco.beam.exception;
  * {@code DataSourceStatusChecker.checkPipeline()}, invoked later via
  * {@code --processType=STATUS_CHECK} once the batched job is expected to have finished (see
  * {@code Main}'s class javadoc for why the wait moved out-of-process).
+ *
+ * <p>{@link Reason#TIMEOUT} is specific to {@code --processType=PIPELINE_SYNC}
+ * ({@code PipelineSyncRunner}) — the one call chain that blocks, polling {@code checkPipeline()}
+ * in a loop until ready or a configured deadline elapses.
  */
 public final class PipelineException extends RuntimeException {
 
@@ -32,6 +36,9 @@ public final class PipelineException extends RuntimeException {
         DATASOURCE_PHASE_FAILURE,
         /** The terminal report phase failed with something other than ReportProcessingException. */
         REPORT_PHASE_FAILURE,
+        /** PIPELINE_SYNC's poll loop ran past {@code --pipelineSyncTimeoutMinutes} without every
+         *  required datasource reaching COMPLETED. */
+        TIMEOUT,
         /** Doesn't match any of the above. */
         UNKNOWN
     }

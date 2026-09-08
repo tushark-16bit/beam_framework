@@ -326,6 +326,7 @@ substitutions:
 | `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
 | `PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. **Submits** (does not wait for) **one** batched Dataflow job for whichever datasources the report's own `datasources[]` declares and aren't already `COMPLETED`, then returns | Reuses the report's `datasources[]`/`is_required` — same BQ `parameter_store` row REPORT_PROCESSING already reads |
 | `STATUS_CHECK` | Fast, synchronous, DB-only readiness poll — reads `DaRefer` directly, submits nothing, never blocks. `--reportName` set → checks a `PIPELINE` run's required datasources; blank → checks a single `DATA_SOURCE_DOWNLOAD` run | Same BQ tables the process it's checking already uses |
+| `PIPELINE_SYNC` | Same `--reportName`/`--reportSubprocess` as `PIPELINE`, but chains submit → poll loop → report into **one blocking call** (`PipelineSyncRunner`) instead of three separate invocations. Only for a context that can tolerate a long-running process | Same as `PIPELINE` |
 
 `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` can still be scheduled as **separate, sequential
 Airflow DAGs** — first the download, then the report once all sources are `COMPLETED` — exactly
@@ -340,6 +341,13 @@ poller — typically an Airflow sensor's poke loop — calls `--processType=STAT
 until it's ready, then (for `PIPELINE`) triggers a separate `REPORT_PROCESSING` invocation. See
 `beam-runner/README.md`'s "Why `waitUntilFinish()` is gone" section and `CLAUDE.md` §8/§17 for the
 full call sequence and exit-code contract.
+
+**`PIPELINE_SYNC` is the one exception that does block** — it runs `PIPELINE`'s submit, then an
+in-process sleep loop around `STATUS_CHECK`'s readiness check (`--pipelineSyncPollIntervalSeconds`,
+`--pipelineSyncTimeoutMinutes`), then `REPORT_PROCESSING`'s report run, all as a single JAR
+invocation. Use it only from something that can tolerate a long-running process (a VM, a
+long-timeout batch job) — never from the same short-lived Airflow-operator context `PIPELINE`
+itself is designed for. See `beam-runner/README.md`'s `PipelineSyncRunner` section.
 
 ## DATA_SOURCE_DOWNLOAD — per-source independent pipelines
 
@@ -602,6 +610,34 @@ PIPELINE-specific flag. Every declared datasource bypasses its own `COMPLETED` g
 re-downloads, superseding its previous run's `DaRec` rows once complete, same as standalone
 `DATA_SOURCE_DOWNLOAD`. Pass it on the report call too; the report itself needs no flag at all: it
 has no `COMPLETED` guard of its own and always re-runs fresh, pipeline or standalone.
+
+### PIPELINE_SYNC — the same three steps, one blocking call
+
+If the caller can tolerate a long-running process (a VM, a long-timeout batch job — **not** a
+short-lived Airflow operator), `--processType=PIPELINE_SYNC` chains all three steps above into a
+single invocation: it submits, then sleeps and re-polls `DataSourceStatusChecker.checkPipeline()`
+internally (`--pipelineSyncPollIntervalSeconds`, default 30s; `--pipelineSyncTimeoutMinutes`,
+default 180) instead of returning after the submit, then runs the report itself once ready.
+
+```bash
+java -jar beam-runner-bundled.jar \
+  --processType=PIPELINE_SYNC \
+  --parentId=TRADING \
+  --reportName=daily_trades_report \
+  --reportSubprocess=eod \
+  --periodId=202401 \
+  --periodStart=2024-01-01 \
+  --periodEnd=2024-01-31 \
+  --paramBqProject=my-gcp-project \
+  --paramBqDataset=dw \
+  --pipelineSyncPollIntervalSeconds=30 \
+  --pipelineSyncTimeoutMinutes=180
+```
+
+A required datasource that never completes in time throws `PipelineException(TIMEOUT)`; a
+required datasource that hits a terminal failure throws `PipelineException(ABORTED_REQUIRED_DATASOURCE)`
+— both flow through the same `FailureNotifier` ops-email path as every other failure in this
+framework. See `beam-runner/README.md`'s `PipelineSyncRunner` section.
 
 ## Failure notification (all process types)
 
