@@ -5,12 +5,14 @@ package com.yourco.beam.exception;
  * notify on without re-deriving it from a raw stack trace.
  *
  * <p>Thrown from {@code DataSourcePipelineFactory} (config/graph-assembly and submission
- * failures) and from {@code DataSourceStatusChecker.checkSingle()}/{@code awaitSingle()} — the
- * common case now, since this framework's runner platform forbids
- * {@code PipelineResult.waitUntilFinish()}: {@code Main.runDataSourceDownload()} submits the job
- * then blocks in {@code awaitSingle()}'s own poll loop (plain {@code Thread.sleep}, re-reading
- * {@code DaRefer} — never {@code waitUntilFinish()}) until the source reaches {@code COMPLETED}
- * or a terminal failure is observed. See {@code Main}'s class javadoc.
+ * failures, synchronous in the driver JVM — these reach {@code Main}'s catch block directly)
+ * and from {@code DataSourceStatusChecker.checkSingle()} — a one-shot, non-blocking DB read used
+ * only by the optional {@code STATUS_CHECK} diagnostic now, since {@code main()} no longer blocks
+ * on a submitted job at all (see {@code Main}'s class javadoc on the Flex Template launch
+ * contract). A terminal failure discovered on the worker, inside
+ * {@code PostDownloadFinalizeTransform}, is handled entirely there — it never reaches this
+ * exception type or {@code Main}'s catch block, since the driver JVM has already returned by the
+ * time the worker runs.
  */
 public final class DataSourceDownloadException extends RuntimeException {
 
@@ -25,9 +27,6 @@ public final class DataSourceDownloadException extends RuntimeException {
         CONNECTIVITY_FAILURE,
         /** The Beam job itself failed or was cancelled, cause not further classified. */
         JOB_FAILURE,
-        /** {@code DataSourceStatusChecker.awaitSingle()}'s poll loop ran past
-         *  {@code --jobPollTimeoutMinutes} without the source reaching COMPLETED. */
-        TIMEOUT,
         /** Doesn't match any of the above. */
         UNKNOWN
     }

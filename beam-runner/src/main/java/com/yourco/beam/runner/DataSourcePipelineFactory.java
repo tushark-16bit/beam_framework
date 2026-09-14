@@ -21,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +74,7 @@ public final class DataSourcePipelineFactory {
         }
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
 
-        return assembleForConfigs(options, sourceConfigs);
+        return assembleForConfigs(options, sourceConfigs).pipeline;
     }
 
     /**
@@ -89,8 +90,13 @@ public final class DataSourcePipelineFactory {
      *
      * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility. Assigns a
      * {@code jobRunId} exactly like {@link #assemble} does, if the caller hasn't already.
+     *
+     * <p>Returns a {@link DataSourceAssembly} bundling the pipeline with each source branch's
+     * {@link PostDownloadFinalizeTransform} output signal, so a caller batching several
+     * datasources into one job (e.g. {@code PipelineSequenceFactory}) can wire a downstream step
+     * with {@code Wait.on(assembly.finalizeSignals)} onto the SAME pipeline before submitting it.
      */
-    public Pipeline assembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
+    public DataSourceAssembly assembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
         try {
             return doAssembleForConfigs(options, sourceConfigs);
         } catch (DataSourceDownloadException e) {
@@ -107,7 +113,7 @@ public final class DataSourcePipelineFactory {
         }
     }
 
-    private Pipeline doAssembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
+    private DataSourceAssembly doAssembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
         String jobRunId = options.getJobRunId();
         if (jobRunId == null || jobRunId.isBlank()) {
             jobRunId = UUID.randomUUID().toString();
@@ -122,7 +128,7 @@ public final class DataSourcePipelineFactory {
         if (toProcess.isEmpty()) {
             LOG.info("All {} source(s) already completed. "
                      + "Set --overrideDownload=true to force re-download.", sourceConfigs.size());
-            return Pipeline.create(options);
+            return new DataSourceAssembly(Pipeline.create(options), new ArrayList<>());
         }
         LOG.info("Will process {} of {} source(s)", toProcess.size(), sourceConfigs.size());
 
@@ -164,11 +170,12 @@ public final class DataSourcePipelineFactory {
 
     // ── Graph assembly ────────────────────────────────────────────────────────
 
-    private static Pipeline assemblePipeline(FrameworkOptions options,
+    private static DataSourceAssembly assemblePipeline(FrameworkOptions options,
                                              List<SourceConfig> configs,
                                              Map<String, Long> dataSourceIds,
                                              Map<String, Long> previousDaIds) {
         Pipeline  pipeline = Pipeline.create(options);
+        List<PCollection<?>> finalizeSignals = new ArrayList<>();
         LocalDate runDate  = DateUtils.resolveRunDate(options);
         LOG.info("Effective run date: {}", runDate);
 
@@ -202,15 +209,18 @@ public final class DataSourcePipelineFactory {
                     ValueProvider.StaticValueProvider.of(dsId)));
 
             // Finalize: row/BnC validation, optional data_transform_query, checkpoint update,
-            // manualOverrun cleanup, and failure email — all in the worker
+            // manualOverrun cleanup, and failure email — all in the worker. Its output is a
+            // signal element (this source's da_id) always emitted on completion, success or
+            // failure, so a downstream Wait.on() can gate on it without polling.
             long previousDaId = previousDaIds.getOrDefault(config.datasourceName, -1L);
-            writtenCount.apply(
+            PCollection<Long> finalizeSignal = writtenCount.apply(
                 "Finalize-" + config.datasourceName,
                 new PostDownloadFinalizeTransform(
                     dsId, config, daReferTableRef, daRecTableRef, previousDaId));
+            finalizeSignals.add(finalizeSignal);
         }
 
-        return pipeline;
+        return new DataSourceAssembly(pipeline, finalizeSignals);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

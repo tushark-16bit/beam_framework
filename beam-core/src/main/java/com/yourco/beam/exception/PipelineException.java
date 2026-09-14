@@ -1,22 +1,22 @@
 package com.yourco.beam.exception;
 
 /**
- * Thrown for a PIPELINE (composed DATA_SOURCE_DOWNLOAD submission + poll-to-ready +
- * REPORT_PROCESSING, all within one blocking call) failure that isn't already a
- * {@link DataSourceDownloadException} or {@link ReportProcessingException}.
+ * Thrown for a PIPELINE (batched DATA_SOURCE_DOWNLOAD + REPORT_PROCESSING wired onto one Beam
+ * pipeline via {@code Wait.on()}) failure that isn't already a {@link DataSourceDownloadException}
+ * or {@link ReportProcessingException}.
  *
  * <p>{@code PipelineSequenceFactory.execute()} follows one rule: a
- * {@link DataSourceDownloadException} raised while submitting propagates <b>unchanged</b>; it
- * already carries the right specific detail. Anything else (PIPELINE's own config lookup, or any
- * exception type it doesn't recognize) gets wrapped here instead.
+ * {@link DataSourceDownloadException} raised while assembling/submitting propagates
+ * <b>unchanged</b>; it already carries the right specific detail. Anything else (PIPELINE's own
+ * config lookup, or any exception type it doesn't recognize) gets wrapped here instead.
  *
- * <p>{@link Reason#ABORTED_REQUIRED_DATASOURCE} and {@link Reason#TIMEOUT} are thrown by
- * {@code DataSourceStatusChecker.awaitPipeline()} — the poll loop
- * {@code PipelineSequenceFactory.execute()} calls, in-process, after submitting and before running
- * the report. This platform forbids {@code PipelineResult.waitUntilFinish()}, so that loop is a
- * plain {@code Thread.sleep} re-reading {@code DaRefer} (via
- * {@code DataSourceStatusChecker.checkPipeline()}) rather than a blocking call on the Beam
- * {@code PipelineResult} itself — see {@code Main}'s class javadoc.
+ * <p>{@link Reason#ABORTED_REQUIRED_DATASOURCE} is thrown from inside
+ * {@code ReportFinalizeTransform}'s worker-side DoFn — a one-shot check (no retry, no timeout) of
+ * every required datasource's terminal {@code DaRefer} status, run after the {@code Wait.on()}
+ * barrier confirms every batched datasource branch has finished. There is no poll-loop timeout
+ * anymore: {@code Wait.on()} is a direct Beam data-dependency signal, not a sleep loop with a
+ * deadline, so a {@code TIMEOUT} reason no longer applies — see {@code Main}'s class javadoc for
+ * why blocking in the driver JVM was removed entirely (the Flex Template launch contract).
  */
 public final class PipelineException extends RuntimeException {
 
@@ -33,9 +33,6 @@ public final class PipelineException extends RuntimeException {
         DATASOURCE_PHASE_FAILURE,
         /** The terminal report phase failed with something other than ReportProcessingException. */
         REPORT_PHASE_FAILURE,
-        /** {@code DataSourceStatusChecker.awaitPipeline()}'s poll loop ran past
-         *  {@code --jobPollTimeoutMinutes} without every required datasource reaching COMPLETED. */
-        TIMEOUT,
         /** Doesn't match any of the above. */
         UNKNOWN
     }

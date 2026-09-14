@@ -321,10 +321,10 @@ substitutions:
 
 | `--processType` | What runs | Source config from |
 |---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer`. Submits the job, then **blocks** (in-process poll loop, never `waitUntilFinish()`) until it completes | BQ `parameter_store` table (keyed by `parameter_group_name`, `parameter_data_source`, `parameter_name`) |
+| `DATA_SOURCE_DOWNLOAD` | Fetches raw data; stores every row as JSON in `DaRec`; tracks run lifecycle in `DaRefer`. Submits the job and **returns immediately** — no poll loop, no `waitUntilFinish()` | BQ `parameter_store` table (keyed by `parameter_group_name`, `parameter_data_source`, `parameter_name`) |
 | `REPORT_PROCESSING` (DB-configured) | Checks `DaRefer` availability, stages data into `RptStageDa`, runs BQ transform chain, writes `RptOutput`, sends email | BQ `parameter_store` (nested JSON config) |
 | `REPORT_PROCESSING` (legacy) | Source → transform chain → sink Beam pipeline | `--sourceType` CLI flag (leave `--reportName` blank) |
-| `PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. **One blocking call**: submits one batched Dataflow job for whichever datasources the report's own `datasources[]` declares and aren't already `COMPLETED`, blocks until every required one completes, runs the report, sends its completion email, then returns | Reuses the report's `datasources[]`/`is_required` — same BQ `parameter_store` row REPORT_PROCESSING already reads |
+| `PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. **One call**: wires the report step onto the SAME batched Dataflow job as whichever datasources the report's own `datasources[]` declares and aren't already `COMPLETED` (gated on `Wait.on()`), submits once, and returns immediately. The report itself, and its completion email, run on a worker once every datasource branch finishes | Reuses the report's `datasources[]`/`is_required` — same BQ `parameter_store` row REPORT_PROCESSING already reads |
 | `STATUS_CHECK` | Fast, synchronous, DB-only readiness poll — reads `DaRefer` directly, submits nothing, never blocks. `--reportName` set → checks a `PIPELINE` run's required datasources; blank → checks a single `DATA_SOURCE_DOWNLOAD` run. **Optional diagnostic only** — not needed for normal operation | Same BQ tables the process it's checking already uses |
 
 `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` can still be scheduled as **separate, sequential
@@ -333,16 +333,18 @@ as before. `PIPELINE` is an additional option that runs a fixed sequence as a si
 invocation instead of one call per datasource plus a separate report call — it composes
 `DATA_SOURCE_DOWNLOAD`'s existing factory (reusing it unchanged) rather than replacing it.
 
-**`DATA_SOURCE_DOWNLOAD` and `PIPELINE` each complete in one call, start to finish.** This
-framework's runner platform cannot reliably call `PipelineResult.waitUntilFinish()` on a submitted
-job — that specific call doesn't work here — but the JVM process itself can be held open as long
-as needed, so both submit (`pipeline.run()`) and then block in their own `Thread.sleep` poll loop
-(`DataSourceStatusChecker`), re-reading `DaRefer` until the work reaches a terminal state, before
-returning (or throwing). `PIPELINE` then also runs the report and sends its completion email
-before returning. No external poller is required — `STATUS_CHECK` remains available as an
-optional, non-blocking diagnostic only. See `beam-runner/README.md`'s "Why blocking is a poll
-loop, not `waitUntilFinish()`" section and `CLAUDE.md` §8/§17 for the full call sequence and
-poll-loop flags.
+**Nothing in `main()` blocks on a submitted job, for either `DATA_SOURCE_DOWNLOAD` or `PIPELINE`.**
+This deployment launches via a Dataflow Flex Template, whose launch contract requires `main()` to
+build the pipeline, call `pipeline.run()`, and exit promptly — the launch operation is considered
+complete once the launcher process exits, not once the submitted job finishes. A driver-JVM poll
+loop (an earlier design here) violates that contract exactly as much as `waitUntilFinish()` would,
+and was traced to a real incident (Airflow timing out at the graph level while the Dataflow job
+was still — or already — running). So both process types submit and return immediately; the wait
+for a datasource to finish, running the report, and sending completion/failure email all now
+happen worker-side, gated by `Wait.on()` (a Beam data-dependency barrier, not a sleep loop) instead
+of polling `DaRefer` from the driver JVM. `STATUS_CHECK` remains available as an optional,
+non-blocking diagnostic only. See `beam-runner/README.md`'s "Why nothing blocks in `main()`"
+section and `CLAUDE.md` §8/§9/§17 for the full call sequence.
 
 ## DATA_SOURCE_DOWNLOAD — per-source independent pipelines
 
@@ -547,24 +549,24 @@ and whether each one is mandatory, in its own `datasources[]`:
 
 `PIPELINE` reads that same `datasources[]`, batches whichever aren't already `COMPLETED` for the
 period into **one** Dataflow job (never one job per datasource — sources stay independent
-branches within it, the same "never merged" rule as standalone `DATA_SOURCE_DOWNLOAD`), submits
-it, **blocks** until every required one reaches `COMPLETED`, then runs the report and sends its
-completion email — all within this one call. This framework's runner platform cannot reliably
-call `PipelineResult.waitUntilFinish()` on the submitted job, so the wait is a plain
-`Thread.sleep` poll loop (`DataSourceStatusChecker.awaitPipeline()`) re-reading `DaRefer` instead
-— the JVM process itself can be held open as long as needed, even though blocking on the Beam
-`PipelineResult` specifically doesn't work here.
+branches within it, the same "never merged" rule as standalone `DATA_SOURCE_DOWNLOAD`), wires the
+report step onto that SAME pipeline via `ReportFinalizeTransform.wire()`, submits **once**, and
+**returns immediately**. This deployment launches via a Dataflow Flex Template, whose launch
+contract requires `main()` to submit and exit promptly, so the wait for every required datasource
+to finish — like the report and its completion email — happens worker-side instead, gated by
+`Wait.on()` (a Beam data-dependency barrier, not a `Thread.sleep` poll loop, and not
+`PipelineResult.waitUntilFinish()` either).
 
-A required datasource that hits a terminal failure throws
-`PipelineException(ABORTED_REQUIRED_DATASOURCE)`; a poll loop that never sees every required
-datasource complete within `--jobPollTimeoutMinutes` throws `PipelineException(TIMEOUT)`. Both —
-like any other failure in this framework — flow through the same `FailureNotifier` ops-email path
-before this call returns control to Airflow. This is the exact same required/optional gate
-(`ReportDatasourceRef.required`) `REPORT_PROCESSING` itself enforces
+A required datasource that isn't `COMPLETED` by the time `Wait.on()` unblocks throws
+`PipelineException(ABORTED_REQUIRED_DATASOURCE)` — a one-shot check, no retry or timeout, since
+`Wait.on()` already guarantees a terminal state. This — like any other failure in this
+framework — flows through the same `FailureNotifier` path, called directly from the worker DoFn
+since `main()` has already returned by the time this check runs. This is the exact same
+required/optional gate (`ReportDatasourceRef.required`) `REPORT_PROCESSING` itself enforces
 (`checkDatasourceAvailability()`), just checked earlier, before the report runs.
 
 See `CLAUDE.md` section 10 for the full config shape and `beam-runner/README.md`'s
-`PipelineSequenceFactory`/`DataSourceStatusChecker` sections for the execution flow.
+`PipelineSequenceFactory`/`ReportFinalizeTransform` sections for the execution flow.
 
 ```bash
 java -jar beam-runner-bundled.jar \
@@ -578,9 +580,7 @@ java -jar beam-runner-bundled.jar \
   --paramBqProject=my-gcp-project \
   --paramBqDataset=dw \
   --checkpointBqProject=my-gcp-project \
-  --checkpointBqDataset=pipeline_metadata \
-  --jobPollIntervalSeconds=30 \
-  --jobPollTimeoutMinutes=180
+  --checkpointBqDataset=pipeline_metadata
 ```
 
 **`--manualOverrun` works exactly as it does standalone** — no separate PIPELINE-specific flag.

@@ -447,13 +447,14 @@ ul.plain li{margin-bottom:6px;}
           <code>DataSourceRecordSinkTransform</code> and <code>PostDownloadFinalizeTransform</code> into the graph.</div>
         </div>
         <div class="step" data-n="6">
-          <div class="step-title">Submit, then block until done</div>
-          <div class="step-body"><code>pipeline.run()</code>, then the driver JVM blocks in
-          <code>DataSourceStatusChecker.awaitSingle()</code> &mdash; a plain <code>Thread.sleep</code> poll loop
-          re-reading <code>DaRefer</code> (this runner platform forbids <code>result.waitUntilFinish()</code>
-          specifically, though the process itself can stay open as long as needed) &mdash; until the source
-          reaches <code>COMPLETED</code> or a terminal failure/timeout is thrown. One Airflow call, no
-          external poller needed.</div>
+          <div class="step-title">Submit, then return immediately</div>
+          <div class="step-body"><code>pipeline.run()</code>, then <code>main()</code> returns right away — no poll
+          loop, no <code>result.waitUntilFinish()</code>. This deployment launches via a Dataflow Flex Template,
+          whose launch contract requires the launcher process to submit and exit promptly (the launch is
+          complete once the launcher exits, not once the job finishes); a driver-JVM poll loop would violate
+          that contract just as much as <code>waitUntilFinish()</code> would, and was traced to a real incident
+          (Airflow timing out at the graph level while the job was still, or already, running). Everything from
+          here on runs on a worker, with nothing in the driver JVM watching for it.</div>
         </div>
         <div class="step worker" data-n="7">
           <div class="step-title">Rows land, paginated <span class="tag worker">worker</span></div>
@@ -466,7 +467,10 @@ ul.plain li{margin-bottom:6px;}
         <div class="step worker" data-n="8">
           <div class="step-title">Finalize, entirely inside the worker <span class="tag worker">worker</span></div>
           <div class="step-body">No external post-pipeline step, no second DAG task. All of §checks below runs
-          right here, then the checkpoint is updated and a failure email goes out if one is configured.</div>
+          right here, then the checkpoint is updated and a failure email goes out if one is configured.
+          <code>PostDownloadFinalizeTransform</code> always emits a signal element afterward — success or
+          failure alike — so a batched <code>PIPELINE</code> run's report step can gate on it via
+          <code>Wait.on()</code>.</div>
         </div>
       </div>
 
@@ -611,22 +615,25 @@ ul.plain li{margin-bottom:6px;}
           DATA_SOURCE_DOWNLOAD.</div>
         </div>
         <div class="step" data-n="3">
-          <div class="step-title">Submit, then block until every required datasource completes</div>
-          <div class="step-body"><code>pipeline.run()</code>, then <code>execute()</code> blocks in
-          <code>DataSourceStatusChecker.awaitPipeline()</code> &mdash; a plain <code>Thread.sleep</code> poll
-          loop re-reading <code>DaRefer</code> (this runner platform forbids <code>waitUntilFinish()</code>
-          specifically, though the process can stay open as long as needed). A required datasource that
-          terminal-fails throws <code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code>; a poll loop
-          that never completes within <code>--jobPollTimeoutMinutes</code> throws
-          <code>PipelineException(TIMEOUT)</code>.</div>
+          <div class="step-title">Wire the report step onto the same pipeline, submit once</div>
+          <div class="step-body"><code>ReportFinalizeTransform.wire()</code> adds
+          <code>Create.of(1) &rarr; Wait.on(finalizeSignals) &rarr; ParDo(ReportRunDoFn)</code> to the SAME
+          pipeline the datasource branches are on &mdash; no second job, no extra
+          <code>pipeline.run()</code>. <code>Wait.on()</code> is a Beam data-dependency barrier: no sleep, no
+          timeout, no re-reading <code>DaRefer</code> from outside the pipeline. <code>execute()</code> then
+          calls <code>pipeline.run()</code> exactly once and returns immediately &mdash; required by this
+          deployment's Dataflow Flex Template launch contract (the launcher must submit and exit promptly).</div>
         </div>
-        <div class="step driver" data-n="4">
-          <div class="step-title">Run the report, still the same call</div>
-          <div class="step-body">Once every required datasource is <code>COMPLETED</code>,
-          <code>PipelineSequenceFactory.execute()</code> calls <code>ReportPipelineFactory.execute(options)</code>
-          directly &mdash; the exact same call <code>REPORT_PROCESSING</code> makes standalone, no
-          PIPELINE-specific branch inside it &mdash; sending the report's completion email before this whole
-          <code>--processType=PIPELINE</code> invocation finally returns to Airflow.</div>
+        <div class="step worker" data-n="4">
+          <div class="step-title">On a worker: verify, then run the report <span class="tag worker">worker</span></div>
+          <div class="step-body">Once <code>Wait.on()</code> confirms every datasource branch finished,
+          <code>ReportRunDoFn</code> reconstructs <code>FrameworkOptions</code> via Beam's own
+          <code>PipelineOptions</code> DoFn-parameter injection, one-shot-checks that every required datasource
+          actually reached <code>COMPLETED</code> (throwing <code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code>
+          otherwise &mdash; no retry, no timeout needed), then calls
+          <code>ReportPipelineFactory.execute(options, config)</code> &mdash; the same report logic
+          REPORT_PROCESSING runs standalone, pre-fetched config passed in as a DoFn field. Any exception here
+          is caught and handed to <code>FailureNotifier</code> directly, from the worker, and NOT rethrown.</div>
         </div>
       </div>
 
@@ -635,9 +642,10 @@ ul.plain li{margin-bottom:6px;}
         <p><code>--processType=STATUS_CHECK</code> (with the same <code>--reportName</code>/
         <code>--reportSubprocess</code>/<code>--periodId</code>, or a single
         <code>--datasourceName</code> standalone) is the same <code>checkPipeline()</code>/<code>checkSingle()</code>
-        logic step 3 loops on, exposed as a one-shot, non-blocking call &mdash; useful for an ops dashboard
-        or a manual look. Neither <code>DATA_SOURCE_DOWNLOAD</code> nor <code>PIPELINE</code> needs an
-        external caller to invoke it anymore; both poll internally and only return once actually done.</p>
+        logic, exposed as a one-shot, non-blocking call &mdash; useful for an ops dashboard or a manual look.
+        It's the <em>only</em> way to check readiness from outside the pipeline now: neither
+        <code>DATA_SOURCE_DOWNLOAD</code> nor <code>PIPELINE</code> polls internally anymore &mdash; both
+        submit and return immediately, and the wait moved onto a worker (steps 3&ndash;4 above).</p>
       </div>
 
       <div class="callout tradeoff">
@@ -780,14 +788,13 @@ ul.plain li{margin-bottom:6px;}
               <code>PipelineException</code> — no accidental double-wrapping</li>
           </ul></div>
           <div class="col cost"><div class="h">Cost</div><ul>
-            <li>Two classification techniques, not one — <code>ReportPipelineFactory</code> tracks
-              a <code>currentReason</code> local per phase (driver-JVM, straightforward), while
-              <code>DataSourceDownloadException</code>'s reason for an async job failure comes from
-              <code>DataSourceStatusChecker</code> mapping an observed <code>DaRefer</code> status string
-              (this runner platform forbids <code>waitUntilFinish()</code>, so there is no Beam-job
-              cause chain left to walk here at all &mdash; a status string alone can't distinguish
-              <em>why</em> a worker failed the way an exception's cause chain once could, so this path
-              only ever reports <code>JOB_FAILURE</code>)</li>
+            <li>Two call sites for <code>FailureNotifier</code>, not one — <code>Main</code>'s driver-JVM
+              catch block covers synchronous config/assembly/submit failures, while a failure discovered
+              only on a worker <em>after</em> <code>main()</code> has already returned (a datasource
+              finalize failure, a required-datasource check, or the report itself under PIPELINE) has
+              <code>PostDownloadFinalizeTransform</code>/<code>ReportFinalizeTransform</code> call
+              <code>FailureNotifier</code> directly instead, since there's no driver-JVM catch block left
+              running to reach</li>
           </ul></div>
         </div>
       </div>
@@ -898,7 +905,7 @@ ul.plain li{margin-bottom:6px;}
             <tr><td>Required headers present</td><td><code>ValidationConfig</code> / file parsing</td><td><code>required_headers_json</code></td><td>configured validation failure path</td></tr>
             <tr><td>Declared schema type strictness</td><td><code>BigQuerySchemaUtils.toBeamSchema()</code></td><td><code>bq_schema_json</code> present</td><td>run fails immediately — a bad type name or mismatched value throws, naming the column</td></tr>
             <tr><td>Datasource availability (required)</td><td><code>ReportPipelineFactory</code></td><td><code>ReportDatasourceRef.required</code></td><td><code>IllegalStateException</code>, run aborts before staging</td></tr>
-            <tr><td>Datasource availability (PIPELINE)</td><td><code>PipelineSequenceFactory</code></td><td>same <code>required</code> flag</td><td><code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code> if required, warning-only if optional</td></tr>
+            <tr><td>Datasource availability (PIPELINE)</td><td><code>ReportFinalizeTransform</code> (worker, after <code>Wait.on()</code>)</td><td>same <code>required</code> flag</td><td><code>PipelineException(ABORTED_REQUIRED_DATASOURCE)</code> if required, warning-only if optional</td></tr>
             <tr><td>Config row exists</td><td><code>fetchSourceConfigs()</code> / <code>fetchReportConfig()</code></td><td>always-on</td><td>throws immediately — no separate "is it there" check needed</td></tr>
             <tr><td>Idempotency / skip-already-done</td><td><code>isCompleted(srceNm, perId)</code></td><td>DaRefer status</td><td>source is skipped, not re-run — bypassable via <code>--manualOverrun</code></td></tr>
             <tr><td>Atomic replace never partial</td><td><code>replaceStoredRows()</code></td><td>always-on when a transform applies</td><td>whole transaction rolls back; retried up to ~30s, then throws</td></tr>

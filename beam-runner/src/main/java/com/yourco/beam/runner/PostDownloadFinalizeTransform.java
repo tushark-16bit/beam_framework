@@ -15,7 +15,6 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PDone;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,6 +38,11 @@ import java.util.Map;
  * all streaming inserts are confirmed. Using this as input ensures {@link FinalizeDoFn} only
  * runs after every row is visible in BigQuery.
  *
+ * <p>Output: a {@code PCollection<Long>} with exactly one element — this source's {@code da_id}
+ * — always emitted, whether validation succeeded or failed, so this transform's output can be
+ * used as a {@code Wait.on()} signal by a downstream step (e.g. a report step batched into the
+ * same pipeline) that needs to wait for this source to reach a terminal state without polling.
+ *
  * <h2>Phase order inside {@link FinalizeDoFn#runValidation}</h2>
  * <ol>
  *   <li>row_count_mismatch (always-on) + min/max row bounds (optional) against the raw stored rows</li>
@@ -55,7 +59,7 @@ import java.util.Map;
  *       confirmed good.</li>
  * </ol>
  */
-public final class PostDownloadFinalizeTransform extends PTransform<PCollection<Long>, PDone> {
+public final class PostDownloadFinalizeTransform extends PTransform<PCollection<Long>, PCollection<Long>> {
 
     private static final long serialVersionUID = 1L;
 
@@ -76,15 +80,14 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
     }
 
     @Override
-    public PDone expand(PCollection<Long> writtenCount) {
-        writtenCount.apply("Finalize-" + sourceConfig.datasourceName,
+    public PCollection<Long> expand(PCollection<Long> writtenCount) {
+        return writtenCount.apply("Finalize-" + sourceConfig.datasourceName,
             ParDo.of(new FinalizeDoFn(daId, sourceConfig, daReferTableRef, daRecTableRef, previousDaId)));
-        return PDone.in(writtenCount.getPipeline());
     }
 
     // ── Named DoFn — required for Beam serialization safety ──────────────────
 
-    private static final class FinalizeDoFn extends DoFn<Long, Void> {
+    private static final class FinalizeDoFn extends DoFn<Long, Long> {
 
         private static final long serialVersionUID = 1L;
         private static final Logger LOG = LoggerFactory.getLogger(FinalizeDoFn.class);
@@ -118,7 +121,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         }
 
         @ProcessElement
-        public void processElement(@Element Long pipelineRowCount) {
+        public void processElement(@Element Long pipelineRowCount, OutputReceiver<Long> out) {
             LOG.info("Finalizing da_id={} datasource='{}' (pipeline row count: {})",
                      daId, sourceConfig.datasourceName, pipelineRowCount);
             try {
@@ -128,6 +131,10 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                           sourceConfig.datasourceName, daId, e.getMessage(), e);
                 checkpointAdapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED, null);
                 sendFailureEmail(DataSourceCheckpoint.STA_FAILED, e.getMessage(), null);
+            } finally {
+                // Always emit a signal element — success or failure — so this transform's output
+                // can gate a downstream Wait.on() step regardless of how this source finished.
+                out.output(daId);
             }
         }
 

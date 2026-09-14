@@ -26,25 +26,27 @@ import java.util.Optional;
  * step of each source branch — instead of observing a synchronous exception from
  * {@code PipelineResult}.
  *
- * <h2>Two layers</h2>
- * <ul>
- *   <li>{@link #checkSingle}/{@link #checkPipeline} — one BQ read (or a handful), return
- *       immediately, never sleep. This is {@code ProcessType.STATUS_CHECK}'s implementation — an
- *       optional diagnostic a caller can invoke standalone.</li>
- *   <li>{@link #awaitSingle}/{@link #awaitPipeline} — thin blocking wrappers: loop calling the
- *       check above, {@code Thread.sleep}ing {@code --jobPollIntervalSeconds} between attempts,
- *       until {@link Outcome#READY} or {@code --jobPollTimeoutMinutes} elapses. This is what
- *       {@code Main.runDataSourceDownload()} and {@code PipelineSequenceFactory.execute()} call —
- *       never {@code waitUntilFinish()}, just a plain sleep loop re-reading the DB.</li>
- * </ul>
+ * <h2>One layer — non-blocking only</h2>
+ * {@link #checkSingle}/{@link #checkPipeline} do one BQ read (or a handful) and return
+ * immediately, never sleeping. This is {@code ProcessType.STATUS_CHECK}'s implementation — an
+ * optional, non-blocking diagnostic a caller (an ops dashboard, a manual look) can invoke
+ * standalone.
+ *
+ * <p>Nothing in this class blocks the driver JVM. {@code DATA_SOURCE_DOWNLOAD} and
+ * {@code PIPELINE} no longer poll here at all — see {@link ReportFinalizeTransform} for how a
+ * {@code PIPELINE} run now waits for its batched datasources to finish, using a worker-side
+ * {@code Wait.on()} data-dependency barrier instead of a driver-JVM poll loop. That change was
+ * required by the Flex Template launch contract: the launcher process (running {@code main()})
+ * is expected to build the pipeline, submit it, and exit promptly — the Dataflow launch operation
+ * is considered complete once the launcher exits, not once the job itself finishes, so any
+ * blocking call in {@code main()} (a poll loop or {@code waitUntilFinish()} alike) breaks the
+ * launch itself.
  *
  * <h2>Outcome contract</h2>
  * <ul>
  *   <li>{@link Outcome#READY} — every relevant datasource reached {@code COMPLETED}.</li>
  *   <li>{@link Outcome#PENDING} — still {@code LOADING} (or no row yet). Never thrown as an
- *       exception from the check methods — a still-running job is not a failure, just not
- *       finished yet; the await methods are what turn a too-long PENDING streak into a
- *       {@code TIMEOUT}.</li>
+ *       exception — a still-running job is not a failure, just not finished yet.</li>
  *   <li>A terminal failure ({@code FAILED} / {@code FAILED_BNC} / {@code FAILED_TRANSFORM} on a
  *       required datasource) is <b>thrown</b>, not returned — as
  *       {@link DataSourceDownloadException} ({@link #checkSingle}) or {@link PipelineException}
@@ -88,31 +90,6 @@ final class DataSourceStatusChecker {
             "DATA_SOURCE_DOWNLOAD failed: da_id=" + checkpoint.daId + " sta_cd=" + checkpoint.staCd
             + (checkpoint.balAndCntlSmryTx != null ? " balAndCntlSmryTx=" + checkpoint.balAndCntlSmryTx : ""),
             null);
-    }
-
-    /**
-     * Blocks until the single datasource reaches {@code COMPLETED}, or throws — a terminal
-     * failure ({@link #checkSingle} throwing), or {@link DataSourceDownloadException.Reason#TIMEOUT}
-     * once {@code --jobPollTimeoutMinutes} elapses. Sleeps {@code --jobPollIntervalSeconds}
-     * between checks. Never calls {@code waitUntilFinish()} — this is a plain sleep loop around
-     * {@link #checkSingle}'s DB read.
-     */
-    void awaitSingle(FrameworkOptions options) {
-        long intervalMillis = options.getJobPollIntervalSeconds() * 1000L;
-        long deadlineMillis = System.currentTimeMillis() + options.getJobPollTimeoutMinutes() * 60_000L;
-
-        while (true) {
-            if (checkSingle(options) == Outcome.READY) {
-                return;
-            }
-            if (System.currentTimeMillis() >= deadlineMillis) {
-                throw new DataSourceDownloadException(DataSourceDownloadException.Reason.TIMEOUT,
-                    options.getDatasourceName(), options.getSubprocessName(), options.getPeriodId(),
-                    "DATA_SOURCE_DOWNLOAD timed out after " + options.getJobPollTimeoutMinutes()
-                    + " minute(s) waiting for da_id to reach COMPLETED", null);
-            }
-            sleep(intervalMillis);
-        }
     }
 
     /**
@@ -181,39 +158,4 @@ final class DataSourceStatusChecker {
         return Outcome.READY;
     }
 
-    /**
-     * Blocks until every required datasource reaches {@code COMPLETED}, or throws — a required
-     * datasource's terminal failure ({@link #checkPipeline} throwing
-     * {@link PipelineException.Reason#ABORTED_REQUIRED_DATASOURCE}), or
-     * {@link PipelineException.Reason#TIMEOUT} once {@code --jobPollTimeoutMinutes} elapses.
-     * Sleeps {@code --jobPollIntervalSeconds} between checks. Never calls
-     * {@code waitUntilFinish()} — this is a plain sleep loop around {@link #checkPipeline}'s DB
-     * reads.
-     */
-    void awaitPipeline(FrameworkOptions options) {
-        long intervalMillis = options.getJobPollIntervalSeconds() * 1000L;
-        long deadlineMillis = System.currentTimeMillis() + options.getJobPollTimeoutMinutes() * 60_000L;
-
-        while (true) {
-            if (checkPipeline(options) == Outcome.READY) {
-                return;
-            }
-            if (System.currentTimeMillis() >= deadlineMillis) {
-                throw new PipelineException(PipelineException.Reason.TIMEOUT,
-                    options.getReportName(), options.getReportSubprocess(), options.getPeriodId(),
-                    "PIPELINE timed out after " + options.getJobPollTimeoutMinutes()
-                    + " minute(s) waiting for required datasource(s) to reach COMPLETED");
-            }
-            sleep(intervalMillis);
-        }
-    }
-
-    private static void sleep(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Poll loop interrupted", e);
-        }
-    }
 }

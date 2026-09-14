@@ -9,7 +9,6 @@ import com.yourco.beam.model.ReportConfig;
 import com.yourco.beam.model.ReportDatasourceRef;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.options.FrameworkOptions;
-import org.apache.beam.sdk.Pipeline;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,11 +17,10 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Runs a complete {@code PIPELINE} sequence in one blocking call: submits every datasource the
- * terminal report itself declares via {@code ReportConfig.datasources[]} as a single batched
- * Dataflow job, blocks until every <em>required</em> one reaches {@code COMPLETED}, then runs the
- * report and returns. One Airflow task, one JVM invocation, all the way through the report's own
- * completion email.
+ * Assembles a complete {@code PIPELINE} sequence — every datasource the terminal report itself
+ * declares via {@code ReportConfig.datasources[]}, plus the report step, plus the report's
+ * completion/failure email — as ONE batched Dataflow job, submits it once, and returns
+ * immediately. Nothing in the driver JVM blocks.
  *
  * <p>There is no separate pipeline config — {@code --reportName}/{@code --reportSubprocess} are
  * the same flags {@code REPORT_PROCESSING} already uses. A report's own {@code datasources[]}
@@ -30,45 +28,52 @@ import java.util.stream.Collectors;
  * which datasources feed the report and which of those are mandatory, so nothing else needs to
  * redeclare that as a second, separately-maintained sequence.
  *
- * <h2>Why the wait is a poll loop, not {@code waitUntilFinish()}</h2>
- * This framework's runner platform cannot reliably block on a submitted job's own
- * {@code PipelineResult} — calling {@code PipelineResult.waitUntilFinish()} specifically does not
- * work here. The process itself, though, can be held open for as long as needed — so instead of
- * calling that method, {@link #execute} blocks in {@link DataSourceStatusChecker#awaitPipeline},
- * a plain {@code Thread.sleep} loop re-reading {@code DaRefer} (the same row
- * {@code PostDownloadFinalizeTransform} writes from the worker) until every required datasource
- * reaches {@code COMPLETED}, a required one hits a terminal failure, or the configured timeout
- * elapses.
+ * <h2>Why the wait moved onto the worker</h2>
+ * This deployment launches via a Dataflow Flex Template, whose launch contract requires
+ * {@code main()} to submit the pipeline and exit promptly — the launch is considered complete
+ * once the launcher process exits, not once the job finishes. A driver-JVM poll loop (this
+ * class's previous design) or {@code PipelineResult.waitUntilFinish()} both violate that
+ * contract and were traced to a real incident (Airflow timing out at the graph level while the
+ * Dataflow job was still — or already — running). The fix: {@link #execute} wires the report
+ * step onto the SAME pipeline as the datasource branches, via
+ * {@link ReportFinalizeTransform#wire}, gated on a {@code Wait.on()} data-dependency barrier
+ * instead of a poll loop — then submits once and returns. See {@code Main}'s class javadoc.
  *
  * <h2>Execution</h2>
  * <pre>
  *   PipelineSequenceFactory.execute(options)
  *   ├─ 1. BigQueryReportRepository.fetchReportConfig()             → ReportConfig.datasources[]
  *   ├─ 2. fetch SourceConfig for every declared datasource (by name, via BigQuerySourceConfigRepository)
- *   ├─ 3. DataSourcePipelineFactory.assembleForConfigs()            → ONE batched Dataflow job
+ *   ├─ 3. DataSourcePipelineFactory.assembleForConfigs()            → DataSourceAssembly: the
+ *   │        batched pipeline + one finalize signal PCollection per datasource branch
  *   │        (internally skips any datasource already COMPLETED, same as standalone DATA_SOURCE_DOWNLOAD)
- *   ├─ 4. pipeline.run()                                            → submitted
- *   ├─ 5. DataSourceStatusChecker.awaitPipeline(options)             → blocks here (poll loop)
- *   │        required datasource(s) all COMPLETED → proceed
- *   │        a required datasource terminal-failed  → throw PipelineException(ABORTED_REQUIRED_DATASOURCE)
- *   │        poll loop exceeds --jobPollTimeoutMinutes → throw PipelineException(TIMEOUT)
- *   └─ 6. ReportPipelineFactory.execute(options)                    → report + its completion email
+ *   ├─ 4. ReportFinalizeTransform.wire(pipeline, finalizeSignals, reportConfig, options)
+ *   │        → adds Create.of(1) → Wait.on(finalizeSignals) → ReportRunDoFn to the SAME pipeline
+ *   └─ 5. pipeline.run()                                            → submitted; execute() returns
  * </pre>
+ * Everything downstream of submission — waiting for the datasource branches, verifying required
+ * ones actually reached {@code COMPLETED}, running the report, sending its completion/failure
+ * email — happens on a worker, inside {@link ReportFinalizeTransform}'s {@code ReportRunDoFn}.
  *
- * <p>Composes the existing {@link DataSourcePipelineFactory}, {@link DataSourceStatusChecker}, and
- * {@link ReportPipelineFactory} rather than reimplementing any of them.
+ * <p>Composes the existing {@link DataSourcePipelineFactory} and {@link ReportPipelineFactory}
+ * rather than reimplementing either.
  *
  * <h2>Exception propagation</h2>
- * {@link DataSourceDownloadException} from the submit phase and {@link ReportProcessingException}
- * from the report phase propagate <b>unchanged</b> — they already carry the specific detail
- * {@code Main} needs. {@link PipelineException} from the poll ({@code ABORTED_REQUIRED_DATASOURCE},
- * {@code TIMEOUT}) is already the right type too. Only PIPELINE's own config lookup, or an
- * unrecognized exception type, gets wrapped in {@link PipelineException} here.
+ * {@link DataSourceDownloadException} from the assembly/submit phase (synchronous, in the driver
+ * JVM) propagates <b>unchanged</b> — it already carries the specific detail {@code Main} needs.
+ * A failure discovered only on the worker (a required datasource that didn't reach
+ * {@code COMPLETED}, or a {@link ReportProcessingException} from the report itself) never reaches
+ * this method or {@code Main}'s catch block at all — {@code execute()} has already returned by
+ * then, so {@link ReportFinalizeTransform} calls {@code FailureNotifier} itself from the worker.
+ * Only PIPELINE's own config lookup, or an unrecognized exception type during assembly, gets
+ * wrapped in {@link PipelineException} here.
  *
  * <h2>{@code --manualOverrun}</h2>
  * Applies uniformly across the whole sequence, exactly as it does standalone, because the same
- * {@code options} instance — never a copy, never a reset field — is passed straight into both
- * {@link DataSourcePipelineFactory#assembleForConfigs} and {@link ReportPipelineFactory#execute}:
+ * {@code options} instance — never a copy, never a reset field — is passed straight into
+ * {@link DataSourcePipelineFactory#assembleForConfigs}, and the worker reconstructs an equivalent
+ * view of the same options via {@code PipelineOptions} injection before calling
+ * {@link ReportPipelineFactory#execute}:
  * <ul>
  *   <li>Every declared datasource bypasses its own {@code COMPLETED} skip-guard and re-downloads,
  *       superseding its previous run's {@code DaRec} rows once the new run completes — identical
@@ -79,8 +84,7 @@ import java.util.stream.Collectors;
  *       with (see its class javadoc); every invocation already inserts a fresh {@code RptRefer}
  *       row and re-runs, {@code --manualOverrun} or not.</li>
  * </ul>
- * This is a real invariant this class relies on, not an accident of implementation — do not
- * introduce a scoped copy of {@code options} for either phase without re-threading this flag.
+ * This is a real invariant this class relies on, not an accident of implementation.
  */
 public final class PipelineSequenceFactory {
 
@@ -110,61 +114,56 @@ public final class PipelineSequenceFactory {
         }
         List<ReportDatasourceRef> datasources = reportConfig.datasources;
 
-        // A DataSourceDownloadException, ReportProcessingException, or PipelineException raised
-        // by any composed phase already carries the right specific detail — pass it through
-        // unchanged rather than re-wrapping. Only an exception PIPELINE doesn't recognize gets
-        // wrapped here.
+        // A DataSourceDownloadException raised during assembly/submission already carries the
+        // right specific detail — pass it through unchanged rather than re-wrapping. Only an
+        // exception PIPELINE doesn't recognize gets wrapped here.
         try {
-            submitDataSourceSteps(options, datasources);
-            new DataSourceStatusChecker().awaitPipeline(options);
-
-            // reportName/reportSubprocess were never touched — options is exactly what the
-            // operator passed in, same flags REPORT_PROCESSING already reads.
-            new ReportPipelineFactory().execute(options);
-        } catch (DataSourceDownloadException | ReportProcessingException | PipelineException e) {
+            assembleAndSubmit(options, datasources, reportConfig);
+        } catch (DataSourceDownloadException | PipelineException e) {
             throw e;
         } catch (Exception e) {
             throw PipelineException.wrap(PipelineException.Reason.UNKNOWN,
                 reportName, reportSubprocess, periodId, e);
         }
 
-        LOG.info("PIPELINE completed: report={}", reportName);
+        LOG.info("PIPELINE submitted: report={} — the report itself, and its completion/failure "
+                 + "email, will run on a worker once every datasource branch finishes", reportName);
     }
 
-    // ── Phase 1: batched data-source job ────────────────────────────────────
+    // ── Assembly: batched data-source job + report step, one pipeline, one submit ──
 
-    private void submitDataSourceSteps(FrameworkOptions options, List<ReportDatasourceRef> datasources) {
-        if (datasources.isEmpty()) {
-            LOG.info("Report declares no datasources — proceeding straight to the report");
-            return;
-        }
-
-        String names = datasources.stream().map(ref -> ref.datasourceName).distinct()
-            .collect(Collectors.joining(","));
-
+    private void assembleAndSubmit(FrameworkOptions options, List<ReportDatasourceRef> datasources,
+                                    ReportConfig reportConfig) {
         List<SourceConfig> sourceConfigs = new ArrayList<>();
-        try {
-            BigQuerySourceConfigRepository sourceRepo = new BigQuerySourceConfigRepository(options);
-            for (ReportDatasourceRef ref : datasources) {
-                sourceConfigs.addAll(sourceRepo.fetchSourceConfigs(
-                    options.getParentId(), ref.datasourceName, ref.datasourceSubprocess, options.getPeriodId()));
+        if (!datasources.isEmpty()) {
+            String names = datasources.stream().map(ref -> ref.datasourceName).distinct()
+                .collect(Collectors.joining(","));
+            try {
+                BigQuerySourceConfigRepository sourceRepo = new BigQuerySourceConfigRepository(options);
+                for (ReportDatasourceRef ref : datasources) {
+                    sourceConfigs.addAll(sourceRepo.fetchSourceConfigs(
+                        options.getParentId(), ref.datasourceName, ref.datasourceSubprocess, options.getPeriodId()));
+                }
+            } catch (Exception e) {
+                throw DataSourceDownloadException.wrap(DataSourceDownloadException.Reason.INVALID_INPUT,
+                    names, null, options.getPeriodId(), e);
             }
-        } catch (Exception e) {
-            throw DataSourceDownloadException.wrap(DataSourceDownloadException.Reason.INVALID_INPUT,
-                names, null, options.getPeriodId(), e);
+        } else {
+            LOG.info("Report declares no datasources — report step will run with nothing to wait for");
         }
 
         // assembleForConfigs() already throws DataSourceDownloadException itself on failure —
         // let it propagate unchanged, it's already the right type.
         DataSourcePipelineFactory dsFactory = new DataSourcePipelineFactory();
-        Pipeline pipeline = dsFactory.assembleForConfigs(options, sourceConfigs);
+        DataSourceAssembly assembly = dsFactory.assembleForConfigs(options, sourceConfigs);
 
-        LOG.info("Submitting batched data-source job ({} datasource(s)) to runner: {}",
-                 datasources.size(), options.getRunner().getSimpleName());
-        pipeline.run();
-        LOG.info("Batched data-source job submitted — blocking until required datasource(s) "
-                 + "complete (poll loop, not waitUntilFinish(); every {}s, up to {}m)",
-                 options.getJobPollIntervalSeconds(), options.getJobPollTimeoutMinutes());
+        // Wire the report step onto the SAME pipeline, gated on every datasource branch's
+        // finalize signal via Wait.on() — no driver-JVM poll loop.
+        ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig, options);
+
+        LOG.info("Submitting batched PIPELINE job ({} datasource(s) + report='{}') to runner: {}",
+                 datasources.size(), reportConfig.reportName, options.getRunner().getSimpleName());
+        assembly.pipeline.run();
     }
 
     // ── Validation ───────────────────────────────────────────────────────────

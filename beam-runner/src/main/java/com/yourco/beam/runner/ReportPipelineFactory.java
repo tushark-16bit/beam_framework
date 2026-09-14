@@ -124,6 +124,7 @@ public final class ReportPipelineFactory {
                  reportName, reportSubprocess, periodId);
 
         // ── 1. Load config from BigQuery ──────────────────────────────────────
+        // Driver-JVM only — BigQueryReportRepository must never run inside a DoFn (CLAUDE.md §12).
         BigQueryReportRepository repo = new BigQueryReportRepository(options);
         ReportConfig config;
         try {
@@ -132,6 +133,23 @@ public final class ReportPipelineFactory {
             throw ReportProcessingException.wrap(ReportProcessingException.Reason.CONFIG_NOT_FOUND,
                 reportName, reportSubprocess, periodId, e);
         }
+
+        execute(options, config);
+    }
+
+    /**
+     * Same as {@link #execute(FrameworkOptions)}, but skips the {@code BigQueryReportRepository}
+     * lookup and runs the report using an already-fetched {@link ReportConfig} instead.
+     *
+     * <p>Exists so {@link ReportFinalizeTransform} can call this from inside a worker DoFn — the
+     * driver JVM pre-fetches {@code ReportConfig} (a plain {@code Serializable} data object) and
+     * passes it in as a DoFn field, avoiding the {@code BigQueryReportRepository}-inside-a-DoFn
+     * violation that calling {@link #execute(FrameworkOptions)} directly on a worker would cause.
+     */
+    public void execute(FrameworkOptions options, ReportConfig config) {
+        String reportName       = config.reportName;
+        String reportSubprocess = config.reportSubprocess;
+        int    periodId         = config.periodId;
 
         // ── 2. RptRefer: LOADING ──────────────────────────────────────────────
         ReportCheckpointAdapter      reportAdapter = new BigQueryReportCheckpointAdapter(options);
