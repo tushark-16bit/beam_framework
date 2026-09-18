@@ -16,7 +16,8 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `MetricsUtils` | Factory for consistently-named Beam counters, distributions, and gauges |
 | `CalendarUtils` | Business calendar stubs: `isBusinessDay`, `nextBusinessDay`, `applyOffset`, etc. |
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
-| `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens, then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
+| `RunDateCalculator` | Stub: `calculateRunDate(RunScheduleConfig, LocalDate asOfDate)`. Computes a source's actual run date from its retrieved `dateType`/`frequency`/`freqRunDay`/`maxFreqRunDay`/`dayLag`/`calendarKey` — a per-source-configurable analog of `CalendarUtils`, resolved against a separate external calendar DB keyed by `calendarKey`. Same unimplemented-stub convention as `CalendarUtils` |
+| `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens (also available as `%periodStart%`/`%periodEnd%`/`%periodId%`/`%runDate%` — a fixed percent-delimited alternative, same underlying values, for SQL dialects where curly braces collide with something else), then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
 
 There is no JDBC / relational-DB adapter in this module — the framework has no JDBC dependency
 anywhere (see `CLAUDE.md` §12). All configuration lives in BigQuery, fetched via
@@ -220,6 +221,27 @@ These methods are placeholders. Implement them by integrating with your calendar
 
 Once implemented, use them via `CalendarUtils.resolveEffectiveDate(options)` which
 combines `--runDate`, `--businessDayOffset`, and `--calendarName` into a single date.
+
+---
+
+## RunDateCalculator — stub to implement
+
+Same convention as `CalendarUtils` above, but per-source rather than framework-wide: a source's
+retrieved `RunScheduleConfig` (from `run_details_json` in `parameter_store` — see
+`beam-io/README.md`) is passed in, and the method should resolve an actual `LocalDate` from it.
+
+```java
+RunScheduleConfig schedule = sourceConfig.runScheduleConfig;
+if (schedule.hasSchedule()) {
+    LocalDate runDate = RunDateCalculator.calculateRunDate(schedule, LocalDate.now());
+}
+```
+
+Implement by combining, in order: `frequency` (which period contains the reference date),
+`dateType`/`freqRunDay` (which date within that period), or — for `DAILY` sources —
+`dayLag` counted back from the reference date instead. Any `WD`/business-day-aware offset in
+`freqRunDay`/`dayLag` resolves against whichever calendar `calendarKey` identifies — a separate
+external calendar database, not the same system `CalendarUtils`/`--calendarName` stub above.
 
 ---
 

@@ -254,6 +254,7 @@ public final class DataSourcePipelineFactory {
             .validationConfig(config.validationConfig)
             .failureEmailConfig(config.failureEmailConfig)
             .dataTransformConfig(config.dataTransformConfig)
+            .runScheduleConfig(config.runScheduleConfig)
             .build();
     }
 

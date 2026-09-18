@@ -73,6 +73,15 @@ public final class SourceConfig implements Serializable {
      */
     public final DataTransformConfig dataTransformConfig;
 
+    /**
+     * Optional per-source run-scheduling config (which calendar date this source's run should
+     * target). Never null — defaults to {@link RunScheduleConfig#none()} when
+     * {@code run_details_json} is absent from {@code parameters_val_json}. See
+     * {@link RunScheduleConfig} for the field meanings and {@code RunDateCalculator} (beam-utils)
+     * for how a date is actually computed from it.
+     */
+    public final RunScheduleConfig runScheduleConfig;
+
     private SourceConfig(Builder b) {
         this.parentId            = b.parentId;
         this.datasourceName      = b.datasourceName;
@@ -89,6 +98,7 @@ public final class SourceConfig implements Serializable {
         this.validationConfig    = b.validationConfig != null ? b.validationConfig : ValidationConfig.none();
         this.failureEmailConfig  = b.failureEmailConfig;
         this.dataTransformConfig = b.dataTransformConfig != null ? b.dataTransformConfig : DataTransformConfig.none();
+        this.runScheduleConfig   = b.runScheduleConfig != null ? b.runScheduleConfig : RunScheduleConfig.none();
     }
 
     // ── Factory helpers (convenience wrappers around Builder) ─────────────────
@@ -130,6 +140,7 @@ public final class SourceConfig implements Serializable {
         private ValidationConfig validationConfig;
         private SourceFailureEmailConfig failureEmailConfig;
         private DataTransformConfig dataTransformConfig;
+        private RunScheduleConfig runScheduleConfig;
 
         public Builder parentId(String v)                              { parentId = v;             return this; }
         public Builder datasourceName(String v)                        { datasourceName = v;       return this; }
@@ -144,6 +155,7 @@ public final class SourceConfig implements Serializable {
         public Builder validationConfig(ValidationConfig v)            { validationConfig = v;     return this; }
         public Builder failureEmailConfig(SourceFailureEmailConfig v)  { failureEmailConfig = v;   return this; }
         public Builder dataTransformConfig(DataTransformConfig v)      { dataTransformConfig = v;  return this; }
+        public Builder runScheduleConfig(RunScheduleConfig v)          { runScheduleConfig = v;    return this; }
 
         public SourceConfig build() { return new SourceConfig(this); }
     }

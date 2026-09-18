@@ -11,10 +11,15 @@ import java.io.Serializable;
  *   <li>{@code {date}}        — run date in {@code yyyy-MM-dd} format</li>
  *   <li>{@code {dateCompact}} — run date in {@code yyyyMMdd} format</li>
  *   <li>{@code {periodId}}    — the value of {@code --periodId}</li>
+ *   <li>{@code {fileDate}}    — run date formatted with {@link #fileDatePattern} (e.g.
+ *       {@code yyyyMM}); only substituted when {@link #fileDatePattern} is set. Put this
+ *       placeholder in {@code prefix} or {@code suffix} — whichever the operator chooses is
+ *       where the formatted date ends up in the resolved file name.</li>
  * </ul>
  *
  * <p>Example: {@code prefix="trades_"}, {@code suffix="_{date}.csv"} with runDate 2024-01-15
- * resolves to {@code trades_2024-01-15.csv}.
+ * resolves to {@code trades_2024-01-15.csv}. With {@code fileDatePattern="yyyyMM"} and
+ * {@code suffix="_{fileDate}.csv"}, the same run date resolves to {@code trades_202401.csv}.
  *
  * <p>{@link #firstRow} (1-based) skips any leading rows before real content starts. The row at
  * that position becomes the header row if {@link #hasHeader} is true, or the first data row
@@ -25,7 +30,7 @@ import java.io.Serializable;
  * <p>Corresponding columns in the {@code source_config} table:
  * <pre>
  *   file_type, file_location, file_prefix, file_suffix, file_delimiter,
- *   file_has_header, file_sheet_index, file_first_row, file_last_column
+ *   file_has_header, file_sheet_index, file_first_row, file_last_column, file_date_pattern
  * </pre>
  */
 public final class FileSourceConfig implements Serializable {
@@ -60,10 +65,24 @@ public final class FileSourceConfig implements Serializable {
      * column is ever dropped just because the header row is narrower.
      */
     public final String lastColumn;
+    /**
+     * {@code DateTimeFormatter} pattern (e.g. {@code "yyyyMM"}) used to format the run date for
+     * the {@code {fileDate}} placeholder in {@link #prefix}/{@link #suffix}. Null (default) means
+     * {@code {fileDate}} is not available — use {@link #prefix}/{@link #suffix} with {@code {date}}
+     * or {@code {dateCompact}} instead.
+     */
+    public final String fileDatePattern;
 
     public FileSourceConfig(String fileType, String location, String prefix, String suffix,
                             String delimiter, boolean hasHeader, int sheetIndex,
                             int firstRow, String lastColumn) {
+        this(fileType, location, prefix, suffix, delimiter, hasHeader, sheetIndex,
+             firstRow, lastColumn, null);
+    }
+
+    public FileSourceConfig(String fileType, String location, String prefix, String suffix,
+                            String delimiter, boolean hasHeader, int sheetIndex,
+                            int firstRow, String lastColumn, String fileDatePattern) {
         this.fileType   = fileType != null ? fileType.toUpperCase() : "CSV";
         this.location   = location;
         this.prefix     = prefix != null ? prefix : "";
@@ -74,5 +93,9 @@ public final class FileSourceConfig implements Serializable {
         this.firstRow   = Math.max(1, firstRow);
         this.lastColumn = (lastColumn != null && !lastColumn.isBlank())
                           ? lastColumn.trim().toUpperCase() : null;
+        this.fileDatePattern = (fileDatePattern != null && !fileDatePattern.isBlank())
+                               ? fileDatePattern.trim() : null;
     }
+
+    public boolean hasFileDatePattern() { return fileDatePattern != null; }
 }

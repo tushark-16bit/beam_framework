@@ -16,6 +16,7 @@ import com.yourco.beam.model.DataTransformConfig;
 import com.yourco.beam.model.FileSourceConfig;
 import com.yourco.beam.model.LookupConfig;
 import com.yourco.beam.model.QueryConfig;
+import com.yourco.beam.model.RunScheduleConfig;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.SourceFailureEmailConfig;
 import com.yourco.beam.model.SourceSchemaField;
@@ -77,6 +78,7 @@ import java.util.Map;
  *   "file_sheet_index":         "0",
  *   "file_first_row":           "1",
  *   "file_last_column":         "T",
+ *   "file_date_pattern":        "yyyyMM",
  *   // Transforms + validation
  *   "source_transforms_json":   "[{\"type\":\"GROUP_BY\", ...}]",
  *   "min_row_count":            "1",
@@ -88,7 +90,11 @@ import java.util.Map;
  *                                     ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2)
  *                                     AS amount_with_tax FROM data",
  *   "data_transform_min_row_count":  "1",
- *   "data_transform_max_row_count":  "100000"
+ *   "data_transform_max_row_count":  "100000",
+ *   // Optional per-source run-scheduling config (see RunScheduleConfig)
+ *   "run_details_json":         "{\"dateType\":\"LAST_DAY_OF_MONTH\",\"frequency\":\"MONTHLY\",
+ *                                  \"freqRunDay\":\"WD+1\",\"maxFreqRunDay\":5,
+ *                                  \"dayLag\":\"WD-1\",\"calendarKey\":\"Calendar_EPS\"}"
  * }
  * </pre>
  *
@@ -124,6 +130,14 @@ import java.util.Map;
  * transform's output row count is validated against {@code data_transform_min_row_count} /
  * {@code data_transform_max_row_count} before it replaces the stored rows — on failure, the
  * original rows are left untouched and the run fails with {@code FAILED_TRANSFORM}.
+ *
+ * <h2>run_details_json — optional per-source run-scheduling config</h2>
+ * <p>A single nested JSON object (unlike this framework's other {@code *_json} keys, which hold
+ * arrays or flat maps) carrying {@code dateType}/{@code frequency}/{@code freqRunDay}/
+ * {@code maxFreqRunDay}/{@code dayLag}/{@code calendarKey} — see
+ * {@link com.yourco.beam.model.RunScheduleConfig} for what each means. This repository only
+ * retrieves the values; it does not compute a date from them — that's
+ * {@code RunDateCalculator.calculateRunDate()} in beam-utils, deliberately left unimplemented.
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
@@ -215,7 +229,8 @@ public final class BigQuerySourceConfigRepository {
             .sourceTransforms(toSourceTransforms(params.get("source_transforms_json")))
             .validationConfig(toValidationConfig(params))
             .failureEmailConfig(toFailureEmailConfig(params))
-            .dataTransformConfig(toDataTransformConfig(params));
+            .dataTransformConfig(toDataTransformConfig(params))
+            .runScheduleConfig(toRunScheduleConfig(params));
 
         switch (sourceType) {
             case API  -> builder.apiConfig(toApiConfig(params));
@@ -253,7 +268,8 @@ public final class BigQuerySourceConfigRepository {
             parseBool(p.get("file_has_header"), false),
             parseIntOrDefault(p.get("file_sheet_index"), 0),
             parseIntOrDefault(p.get("file_first_row"), 1),
-            p.get("file_last_column")
+            p.get("file_last_column"),
+            p.get("file_date_pattern")
         );
     }
 
@@ -320,6 +336,32 @@ public final class BigQuerySourceConfigRepository {
                        ? parseLongOrDefault(p.get("data_transform_max_row_count"), DataTransformConfig.NO_MAX)
                        : DataTransformConfig.NO_MAX;
         return new DataTransformConfig(query, minRows, maxRows);
+    }
+
+    /**
+     * Parses {@code run_details_json} — a single nested JSON object, unlike the framework's
+     * other {@code *_json} keys which hold arrays or flat maps — into a {@link RunScheduleConfig}.
+     * Absent or malformed JSON returns {@link RunScheduleConfig#none()} rather than failing the
+     * whole config fetch, since this block is optional.
+     */
+    private RunScheduleConfig toRunScheduleConfig(Map<String, String> p) {
+        String json = p.get("run_details_json");
+        if (json == null || json.isBlank()) return RunScheduleConfig.none();
+        try {
+            JsonNode node = JSON.readTree(json);
+            if (!node.isObject()) return RunScheduleConfig.none();
+            return new RunScheduleConfig(
+                node.path("dateType").asText(null),
+                node.path("frequency").asText(null),
+                node.path("freqRunDay").asText(null),
+                node.path("maxFreqRunDay").asInt(RunScheduleConfig.NO_MAX),
+                node.path("dayLag").asText(null),
+                node.path("calendarKey").asText(null)
+            );
+        } catch (Exception e) {
+            LOG.error("Failed to parse run_details_json: {}", e.getMessage());
+            return RunScheduleConfig.none();
+        }
     }
 
     private SourceFailureEmailConfig toFailureEmailConfig(Map<String, String> p) {

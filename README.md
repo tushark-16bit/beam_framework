@@ -357,7 +357,7 @@ Adding a new datasource requires only a BQ row in `parameter_store` — no code 
 | Source type | What it reads | Key config fields |
 |---|---|---|
 | `API` | REST API with pagination | `api_endpoint`, `api_auth_type`, `api_auth_secret_id`, `api_pagination_strategy` |
-| `FILE` | CSV or Excel on GCS | `file_type`, `file_location`, `file_prefix`, `file_suffix` (support `{date}`, `{periodId}` placeholders) |
+| `FILE` | CSV or Excel on GCS | `file_type`, `file_location`, `file_prefix`, `file_suffix` (support `{date}`, `{dateCompact}`, `{periodId}`, `{fileDate}` placeholders — the last formatted via optional `file_date_pattern`, e.g. `yyyyMM`) |
 | `BQ` | BigQuery table or SQL query | `bq_project_id`, `bq_dataset`, `bq_table`, `bq_query` (may contain `{periodStart}`, `{periodEnd}`, `{periodId}` tokens) |
 
 ### Query parameter injection

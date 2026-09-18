@@ -154,7 +154,11 @@ model/SourceConfig.java               Per-source config with Builder. Carries AL
 model/ApiSourceConfig.java            REST API config: endpoint, auth, pagination.
 model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header. firstRow (1-based, default 1)
                                        skips leading rows before the header/first data row. lastColumn (Excel-style letter,
-                                       optional) fixes column width; unset auto-detects from the widest row seen.
+                                       optional) fixes column width; unset auto-detects from the widest row seen. fileDatePattern
+                                       (optional, e.g. "yyyyMM") enables the {fileDate} placeholder in prefix/suffix, formatted
+                                       via DateTimeFormatter — resolved in FileSourceAdapter.resolvePath() alongside {date}/
+                                       {dateCompact}/{periodId}; unresolved (left literal) if the template uses it with no
+                                       pattern configured, rather than silently dropping it.
 model/BqFetchConfig.java              BQ source: project, dataset, table, query, queryParams map, schema (List<SourceSchemaField>, optional, from bq_schema_json).
 model/SourceSchemaField.java          One declared column (columnName + bqType) for BqFetchConfig.schema. bqType is a real BQ SQL type name (STRING/INT64/FLOAT64/BOOLEAN/BYTES/DATE/DATETIME/TIME/TIMESTAMP/NUMERIC/BIGNUMERIC).
 model/QueryConfig.java                Query template + paramMappings for token injection.
@@ -165,6 +169,14 @@ model/ValidationConfig.java           Post-fetch validation: header check, row c
 model/BncRule.java                    One Balance-and-Control check: SUM(field) within tolerance %.
 model/SourceFailureEmailConfig.java   Optional failure-notification email config on SourceConfig. Populated from failure_email_* keys in parameters_val_json. isPresent() guards send.
 model/DataTransformConfig.java        Optional post-storage SQL transform (query + min/max output row bounds), run within the same DATA_SOURCE_DOWNLOAD run by PostDownloadFinalizeTransform, before COMPLETED. A `WITH data AS (...)` UNNEST(DaRec) reunification CTE is always prepended to query before it runs — unconditional, not opt-in — so the operator's SQL just references `data` as a plain table. From data_transform_query/data_transform_min_row_count/data_transform_max_row_count.
+model/RunScheduleConfig.java          Optional per-source run-scheduling config, retrieved (not computed) from a single nested
+                                       run_details_json object in parameters_val_json: dateType (LAST_DAY_OF_MONTH/
+                                       LAST_DAY_OF_QUARTER/LAST_DAY_OF_YEAR), frequency (DAILY/WEEKLY/MONTHLY/QUARTERLY/YEARLY),
+                                       freqRunDay (WD+n/CD+n offset DSL), maxFreqRunDay (int, NO_MAX=-1 sentinel = no cap),
+                                       dayLag (DAILY-only WD-n/CD-n DSL), calendarKey (lookup key into an external calendar DB,
+                                       distinct from --calendarName/CalendarUtils). hasSchedule()/hasMaxRunDayCheck()/
+                                       hasCalendarKey() guard optional checks; none() default when run_details_json is absent.
+                                       Never computes a date itself — see beam-utils/RunDateCalculator.java.
 
 -- REPORT_PROCESSING models --
 model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int.
@@ -210,6 +222,9 @@ source/FileSourceAdapter.java         CSV (Commons CSV) + Excel (Apache POI) fro
                                        the header is never truncated for lacking a header name. columnIndexFromLetter() is the
                                        inverse of columnLetter(), used to resolve lastColumn. parseCsv/parseExcel share this
                                        width logic via resolveColumnCount() rather than each computing it separately.
+                                       resolvePath() substitutes {date}/{dateCompact}/{periodId}/{fileDate} placeholders in
+                                       prefix/suffix; {fileDate} (FileSourceConfig.fileDatePattern-formatted) is only replaced
+                                       when that pattern is configured, otherwise left literal in the resolved path.
 source/FileSourceTransform.java       Beam wrapper for FileSourceAdapter. Emits one Row per data row, then one extra Row for the
                                        marker-wrapped header-legend JSON if present (same Schemas.RAW_JSON schema either way).
 
@@ -264,6 +279,9 @@ config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOUR
                                            fetchSourceConfigs(). Row → SourceConfig mapping. Also parses
                                            data_transform_query/data_transform_min_row_count/
                                            data_transform_max_row_count into DataTransformConfig.
+                                           toRunScheduleConfig() parses run_details_json (a single nested JSON object, unlike
+                                           this file's other *_json keys which are arrays/flat maps) into RunScheduleConfig.
+                                           toFileConfig() also parses file_date_pattern into FileSourceConfig.fileDatePattern.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
 util/FileHeaderLegend.java            Helpers for the FILE-source column-letter storage convention: wrapLegend()/isMarkerWrapped()/
@@ -284,10 +302,19 @@ RowValidationUtils.java     requireFields(), matchesPattern(), inRange(), oneOf(
 MetricsUtils.java           transformCounter(), pipelineDlqTotal(). Consistent naming for Dataflow UI.
 CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyOffset(). Must be implemented.
 DateUtils.java              resolveRunDate(), partitionedPath(), shardedTable(), toDisplayString().
+RunDateCalculator.java      STUB — calculateRunDate(RunScheduleConfig, LocalDate asOfDate). Must be implemented.
+                             Computes a source's actual run date from its retrieved dateType/frequency/freqRunDay/
+                             maxFreqRunDay/dayLag/calendarKey (RunScheduleConfig, beam-core) — a per-source-configurable
+                             analog of CalendarUtils' framework-wide --calendarName stubs, resolved against a separate
+                             external calendar DB keyed by calendarKey. Same "throws UnsupportedOperationException until
+                             implemented" convention as CalendarUtils.
 QueryParameterResolver.java resolve(template, paramMappings, options). Two-pass: standard then custom tokens.
                              Custom tokens merge paramMappings (a step's query_params_json) with
                              options.getCustomParamsJson() (--customParamsJson CLI flag) — the CLI value
                              wins on a key collision. Malformed/non-object --customParamsJson throws.
+                             resolveStandardTokens() also resolves %periodStart%/%periodEnd%/%periodId%/%runDate% —
+                             percent-delimited equivalents of the same four {token} values, for queries where curly
+                             braces collide with something else; a fixed built-in set, no query_params_json entry needed.
 
 ```
 
@@ -760,9 +787,21 @@ PIPELINE has no config of its own: it reads the same report config as REPORT_PRO
   "min_row_count":  "1",
   "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]",
   "data_transform_query":         "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id, ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2) AS amount_with_tax FROM data",
-  "data_transform_min_row_count": "1"
+  "data_transform_min_row_count": "1",
+  "run_details_json": "{\"dateType\":\"LAST_DAY_OF_MONTH\",\"frequency\":\"MONTHLY\",\"freqRunDay\":\"WD+1\",\"maxFreqRunDay\":5,\"dayLag\":\"WD-1\",\"calendarKey\":\"Calendar_EPS\"}"
 }
 ```
+
+`run_details_json` is optional and, unlike this table's other `*_json` keys, holds a single
+nested object rather than an array or flat map — see `RunScheduleConfig` (beam-core) for what
+each field means. `BigQuerySourceConfigRepository` only retrieves these values into
+`SourceConfig.runScheduleConfig`; it never computes a date from them itself — that's
+`RunDateCalculator.calculateRunDate()` (beam-utils), a deliberately unimplemented stub, same
+convention as `CalendarUtils`.
+
+A `FILE` source's `file_date_pattern` (e.g. `"yyyyMM"`) is a separate, simpler mechanism — it
+just enables a `{fileDate}` placeholder in `file_prefix`/`file_suffix`, formatted with that
+pattern (see `FileSourceAdapter.resolvePath()`). It doesn't require or depend on `run_details_json`.
 
 `data_transform_query` is optional — see section 8. Real BigQuery Standard SQL, run beneath a
 `WITH data AS (...)` CTE that the framework always prepends — unconditionally, not contingent on
@@ -853,10 +892,15 @@ Layer 1 — Alias tokens (REPORT_PROCESSING only)
 
 Layer 2 — Standard tokens (both process types)
     QueryParameterResolver.resolve() — pass 1
-    {periodStart} → options.getPeriodStart()
-    {periodEnd}   → options.getPeriodEnd()
-    {periodId}    → options.getPeriodId()
-    {runDate}     → DateUtils.resolveRunDate(options).toString()
+    {periodStart} → options.getPeriodStart()          %periodStart% → same value
+    {periodEnd}   → options.getPeriodEnd()            %periodEnd%   → same value
+    {periodId}    → options.getPeriodId()             %periodId%    → same value
+    {runDate}     → DateUtils.resolveRunDate(options)  %runDate%     → same value
+                       .toString()
+    The %name% percent-delimited forms are a fixed, built-in alternative to the same four
+    {name} tokens — for queries where curly braces collide with something else in the SQL
+    dialect. Both styles resolve the identical underlying FrameworkOptions values; there is
+    no query_params_json entry to declare for them, unlike Layer 3 below.
 
 Layer 3 — Custom tokens (both process types, from query_params_json column,
           plus --customParamsJson from the CLI on top)

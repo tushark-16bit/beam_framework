@@ -63,6 +63,8 @@ import java.util.List;
  *   <li>{@code {date}}        → {@code yyyy-MM-dd}</li>
  *   <li>{@code {dateCompact}} → {@code yyyyMMdd}</li>
  *   <li>{@code {periodId}}    → value of the periodId option</li>
+ *   <li>{@code {fileDate}}    → run date formatted with {@link FileSourceConfig#fileDatePattern},
+ *       only when that field is set</li>
  * </ul>
  */
 public final class FileSourceAdapter {
@@ -204,9 +206,15 @@ public final class FileSourceAdapter {
     public static String resolvePath(FileSourceConfig config, String periodId, LocalDate runDate) {
         String date        = runDate.format(ISO);
         String dateCompact = runDate.format(COMPACT);
+        // Only formatted when fileDatePattern is actually configured — a template using
+        // {fileDate} with no pattern set is a config error, and the literal "{fileDate}" left
+        // unresolved in the final path makes that obvious rather than silently dropping it.
+        String fileDate = config.hasFileDatePattern()
+            ? runDate.format(DateTimeFormatter.ofPattern(config.fileDatePattern))
+            : null;
 
-        String resolvedPrefix = substitute(config.prefix, date, dateCompact, periodId);
-        String resolvedSuffix = substitute(config.suffix, date, dateCompact, periodId);
+        String resolvedPrefix = substitute(config.prefix, date, dateCompact, periodId, fileDate);
+        String resolvedSuffix = substitute(config.suffix, date, dateCompact, periodId, fileDate);
 
         String location = config.location.endsWith("/") ? config.location : config.location + "/";
         String path = location + resolvedPrefix + resolvedSuffix;
@@ -216,12 +224,17 @@ public final class FileSourceAdapter {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    private static String substitute(String template, String date, String dateCompact, String periodId) {
+    private static String substitute(String template, String date, String dateCompact,
+                                      String periodId, String fileDate) {
         if (template == null) return "";
-        return template
+        String result = template
             .replace("{date}",        date)
             .replace("{dateCompact}", dateCompact)
             .replace("{periodId}",    periodId != null ? periodId : "");
+        if (fileDate != null) {
+            result = result.replace("{fileDate}", fileDate);
+        }
+        return result;
     }
 
     /**

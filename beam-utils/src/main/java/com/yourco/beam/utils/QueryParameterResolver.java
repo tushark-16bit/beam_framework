@@ -18,6 +18,16 @@ import java.util.Map;
  *   <li>{@code {runDate}}     — from {@code --runDate} (or today UTC if unset)</li>
  * </ul>
  *
+ * <h2>Percent-delimited equivalents</h2>
+ * <p>The same four values are also resolved using {@code %name%} delimiters —
+ * {@code %periodStart%}, {@code %periodEnd%}, {@code %periodId%}, {@code %runDate%} — for
+ * queries where the curly-brace style collides with something else in the target SQL dialect
+ * (or an external system already uses {@code %...%} for its own substitution). Both styles
+ * resolve the exact same underlying {@link FrameworkOptions} values; use whichever fits the
+ * query. Unlike curly-brace custom params (below), {@code %name%} tokens are a fixed, built-in
+ * set — there's no operator-declared mapping for them; the name in {@code %name%} directly names
+ * the {@link FrameworkOptions} value to substitute.
+ *
  * <h2>Custom params</h2>
  * Additional {@code paramMappings} (a step's own {@code query_params_json} from
  * {@code parameter_store}) are resolved after the standard tokens. On top of those,
@@ -35,6 +45,11 @@ import java.util.Map;
  * String resolved = QueryParameterResolver.resolve(query, params, options);
  * // → "SELECT * FROM trades WHERE trade_date >= '2024-01-01' AND exchange = 'NYSE'"
  * // --customParamsJson='{"exchange":"NASDAQ"}' on the CLI would override "NYSE" above.
+ *
+ * // Percent-delimited style, same underlying values, no query_params_json entry needed:
+ * String query2 = "SELECT * FROM trades WHERE period_id = %periodId%";
+ * String resolved2 = QueryParameterResolver.resolve(query2, options);
+ * // → "SELECT * FROM trades WHERE period_id = 202401"
  * }</pre>
  */
 public final class QueryParameterResolver {
@@ -85,12 +100,19 @@ public final class QueryParameterResolver {
     // ── Private ───────────────────────────────────────────────────────────────
 
     private static String resolveStandardTokens(String s, FrameworkOptions options) {
-        String runDate = DateUtils.resolveRunDate(options).toString();
+        String periodStart = nvl(options.getPeriodStart());
+        String periodEnd   = nvl(options.getPeriodEnd());
+        String periodId    = String.valueOf(options.getPeriodId());
+        String runDate     = DateUtils.resolveRunDate(options).toString();
         return s
-            .replace("{periodStart}", nvl(options.getPeriodStart()))
-            .replace("{periodEnd}",   nvl(options.getPeriodEnd()))
-            .replace("{periodId}",    String.valueOf(options.getPeriodId()))
-            .replace("{runDate}",     runDate);
+            .replace("{periodStart}", periodStart)
+            .replace("{periodEnd}",   periodEnd)
+            .replace("{periodId}",    periodId)
+            .replace("{runDate}",     runDate)
+            .replace("%periodStart%", periodStart)
+            .replace("%periodEnd%",   periodEnd)
+            .replace("%periodId%",    periodId)
+            .replace("%runDate%",     runDate);
     }
 
     /**

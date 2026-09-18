@@ -33,6 +33,11 @@ io/source/
                                 is the inverse of columnLetter(), used to resolve lastColumn to a column count.
                                 Both parseCsv/parseExcel share this width resolution via the private
                                 resolveColumnCount(config, headerWidth, maxDataWidth) helper.
+                                resolvePath(config, periodId, runDate) substitutes {date}/{dateCompact}/
+                                {periodId}/{fileDate} placeholders in prefix/suffix into the final GCS path.
+                                {fileDate} is FileSourceConfig.fileDatePattern-formatted (e.g. "yyyyMM") and
+                                only substituted when that pattern is configured — otherwise left literal in
+                                the resolved path, a visible signal of the config gap rather than a silent drop.
     FileSourceTransform       — Beam wrapper for FileSourceAdapter (downloads GCS bytes, parses). Emits one
                                 Row per data row, then (if present) one extra Row carrying the marker-wrapped
                                 header-legend JSON — both under the same Schemas.RAW_JSON schema.
@@ -124,6 +129,12 @@ io/config/
                                      Also parses data_transform_query / data_transform_min_row_count /
                                      data_transform_max_row_count into SourceConfig.dataTransformConfig
                                      (DataTransformConfig) — an optional post-storage SQL transform.
+                                     Also parses run_details_json — a single nested JSON object, unlike this
+                                     file's other *_json keys which are arrays/flat maps — into
+                                     SourceConfig.runScheduleConfig (RunScheduleConfig): dateType/frequency/
+                                     freqRunDay/maxFreqRunDay/dayLag/calendarKey. Retrieval only; no date
+                                     arithmetic happens here. Also parses file_date_pattern into
+                                     FileSourceConfig.fileDatePattern for FILE sources.
     BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING
                                      AND PIPELINE (same lookup, same ReportConfig — PIPELINE has no config of its
                                      own; see beam-runner/README.md's PipelineSequenceFactory section).
