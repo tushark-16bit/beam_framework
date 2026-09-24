@@ -126,6 +126,30 @@ public final class SourceConfig implements Serializable {
 
     public static Builder builder() { return new Builder(); }
 
+    /**
+     * A {@link Builder} pre-populated with every field of this instance — for rebuilding a
+     * {@link SourceConfig} with one or two fields changed (e.g. {@code DataSourcePipelineFactory
+     * .resolveQueryTokens()} swapping in a token-resolved {@link #bqFetchConfig}) without having
+     * to re-list every other field by hand, where a newly added field is easy to forget to copy.
+     */
+    public Builder toBuilder() {
+        return builder()
+            .parentId(parentId)
+            .datasourceName(datasourceName)
+            .periodId(periodId)
+            .subprocessName(subprocessName)
+            .sourceType(sourceType)
+            .apiConfig(apiConfig)
+            .fileConfig(fileConfig)
+            .bqFetchConfig(bqFetchConfig)
+            .queryConfig(queryConfig)
+            .sourceTransforms(new java.util.ArrayList<>(sourceTransforms))
+            .validationConfig(validationConfig)
+            .failureEmailConfig(failureEmailConfig)
+            .dataTransformConfig(dataTransformConfig)
+            .runScheduleConfig(runScheduleConfig);
+    }
+
     // ── Builder ───────────────────────────────────────────────────────────────
 
     public static final class Builder {

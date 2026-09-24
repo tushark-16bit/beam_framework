@@ -242,20 +242,10 @@ public final class DataSourcePipelineFactory {
         String resolvedQuery = QueryParameterResolver.resolve(bq.query, bq.queryParams, options);
         BqFetchConfig resolvedBq = new BqFetchConfig(
             bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema);
-        return SourceConfig.builder()
-            .parentId(config.parentId)
-            .datasourceName(config.datasourceName)
-            .periodId(config.periodId)
-            .subprocessName(config.subprocessName)
-            .sourceType(config.sourceType)
-            .bqFetchConfig(resolvedBq)
-            .queryConfig(config.queryConfig)
-            .sourceTransforms(new java.util.ArrayList<>(config.sourceTransforms))
-            .validationConfig(config.validationConfig)
-            .failureEmailConfig(config.failureEmailConfig)
-            .dataTransformConfig(config.dataTransformConfig)
-            .runScheduleConfig(config.runScheduleConfig)
-            .build();
+        // toBuilder() copies every existing field first, so swapping in the token-resolved
+        // bqFetchConfig here can never silently drop a field the way manually re-listing every
+        // field in a fresh SourceConfig.builder() call can (it once did, for runScheduleConfig).
+        return config.toBuilder().bqFetchConfig(resolvedBq).build();
     }
 
     /**

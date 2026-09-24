@@ -150,7 +150,11 @@ model/Schemas.java                    RAW_JSON schema constant.
 model/DataSourceCheckpoint.java       Checkpoint row: daId, srceNm, vsnNo, perId (int), flNm, balAndCntlSmryTx, staCd. BQ cols: da_id INT64, srce_nm, vsn_no, per_id INT64, fl_nm, bal_and_cntl_smry_tx, sta_cd. Timestamps: DATETIME (LocalDateTime).
 
 -- DATA_SOURCE_DOWNLOAD models --
-model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config.
+model/SourceConfig.java               Per-source config with Builder. Carries ALL per-source config. toBuilder() returns a
+                                       Builder pre-populated with every field of the instance — use it (never a fresh
+                                       builder()) when rebuilding a SourceConfig with only one or two fields changed, e.g.
+                                       DataSourcePipelineFactory.resolveQueryTokens() swapping in a token-resolved
+                                       bqFetchConfig, so a newly added field can never be silently dropped at that call site.
 model/ApiSourceConfig.java            REST API config: endpoint, auth, pagination.
 model/FileSourceConfig.java           File config: CSV/Excel, GCS location, delimiter, header. firstRow (1-based, default 1)
                                        skips leading rows before the header/first data row. lastColumn (Excel-style letter,
