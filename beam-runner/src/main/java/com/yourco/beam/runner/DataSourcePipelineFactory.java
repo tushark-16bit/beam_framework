@@ -125,13 +125,23 @@ public final class DataSourcePipelineFactory {
         // Each source gets its own run dates, resolved before the COMPLETED skip-check and
         // checkpoint creation below, so DaRefer is keyed by the resolved periodId — the same value
         // a report reading this source resolves to — not the raw --periodId.
+        // A source whose run date falls outside its freqRunDay..maxFreqRunDay window is skipped
+        // here — no checkpoint, no branch, not a failure: before the window the period isn't
+        // open for loading yet; after it, the period is closed for this source.
         Map<String, RunDates> runDates = new HashMap<>();
         List<SourceConfig> datedConfigs = new ArrayList<>();
         for (SourceConfig config : sourceConfigs) {
             RunDates dates = RunDateCalculator.resolve(config.runScheduleConfig, options);
+            LOG.info("Run dates for '{}': {}", config.datasourceName, dates);
+            RunDateCalculator.RunWindow window =
+                RunDateCalculator.checkRunWindow(config.runScheduleConfig, dates);
+            if (!window.shouldRun()) {
+                LOG.info("Skipping '{}' for periodId={}: outside its run window — {}",
+                         config.datasourceName, dates.periodId, window);
+                continue;
+            }
             runDates.put(config.datasourceName, dates);
             datedConfigs.add(config.toBuilder().periodId(dates.periodId).build());
-            LOG.info("Run dates for '{}': {}", config.datasourceName, dates);
         }
 
         BigQueryDataSourceCheckpointAdapter checkpointAdapter =
@@ -139,8 +149,9 @@ public final class DataSourcePipelineFactory {
 
         List<SourceConfig> toProcess = filterByCheckpoint(datedConfigs, checkpointAdapter, options);
         if (toProcess.isEmpty()) {
-            LOG.info("All {} source(s) already completed. "
-                     + "Set --overrideDownload=true to force re-download.", sourceConfigs.size());
+            LOG.info("Nothing to process: of {} source(s), {} outside their run window, the rest "
+                     + "already completed (set --overrideDownload=true to force re-download).",
+                     sourceConfigs.size(), sourceConfigs.size() - datedConfigs.size());
             return new DataSourceAssembly(Pipeline.create(options), new ArrayList<>());
         }
         LOG.info("Will process {} of {} source(s)", toProcess.size(), sourceConfigs.size());

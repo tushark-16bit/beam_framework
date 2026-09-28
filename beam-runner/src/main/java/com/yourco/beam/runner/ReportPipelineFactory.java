@@ -46,8 +46,8 @@ import java.util.ServiceLoader;
  * <h2>Execution phases</h2>
  * <ol>
  *   <li>Load {@link ReportConfig} from parameter_store</li>
- *   <li>Resolve this report's {@link RunDates} via {@code RunDateCalculator.resolve()} (from its
- *       {@code run_details} schedule, else the CLI options) — every later phase reads its dates
+ *   <li>Resolve this report's {@link RunDates} via {@code RunDateCalculator.resolveForReport()} — the last
+ *       closed period it applies to (from its {@code run_details} schedule, else the CLI options) — every later phase reads its dates
  *       from this one value</li>
  *   <li>Insert RptRefer row with {@code sta_cd=LOADING}</li>
  *   <li>Run preprocessing steps (BQ queries or API enrichment)</li>
@@ -141,11 +141,12 @@ public final class ReportPipelineFactory {
 
         // ── 1b. Resolve this report's run dates ───────────────────────────────
         // RUN-DATE PLACEHOLDER: every date this report uses (RptRefer per_id, DaRefer lookups,
-        // query tokens, output file names, email tokens) comes from here. Without a
+        // query tokens, output file names, email tokens) comes from here — the last closed
+        // period the report applies to (RunDateCalculator.calculateLastPeriod). Without a
         // run_details schedule this is exactly the CLI options.
         RunDates dates;
         try {
-            dates = RunDateCalculator.resolve(config.runScheduleConfig, options);
+            dates = RunDateCalculator.resolveForReport(config.runScheduleConfig, options);
         } catch (Exception e) {
             throw ReportProcessingException.wrap(ReportProcessingException.Reason.UNKNOWN,
                 reportName, reportSubprocess, periodId, e);

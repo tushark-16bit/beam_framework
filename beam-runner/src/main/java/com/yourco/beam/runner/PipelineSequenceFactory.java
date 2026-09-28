@@ -122,7 +122,7 @@ public final class PipelineSequenceFactory {
         // Each datasource resolves its own dates inside DataSourcePipelineFactory.
         RunDates reportDates;
         try {
-            reportDates = RunDateCalculator.resolve(reportConfig.runScheduleConfig, options);
+            reportDates = RunDateCalculator.resolveForReport(reportConfig.runScheduleConfig, options);
         } catch (Exception e) {
             throw PipelineException.wrap(PipelineException.Reason.CONFIGURATION_ERROR,
                 reportName, reportSubprocess, periodId, e);

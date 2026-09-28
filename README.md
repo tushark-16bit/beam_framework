@@ -221,8 +221,11 @@ and both halves of `PIPELINE` — get their dates from one call,
 `RunDateCalculator.resolve(schedule, options)`, which returns a `RunDates`
 (`runDate`, `periodStart`, `periodEnd`, `periodId`). With no schedule configured it returns
 exactly `--runDate`/`--periodStart`/`--periodEnd`/`--periodId`, so existing runs are unchanged.
-With a schedule it calls `RunDateCalculator.calculateRunDates()` — a stub you implement once for
-everything. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
+With a schedule it calls `RunDateCalculator.calculateRunDates()` (sources) or
+`calculateLastPeriod()` (reports — the last closed period the report covers) — stubs you implement
+once for everything. A source whose run date is before its `freqRunDay` date or after its
+`maxFreqRunDay` date (`calculateFreqRunDate()`/`calculateMaxFreqRunDate()`, also stubs) is skipped,
+not failed. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
 email tokens and report file names; `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for
 FILE `{fileDate}`; `periodId` as an int in the `--periodId` encoding. See `beam-utils/README.md`.
 

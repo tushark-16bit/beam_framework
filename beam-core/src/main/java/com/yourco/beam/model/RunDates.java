@@ -15,13 +15,16 @@ import java.time.format.DateTimeFormatter;
  * <h2>Expected formats</h2>
  * <table>
  *   <tr><th>Field</th><th>Meaning</th><th>Rendered as</th></tr>
- *   <tr><td>{@link #runDate}</td><td>business date the run processes (not the wall-clock day it
- *       executes)</td><td>{@code yyyy-MM-dd} for {@code {runDate}}/{@code %runDate%} and a FILE
+ *   <tr><td>{@link #runDate}</td><td>the date the run executes as — {@code --runDate} or today,
+ *       possibly adjusted to a working day; a source is skipped when this falls outside its
+ *       {@code freqRunDay}..{@code maxFreqRunDay} window. Not the period's as-of date — that is
+ *       {@link #periodEnd}</td><td>{@code yyyy-MM-dd} for {@code {runDate}}/{@code %runDate%} and a FILE
  *       source's {@code {date}}; {@code yyyyMMdd} for {@code {dateCompact}}; the source's
  *       {@code file_date_pattern} for {@code {fileDate}}</td></tr>
  *   <tr><td>{@link #periodStart}</td><td>first day of the period the data covers</td>
  *       <td>{@code yyyy-MM-dd} for {@code {periodStart}}/{@code %periodStart%}; empty when null</td></tr>
- *   <tr><td>{@link #periodEnd}</td><td>last day of the period the data covers</td>
+ *   <tr><td>{@link #periodEnd}</td><td>last day of the period the data covers — the business as-of
+ *       date ({@code dateType}, e.g. month-end)</td>
  *       <td>{@code yyyy-MM-dd} for {@code {periodEnd}}/{@code %periodEnd%}; empty when null</td></tr>
  *   <tr><td>{@link #periodId}</td><td>DaRefer/RptRefer {@code per_id} key for the period</td>
  *       <td>int, same encoding as {@code --periodId}: DAILY {@code yyyyMMdd}, MONTHLY

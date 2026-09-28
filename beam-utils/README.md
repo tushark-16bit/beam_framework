@@ -37,7 +37,8 @@ List<SourceConfig> configs = repo.fetchSourceConfigs(
 
 ## Unit tests
 
-`src/test/java` — `QueryParameterResolverTest.java`: standard-token resolution, step-level
+`src/test/java` — `RunDateCalculatorTest.java`: `checkRunWindow()` is in-window with no schedule or no
+bounds, and reaches the freq/max-freq stubs when those are configured. `QueryParameterResolverTest.java`: standard-token resolution, step-level
 `query_params_json` resolution, `--customParamsJson` resolution and its override of a
 same-named step-level key, standard-token references inside a custom value, and malformed/
 non-object `--customParamsJson` rejection. Run with `mvn -pl beam-utils -am test`.
@@ -249,6 +250,30 @@ still reporting on), or — for `DAILY` — `dayLag` counted back from the refer
 `WD`/business-day offset resolves against whichever calendar `calendarKey` identifies — a separate
 external calendar database, not the `CalendarUtils`/`--calendarName` stub above. All call sites run
 in the driver JVM, so the implementation may call that database directly.
+
+### Reports — `calculateLastPeriod()` (stub)
+
+Reports call `RunDateCalculator.resolveForReport()` instead of `resolve()`. With a `run_details`
+schedule it calls `calculateLastPeriod(schedule, asOfDate)`, which must return the **last closed
+period** the report applies to — e.g. a `MONTHLY` report on 2024-02-02 → `periodStart=2024-01-01`,
+`periodEnd=2024-01-31`, `periodId=202401`, `runDate=2024-02-02`.
+
+### Data sources — run window (`calculateFreqRunDate()` / `calculateMaxFreqRunDate()`, stubs)
+
+After resolving a source's dates, `DataSourcePipelineFactory` calls
+`RunDateCalculator.checkRunWindow(schedule, dates)`. The comparison is implemented; the two
+boundary dates are stubs:
+
+| Stub | Meaning | Example (`MONTHLY`, January period) |
+|---|---|---|
+| `calculateFreqRunDate(schedule, dates)` | first day the period may be loaded (`freqRunDay`) | `WD+1` → first working day of February |
+| `calculateMaxFreqRunDate(schedule, dates)` | last day the period may be loaded (`maxFreqRunDay`) | `5` → fifth working day of February |
+
+`dates.runDate` before the first → `BEFORE_FREQ_RUN_DATE`; after the second →
+`AFTER_MAX_FREQ_RUN_DATE`. Either way the source is **skipped** — logged, no DaRefer row, no
+branch, not a failure. A bound is only checked when configured (`freqRunDay` set /
+`maxFreqRunDay != -1`). This is why `runDate` must be the date the run executes as, and the
+period's as-of date (`dateType`) goes in `periodEnd`.
 
 A report and the datasources it reads must resolve to the same `periodId` — the report finds them
 in `DaRefer` by its own. `PIPELINE` logs a warning at submission when they differ.

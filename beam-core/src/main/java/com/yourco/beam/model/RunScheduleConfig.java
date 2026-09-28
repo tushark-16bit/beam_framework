@@ -18,7 +18,7 @@ import java.io.Serializable;
  * <p>This class only carries the retrieved values — it does not compute anything. Actual date
  * arithmetic (interpreting {@link #dateType}/{@link #frequency}/{@link #freqRunDay}/
  * {@link #dayLag} together, and resolving {@link #calendarKey} against an external calendar
- * database) is {@link com.yourco.beam.utils.RunDateCalculator#calculateRunDate}, deliberately
+ * database) is {@code RunDateCalculator} (beam-utils), deliberately
  * left unimplemented in this framework — see that class's Javadoc.
  *
  * <h2>Fields</h2>
@@ -93,6 +93,7 @@ public final class RunScheduleConfig implements Serializable {
     }
 
     public boolean hasSchedule()      { return dateType != null || frequency != null; }
+    public boolean hasFreqRunDay()    { return freqRunDay != null; }
     public boolean hasMaxRunDayCheck() { return maxFreqRunDay != NO_MAX; }
     public boolean hasCalendarKey()   { return calendarKey != null; }
 

@@ -323,6 +323,16 @@ RunDateCalculator.java      The ONE place run dates are decided, for every sourc
                              resolve(RunScheduleConfig, options) → RunDates: no schedule → fromOptions(options) (exactly the
                              CLI flags, pre-scheduling behaviour); schedule configured → calculateRunDates(schedule,
                              asOfDate = --runDate or today UTC), which is a STUB — must be implemented.
+                             resolveForReport(schedule, options) → RunDates for reports: no schedule → fromOptions;
+                             else calculateLastPeriod(schedule, asOfDate) — STUB: the last closed period the report
+                             applies to (e.g. MONTHLY on 2024-02-02 → January, periodId 202401).
+                             checkRunWindow(schedule, dates) → RunWindow (IMPLEMENTED comparison): skip a source when
+                             dates.runDate < calculateFreqRunDate() (STUB, freqRunDay e.g. WD+1 → first working day
+                             after the period) or dates.runDate > calculateMaxFreqRunDate() (STUB, maxFreqRunDay e.g.
+                             5 → fifth working day). Each bound only checked when configured. RunWindow.Status:
+                             IN_WINDOW | BEFORE_FREQ_RUN_DATE | AFTER_MAX_FREQ_RUN_DATE.
+                             runDate semantics: the date the run EXECUTES as (asOfDate, possibly working-day adjusted),
+                             never the period's as-of date — that is periodEnd (dateType, e.g. month-end).
                              Call sites (all driver JVM): DataSourcePipelineFactory.assembleForConfigs() per source,
                              ReportPipelineFactory.execute(options) per report, PipelineSequenceFactory.execute() for
                              PIPELINE's report (carried to the worker as a DoFn field).
@@ -368,7 +378,9 @@ DataSourceStatusChecker.java    Package-private, non-blocking only. checkSingle(
 FailureNotifier.java            Package-private: notify(options, Throwable) — the single failure-notification entry point, called both from Main's driver-JVM catch block AND from inside ReportFinalizeTransform's worker DoFn (a PIPELINE report/datasource failure discovered only after main() has already returned never reaches Main's catch, so ReportFinalizeTransform calls this itself). Picks a subject/body template by exception type (DataSourceDownloadException/ReportProcessingException/PipelineException, plus a default for anything else), always logs it, and — only if --opsFailureEmail is set and an EmailSendUtility is discoverable via SPI — emails it. Every step inside is try/caught so a notification failure can never mask the original exception.
 DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creates LOADING checkpoint per source in driver JVM, wires RecordSink → PostDownloadFinalizeTransform in graph. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time.
                                 RUN-DATE PLACEHOLDER: assembleForConfigs() first calls RunDateCalculator.resolve() once per
-                                source and rebuilds each SourceConfig with periodId = RunDates.periodId (toBuilder()) — so
+                                source, drops any source RunDateCalculator.checkRunWindow() says is outside its
+                                freqRunDay..maxFreqRunDay window (logged skip, not a failure — under PIPELINE a skipped
+                                required datasource that isn't already COMPLETED then aborts the report as usual), and rebuilds each SourceConfig with periodId = RunDates.periodId (toBuilder()) — so
                                 the COMPLETED check, DaRefer checkpoint, finalize and FILE {periodId} all use the source's
                                 own period — then passes RunDates.runDate to SourceRouter and the RunDates to
                                 resolveQueryTokens(). An unimplemented calculator (UnsupportedOperationException) is
@@ -416,7 +428,7 @@ ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ
                                 sending rather than failing the report when it's null.
                                 execute(options) fetches ReportConfig from BigQueryReportRepository (driver-JVM only —
                                 forbidden inside a DoFn, CLAUDE.md §12), resolves the report's RunDates via
-                                RunDateCalculator.resolve(config.runScheduleConfig, options) (RUN-DATE PLACEHOLDER; failure
+                                RunDateCalculator.resolveForReport(config.runScheduleConfig, options) (RUN-DATE PLACEHOLDER; failure
                                 → ReportProcessingException(UNKNOWN)), then delegates to execute(options, config, dates).
                                 Every date in the run comes from `dates`: RptRefer/DaRefer per_id (dates.periodId),
                                 preprocessing/transform query tokens, ReportOutputSinkRouter GCS file names
@@ -640,6 +652,9 @@ Main.runDataSourceDownload(options)
 │   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load SourceConfig from BQ; throws if row missing
 │   ├─ RunDateCalculator.resolve(runScheduleConfig, options)  per source → RunDates (RUN-DATE PLACEHOLDER);
 │   │                                                          SourceConfig.periodId := RunDates.periodId
+│   ├─ RunDateCalculator.checkRunWindow(schedule, dates)      per source: runDate before freq run date or
+│   │                                                          after max freq run date → source SKIPPED
+│   │                                                          (logged; no checkpoint, no branch, not a failure)
 │   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources (bypassed under
 │   │                                                          --manualOverrun / --overrideDownload)
 │   ├─ Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE createCheckpoint()
@@ -743,7 +758,8 @@ Main.runReportProcessing(options)
     │                                                    AND parameter_data_source=reportSubprocess
     │                                                    AND parameter_name=reportName
     │                                                  → parse nested JSON → ReportConfig (periodId: int)
-    ├─ RunDateCalculator.resolve(config.runScheduleConfig, options) → RunDates   (RUN-DATE PLACEHOLDER)
+    ├─ RunDateCalculator.resolveForReport(config.runScheduleConfig, options) → RunDates   (RUN-DATE PLACEHOLDER;
+    │   calculateLastPeriod() when a run_details schedule is set — the last closed period the report covers)
     │   every phase below reads periodId/periodStart/periodEnd/runDate from this, not from the CLI
     ├─ execute(options, config, dates)
     ├─ BigQueryReportCheckpointAdapter.createCheckpoint(reportName, dates.periodId, reportName)
