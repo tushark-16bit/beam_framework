@@ -1,6 +1,7 @@
 package com.yourco.beam.transforms;
 
 import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.transform.BeamTransform;
 import org.apache.beam.sdk.schemas.Schema;
@@ -80,15 +81,12 @@ public final class EnrichFromExternalApiTransform implements BeamTransform {
     }
 
     @Override
-    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options) {
-        // Read config from options — these are serializable Strings/ints,
-        // safe to pass to the composite and then to the DoFn.
-        //
-        // To add your own flags: declare them in FrameworkOptions, then read here.
-        // Example: options.as(EnrichApiOptions.class).getApiEndpoint()
-        String endpoint      = "https://api.example.com/enrich";  // replace with options flag
-        String lookupField   = "customer_id";                      // replace with options flag
-        int    timeoutSecs   = 5;                                  // replace with options flag
+    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig) {
+        // Read config from runConfig — use runConfig.get("api_endpoint") etc.
+        // Example: String endpoint = runConfig.get("enrich_api_endpoint", "https://api.example.com/enrich");
+        String endpoint      = "https://api.example.com/enrich";  // replace with runConfig.get(...)
+        String lookupField   = "customer_id";                      // replace with runConfig.get(...)
+        int    timeoutSecs   = 5;                                  // replace with runConfig.get(...)
 
         return new EnrichComposite(endpoint, lookupField, timeoutSecs);
     }

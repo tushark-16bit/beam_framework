@@ -17,7 +17,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
-import java.util.List;
 
 /**
  * Beam source transform that reads CSV or Excel files from GCS via {@link FileSourceAdapter}.
@@ -103,16 +102,25 @@ public final class FileSourceTransform extends PTransform<PBegin, PCollection<Ro
             byte[] fileBytes = downloadFromGcs(gcsPath);
             LOG.info("Downloaded {} bytes from {}", fileBytes.length, gcsPath);
 
-            List<String> jsonRows = switch (fileConfig.fileType) {
+            FileSourceAdapter.FileParseResult result = switch (fileConfig.fileType) {
                 case "CSV"   -> FileSourceAdapter.parseCsv(fileBytes, fileConfig);
                 case "EXCEL" -> FileSourceAdapter.parseExcel(fileBytes, fileConfig);
                 default -> throw new IllegalArgumentException(
                     "Unsupported file type: " + fileConfig.fileType + ". Supported: CSV, EXCEL");
             };
 
-            LOG.info("Parsed {} rows from {} ({})", jsonRows.size(), gcsPath, fileConfig.fileType);
-            for (String json : jsonRows) {
+            LOG.info("Parsed {} rows from {} ({}, header legend: {})",
+                     result.rows().size(), gcsPath, fileConfig.fileType,
+                     result.headerLegendJson() != null ? "present" : "none");
+            for (String json : result.rows()) {
                 out.output(Row.withSchema(Schemas.RAW_JSON).addValue(json).build());
+            }
+            // Emitted as one extra element alongside the data rows — DataSourceRecordSinkTransform
+            // detects it (marker-wrapped via FileHeaderLegend.wrapLegend), unwraps it, and builds
+            // each DaRec page for this source as {"Data":[...],"DataHeaders":[legend]} instead of
+            // a flat array, rather than treating it as one more data row.
+            if (result.headerLegendJson() != null) {
+                out.output(Row.withSchema(Schemas.RAW_JSON).addValue(result.headerLegendJson()).build());
             }
         }
 

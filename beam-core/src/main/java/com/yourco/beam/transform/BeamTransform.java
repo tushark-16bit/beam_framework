@@ -1,6 +1,7 @@
 package com.yourco.beam.transform;
 
 import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PCollection;
@@ -59,7 +60,8 @@ public interface BeamTransform extends Serializable {
      * Returns a Beam {@link PTransform} that outputs a {@link PCollectionTuple}
      * containing both successful and dead-letter outputs.
      *
-     * @param options pipeline options for reading transform-specific config
+     * @param options   pipeline options for reading framework-level config (process type, periods, etc.)
+     * @param runConfig per-datasource config loaded from the parameter_store BQ table
      */
-    PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options);
+    PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig);
 }
