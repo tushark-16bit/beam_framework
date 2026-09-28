@@ -16,7 +16,8 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `MetricsUtils` | Factory for consistently-named Beam counters, distributions, and gauges |
 | `CalendarUtils` | Business calendar stubs: `isBusinessDay`, `nextBusinessDay`, `applyOffset`, etc. |
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
-| `RunDateCalculator` | The one place run dates are decided for every source and report. `resolve(RunScheduleConfig, options)` → `RunDates`: no schedule → `fromOptions(options)` (the CLI flags, unchanged behaviour); schedule configured → `calculateRunDates(schedule, asOfDate)`, a **stub** to implement (per-source/report analog of `CalendarUtils`, resolved against a separate external calendar DB keyed by `calendarKey`) |
+| `RunDateCalculator` | Finance Automation scheduling rules (port of BAU): WHEN may a source/report run on the Business Date, WHICH period does it process, WHAT date ends that period. `evaluateDataSource()`/`evaluateReport()` → `ScheduleDecision` (`ELIGIBLE` + `RunDates`, or `NOT_YET_ELIGIBLE`/`EXPIRED`/`NON_BUSINESS_DAY`/`NOT_EVALUABLE`). See its section below |
+| `BusinessCalendar` / `BusinessCalendarProvider` | Calendar contract for `RunDateCalculator`: `forKey(calendarKey).isBusinessDay(date)`. **No implementation ships** — register yours via `META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider` |
 | `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens (also available as `%periodStart%`/`%periodEnd%`/`%periodId%`/`%runDate%` — a fixed percent-delimited alternative, same underlying values, for SQL dialects where curly braces collide with something else), then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
 
 There is no JDBC / relational-DB adapter in this module — the framework has no JDBC dependency
@@ -37,8 +38,11 @@ List<SourceConfig> configs = repo.fetchSourceConfigs(
 
 ## Unit tests
 
-`src/test/java` — `RunDateCalculatorTest.java`: `checkRunWindow()` is in-window with no schedule or no
-bounds, and reaches the freq/max-freq stubs when those are configured. `QueryParameterResolverTest.java`: standard-token resolution, step-level
+`src/test/java` — `RunDateCalculatorTest.java`: BAU parity tests with a fake calendar — one per BAU
+example (WD+3..WD+5 window inclusive, expired, ManualForceRun bypass rules, WD+0/WD-1, DAILY
+business-day gate, DAILY WD/CAL lag incl. the 2026-09-08 holiday example, non-DAILY prefix rule,
+quarterly/annual periods, lastBusDayMonth vs lastDayMonth, report ignoring dateType, not-evaluable
+configs). `QueryParameterResolverTest.java`: standard-token resolution, step-level
 `query_params_json` resolution, `--customParamsJson` resolution and its override of a
 same-named step-level key, standard-token references inside a custom value, and malformed/
 non-object `--customParamsJson` rejection. Run with `mvn -pl beam-utils -am test`.
@@ -225,61 +229,93 @@ combines `--runDate`, `--businessDayOffset`, and `--calendarName` into a single 
 
 ---
 
-## RunDateCalculator — stub to implement
+## RunDateCalculator — Finance Automation scheduling (BAU port)
 
-Every flow gets its dates from `RunDateCalculator.resolve()` and nothing else, so implementing
-`calculateRunDates()` once changes sources, reports and PIPELINE consistently:
+Every flow gets its dates from here and nothing else. The rules are a port of the existing BAU
+framework, kept **as is** — including its quirks (marked `BAU PARITY` in the code). Points the
+BAU description didn't pin down are marked `OPEN QUESTION` in the code and listed at the end of
+this section.
 
-| Call site | Flow | What it does with the `RunDates` |
-|---|---|---|
-| `DataSourcePipelineFactory.assembleForConfigs()` | `DATA_SOURCE_DOWNLOAD`, datasource half of `PIPELINE` | once per source: `SourceConfig.periodId` (COMPLETED check, DaRefer `per_id`), BQ query tokens, FILE `{date}`/`{dateCompact}`/`{fileDate}`/`{periodId}` |
-| `ReportPipelineFactory.execute(options)` | `REPORT_PROCESSING` | once per report: RptRefer/DaRefer `per_id`, preprocessing/transform query tokens, GCS output file names, email tokens |
-| `PipelineSequenceFactory.execute()` | report half of `PIPELINE` | resolved in the driver JVM at submission, carried to the worker's report step as a DoFn field |
+### Two dates, three questions
 
-```java
-RunDates dates = RunDateCalculator.resolve(sourceConfig.runScheduleConfig, options);
-// no run_details_json → exactly --runDate/--periodStart/--periodEnd/--periodId
-// run_details_json set → calculateRunDates(schedule, --runDate or today UTC)  ← implement this
+| Concept | Answers | From | In `RunDates` |
+|---|---|---|---|
+| **Business Date** | Should it run today? | `--runDate` (BAU `ManualRunDateId`), else today in `--businessTimeZone` | `runDate` |
+| **Reporting Period** | Which period's data? | Business Date + `frequency` + `dayLag` | `periodStart`, `periodId` |
+| **Period-end date** | What date represents the period downstream? | + `dateType` + `calendarKey` (data source, MONTHLY) | `periodEnd` |
+
+| Attribute | WHEN? | WHICH? | Rule |
+|---|:-:|:-:|---|
+| `frequency` | ✓ | ✓ | `DAILY` (business-day gate, `yyyyMMdd`), `MONTHLY` (window, `yyyyMM`), `QUARTERLY` (window, `yyyy*10+q`), `ANNUALLY` (window, `yyyy`). Anything else, incl. `WEEKLY` → not evaluable |
+| `freqRunDay` (source) / `freqDtl` (report) | ✓ | – | Window start. `WD+n` n-th business day, `WD-n` n-th-last, `WD+0` last calendar day of previous month. Ignored for DAILY |
+| `maxFreqRunDay` | ✓ | – | Window end, inclusive, same `WD±n` syntax. Blank → no upper bound (eligible until the period rolls over). Ignored for DAILY |
+| `dayLag` | – | ✓ | DAILY: `WD+n` n business days back, `CAL+n` n calendar days back. Non-DAILY: starts with `WD-`/`CAL-` → current period; anything else (blank, `WD+5`, …) → previous period — the number is ignored |
+| `calendarKey` | ✓ | ✓ | Required for every scheduled item. Missing/unknown → not evaluable |
+| `dateType` | – | ✓ | Data source MONTHLY only: `lastBusDayMonth` → last business day; anything else → last calendar day. Reports: not used |
+
+### Decision flow (per item, every execution)
+
+```
+no run schedule                         → ELIGIBLE, dates = CLI flags (unchanged behaviour)
+bad frequency / calendar / WD / lag     → NOT_EVALUABLE   skip + FailureNotifier; others continue
+DAILY, Business Date not a business day → NON_BUSINESS_DAY skip; never caught up
+non-DAILY, before freqRunDay date       → NOT_YET_ELIGIBLE skip; picked up by a later run
+non-DAILY, after maxFreqRunDay date     → EXPIRED          skip — unless --manualOverrun
+otherwise                               → ELIGIBLE → RunDates
+   then (callers): item + period already COMPLETED? → skip, unless --manualOverrun
 ```
 
-`calculateRunDates()` must return a `RunDates` (see `beam-core/README.md` for each field's
-meaning and format). Implement by combining, in order: `frequency` (which period contains the
-reference date → `periodStart`/`periodEnd`/`periodId`), `dateType`/`freqRunDay`/`maxFreqRunDay`
-(which date within that period is the business `runDate`, and which period the reference date is
-still reporting on), or — for `DAILY` — `dayLag` counted back from the reference date instead. Any
-`WD`/business-day offset resolves against whichever calendar `calendarKey` identifies — a separate
-external calendar database, not the `CalendarUtils`/`--calendarName` stub above. All call sites run
-in the driver JVM, so the implementation may call that database directly.
+Nothing is persisted for a skip: every run re-evaluates from scratch, so a not-yet-eligible or
+failed item is simply retried by a later run while its window is open (no retry limit).
+`--manualOverrun` (BAU `ManualForceRun`) bypasses the max-window and COMPLETED checks only — never
+the `freqRunDay` check or the DAILY business-day check. Non-DAILY items do **not** need the Business
+Date itself to be a business day (a MONTHLY window covering a Saturday runs on Saturday).
 
-### Reports — `calculateLastPeriod()` (stub)
+Data sources and reports are scheduled **independently**: a skipped data source never skips its
+report; the report checks its required data sources are COMPLETED when it runs, fails if not, and
+is retried on a later eligible run.
 
-Reports call `RunDateCalculator.resolveForReport()` instead of `resolve()`. With a `run_details`
-schedule it calls `calculateLastPeriod(schedule, asOfDate)`, which must return the **last closed
-period** the report applies to — e.g. a `MONTHLY` report on 2024-02-02 → `periodStart=2024-01-01`,
-`periodEnd=2024-01-31`, `periodId=202401`, `runDate=2024-02-02`.
+| Call site | Flow |
+|---|---|
+| `DataSourcePipelineFactory.assembleForConfigs()` → `evaluateDataSource()` | every data source (`DATA_SOURCE_DOWNLOAD`, datasource half of `PIPELINE`) |
+| `ReportPipelineFactory.execute(options)` → `evaluateReport()` | `REPORT_PROCESSING` |
+| `PipelineSequenceFactory.decideReportRun()` → `evaluateReport()` | report half of `PIPELINE` (dates carried to the worker) |
 
-### Data sources — run window (`calculateFreqRunDate()` / `calculateMaxFreqRunDate()`, stubs)
+### Calendar — the one thing you implement
 
-After resolving a source's dates, `DataSourcePipelineFactory` calls
-`RunDateCalculator.checkRunWindow(schedule, dates)`. The comparison is implemented; the two
-boundary dates are stubs:
+```java
+public final class CalendarDbProvider implements BusinessCalendarProvider {
+    @Override public BusinessCalendar forKey(String calendarKey) {
+        Set<LocalDate> holidays = /* load from calendar DB, cache per key */;
+        return date -> date.getDayOfWeek() != SATURDAY && date.getDayOfWeek() != SUNDAY
+                       && !holidays.contains(date);        // weekend rules are the calendar's call
+    }
+}
+// META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider:
+//   com.yourorg.CalendarDbProvider
+```
 
-| Stub | Meaning | Example (`MONTHLY`, January period) |
-|---|---|---|
-| `calculateFreqRunDate(schedule, dates)` | first day the period may be loaded (`freqRunDay`) | `WD+1` → first working day of February |
-| `calculateMaxFreqRunDate(schedule, dates)` | last day the period may be loaded (`maxFreqRunDay`) | `5` → fifth working day of February |
+Without a registered provider, every **scheduled** item is `NOT_EVALUABLE` (skipped, reported);
+unscheduled items don't touch the calendar.
 
-`dates.runDate` before the first → `BEFORE_FREQ_RUN_DATE`; after the second →
-`AFTER_MAX_FREQ_RUN_DATE`. Either way the source is **skipped** — logged, no DaRefer row, no
-branch, not a failure. A bound is only checked when configured (`freqRunDay` set /
-`maxFreqRunDay != -1`). This is why `runDate` must be the date the run executes as, and the
-period's as-of date (`dateType`) goes in `periodEnd`.
+### OPEN QUESTIONS — confirm against BAU
 
-A report and the datasources it reads must resolve to the same `periodId` — the report finds them
-in `DaRefer` by its own. `PIPELINE` logs a warning at submission when they differ.
-
-`QueryParameterResolver.resolve(template, params, options, dates)` takes the `RunDates` for its
-standard tokens; the 3-arg overload uses `RunDateCalculator.fromOptions(options)`.
+1. **QUARTERLY/ANNUALLY window month** — BAU "quarter/annual month lookup" wasn't described.
+   Assumed: WD days counted in the first month of the Business Date's quarter / January.
+2. **QUARTERLY periodId** — assumed `yyyy*10+q` (Q1 2026 → `20261`).
+3. **`WD+n` beyond the month's business days** — assumed the count carries into the next month
+   (and `WD-n` into the previous) rather than failing.
+4. **DAILY blank `dayLag`** — assumed lag 0 (period = Business Date).
+5. **DAILY `WD-n`/`CAL-n`** — BAU only describes `+n`; assumed the magnitude is counted back.
+6. **Blank `freqRunDay`/`freqDtl` on a non-DAILY item** — assumed no lower bound.
+7. **Case/whitespace** — `WD±n`, `WD-`/`CAL-` prefixes, `lastBusDayMonth` and frequencies are
+   matched exactly (case-sensitive). `CD+n` (used in earlier docs here) is not a BAU form.
+8. **Report `paramReplace[].dateType`** (`periodId` / `RunDate` / period end + `periodOffset`) —
+   not implemented; its config shape and `periodOffset` unit weren't described.
+9. **Report ↔ datasource period resolution** — a report looks its datasources up by its own
+   `periodId`; a report whose datasources have a different frequency isn't handled.
+10. **`--overrideDownload`** still bypasses only the COMPLETED check; only `--manualOverrun` maps
+    to `ManualForceRun`.
 
 ---
 

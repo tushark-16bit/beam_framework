@@ -46,9 +46,10 @@ import java.util.ServiceLoader;
  * <h2>Execution phases</h2>
  * <ol>
  *   <li>Load {@link ReportConfig} from parameter_store</li>
- *   <li>Resolve this report's {@link RunDates} via {@code RunDateCalculator.resolveForReport()} — the last
- *       closed period it applies to (from its {@code run_details} schedule, else the CLI options) — every later phase reads its dates
- *       from this one value</li>
+ *   <li>Evaluate the report's own schedule via {@code RunDateCalculator.evaluateReport()}
+ *       (Finance Automation rules): not eligible today → stop, no RptRefer row; eligible → its
+ *       {@link RunDates} (the reporting period) are what every later phase reads. Scheduled
+ *       reports already COMPLETED for that period are skipped unless {@code --manualOverrun}.</li>
  *   <li>Insert RptRefer row with {@code sta_cd=LOADING}</li>
  *   <li>Run preprocessing steps (BQ queries or API enrichment)</li>
  *   <li>Verify each required datasource has {@code sta_cd=COMPLETED} in DaRefer for this period</li>
@@ -139,21 +140,73 @@ public final class ReportPipelineFactory {
                 reportName, reportSubprocess, periodId, e);
         }
 
-        // ── 1b. Resolve this report's run dates ───────────────────────────────
-        // RUN-DATE PLACEHOLDER: every date this report uses (RptRefer per_id, DaRefer lookups,
-        // query tokens, output file names, email tokens) comes from here — the last closed
-        // period the report applies to (RunDateCalculator.calculateLastPeriod). Without a
-        // run_details schedule this is exactly the CLI options.
-        RunDates dates;
+        // ── 1b. Finance Automation scheduling: may the report run today, for which period? ──
+        // Reports are scheduled independently of their data sources (BAU): the report's own
+        // freqDtl/maxFreqRunDay window decides WHEN, its own frequency + dayLag decides WHICH
+        // period. Every date the report uses afterwards (RptRefer per_id, DaRefer lookups, query
+        // tokens, output file names, email tokens) comes from decision.dates. Without a
+        // run_details schedule the dates are exactly the CLI flags and the report always runs.
+        RunDateCalculator.ScheduleDecision decision;
         try {
-            dates = RunDateCalculator.resolveForReport(config.runScheduleConfig, options);
+            decision = RunDateCalculator.evaluateReport(config.runScheduleConfig, options);
         } catch (Exception e) {
+            // e.g. an invalid --runDate / --periodStart / --businessTimeZone
             throw ReportProcessingException.wrap(ReportProcessingException.Reason.UNKNOWN,
                 reportName, reportSubprocess, periodId, e);
         }
-        LOG.info("Run dates for report '{}': {}", reportName, dates);
+        if (decision.status == RunDateCalculator.ScheduleDecision.Status.NOT_EVALUABLE) {
+            // Configuration/calendar problem — surfaced as a failure (non-zero exit + failure
+            // notification via Main); BAU re-evaluates it on the next execution.
+            throw new ReportProcessingException(ReportProcessingException.Reason.UNKNOWN,
+                reportName, reportSubprocess, periodId,
+                "Run schedule for report '" + reportName + "' could not be evaluated: "
+                + decision.detail, null);
+        }
+        if (!decision.shouldRun()) {
+            // NOT_YET_ELIGIBLE / EXPIRED / NON_BUSINESS_DAY — an expected skip, not a failure:
+            // no RptRefer row, exit 0, re-evaluated on the next execution.
+            LOG.info("Report '{}' not run today: {}", reportName, decision);
+            return;
+        }
+        RunDates dates = decision.dates;
+        LOG.info("Report '{}' eligible: {}", reportName, decision);
+
+        // ── 1c. Already COMPLETED for this period? (BAU: item + period Completed → skip) ──
+        if (isAlreadyCompleted(options, decision, reportName)) {
+            return;
+        }
 
         execute(options, config, dates);
+    }
+
+    /**
+     * BAU "does it still need to run?" check for a report: if this report is already
+     * {@code COMPLETED} in RptRefer for the calculated period, skip it. Bypassed by
+     * {@code --manualOverrun} (BAU {@code ManualForceRun}).
+     *
+     * <p>Applied only to a report that has a run schedule: unscheduled reports keep their
+     * previous behaviour of always re-running, so existing CLI-driven runs don't change.
+     * Shared with {@code PipelineSequenceFactory}, which makes the same check at submission.
+     *
+     * @return true if the report should be skipped (and has been logged as such)
+     */
+    static boolean isAlreadyCompleted(FrameworkOptions options,
+                                      RunDateCalculator.ScheduleDecision decision, String reportName) {
+        if (!decision.scheduled) {
+            return false;
+        }
+        if (options.getManualOverrun()) {
+            LOG.info("--manualOverrun (ManualForceRun): report '{}' runs for period {} even if "
+                     + "already COMPLETED", reportName, decision.dates.periodId);
+            return false;
+        }
+        boolean completed = new BigQueryReportCheckpointAdapter(options)
+            .isCompleted(reportName, decision.dates.periodId);
+        if (completed) {
+            LOG.info("Report '{}' already COMPLETED for period {} — not run again "
+                     + "(--manualOverrun=true to force)", reportName, decision.dates.periodId);
+        }
+        return completed;
     }
 
     /**

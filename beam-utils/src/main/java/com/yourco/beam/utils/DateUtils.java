@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -54,7 +55,8 @@ public final class DateUtils {
      * Resolves the run date from pipeline options.
      *
      * <p>If {@code --runDate} is set, parses it as ISO-8601 ({@code YYYY-MM-DD}).
-     * If not set, defaults to today's date in UTC — consistent across all timezones.
+     * If not set, defaults to today's date in {@code --businessTimeZone} (default UTC) — the
+     * Finance Automation Business Date.
      *
      * @param options pipeline options containing the optional {@code runDate} flag
      * @return the resolved run date
@@ -63,8 +65,10 @@ public final class DateUtils {
     public static LocalDate resolveRunDate(FrameworkOptions options) {
         String runDateStr = options.getRunDate();
         if (runDateStr == null || runDateStr.isBlank()) {
-            LocalDate today = LocalDate.now(ZoneOffset.UTC);
-            LOG.info("--runDate not set; defaulting to today UTC: {}", today);
+            String zone = options.getBusinessTimeZone();
+            ZoneId zoneId = (zone == null || zone.isBlank()) ? ZoneOffset.UTC : ZoneId.of(zone.trim());
+            LocalDate today = LocalDate.now(zoneId);
+            LOG.info("--runDate not set; defaulting to today in {}: {}", zoneId, today);
             return today;
         }
         try {

@@ -171,7 +171,7 @@ Change `dag_run.conf` JSON to change pipeline behaviour:
 | Which fields to mask | `--piiFields=email,phone,tax_id` |
 | Retry behaviour | `--retryPolicy`, `--maxRetries`, `--retryDelayMs` |
 | Failed record destination | `--deadLetterSink` |
-| Report date | `--runDate=2024-01-15` (ISO-8601) |
+| Report date / Business Date | `--runDate=2024-01-15` (ISO-8601); unset → today in `--businessTimeZone` (default `UTC`) |
 | Business calendar | `--calendarName=NYSE` |
 | Notification email | `--businessEmail`, `--devErrorEmail` |
 | BQ idempotency | `--writeDisposition=TRUNCATE` (safe re-run) or `APPEND` |
@@ -213,19 +213,19 @@ public static boolean isBusinessDay(LocalDate date, String calendarName) {
 Once implemented, use them via `CalendarUtils.resolveEffectiveDate(options)` which
 combines `--runDate`, `--businessDayOffset`, and `--calendarName` automatically.
 
-### Per-source / per-report run dates — `RunDateCalculator`
+### Finance Automation scheduling — `RunDateCalculator`
 
 Every data source (`run_details_json` in its params) and every report (`run_details` in its
 config) can carry its own run schedule. All flows — `DATA_SOURCE_DOWNLOAD`, `REPORT_PROCESSING`
-and both halves of `PIPELINE` — get their dates from one call,
-`RunDateCalculator.resolve(schedule, options)`, which returns a `RunDates`
-(`runDate`, `periodStart`, `periodEnd`, `periodId`). With no schedule configured it returns
-exactly `--runDate`/`--periodStart`/`--periodEnd`/`--periodId`, so existing runs are unchanged.
-With a schedule it calls `RunDateCalculator.calculateRunDates()` (sources) or
-`calculateLastPeriod()` (reports — the last closed period the report covers) — stubs you implement
-once for everything. A source whose run date is before its `freqRunDay` date or after its
-`maxFreqRunDay` date (`calculateFreqRunDate()`/`calculateMaxFreqRunDate()`, also stubs) is skipped,
-not failed. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
+and both halves of `PIPELINE` — are governed by one set of rules, a port of the existing BAU
+Finance Automation framework: `frequency + freqRunDay (freqDtl for reports) + maxFreqRunDay +
+calendarKey` decide **whether it runs today** (DAILY: business day only; others: inside the
+inclusive run window), `frequency + dayLag` decide **which period** it processes, and
+`dateType + calendarKey` the **period-end date** (data sources). Items outside their window are
+skipped, not failed, and re-evaluated on every run; `--manualOverrun` bypasses the max-window and
+COMPLETED checks. With no schedule configured an item uses exactly
+`--runDate`/`--periodStart`/`--periodEnd`/`--periodId`, so existing runs are unchanged. The only
+piece to implement is the calendar DB lookup (`BusinessCalendarProvider`, SPI). Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
 email tokens and report file names; `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for
 FILE `{fileDate}`; `periodId` as an int in the `--periodId` encoding. See `beam-utils/README.md`.
 

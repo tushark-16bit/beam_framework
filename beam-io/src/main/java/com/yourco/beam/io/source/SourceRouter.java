@@ -64,7 +64,7 @@ public final class SourceRouter {
      * the parameter DB. Each source in the parallel loop calls this method once.
      *
      * <p>{@code runDate} must be resolved by the caller — this source's own
-     * {@code RunDates.runDate} from {@code RunDateCalculator.resolve()} in beam-runner, which has
+     * {@code RunDates.runDate} from {@code RunDateCalculator.evaluateDataSource()} in beam-runner, which has
      * access to beam-utils. This keeps beam-io free of a beam-utils dependency. A FILE source's
      * {@code {periodId}} comes from {@link SourceConfig#periodId}, which the caller has already
      * set to the same resolved period.

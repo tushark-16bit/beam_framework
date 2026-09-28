@@ -79,7 +79,7 @@ public final class QueryParameterResolver {
     /**
      * Same as {@link #resolve(String, Map, FrameworkOptions)}, but standard tokens come from
      * {@code dates} — a source's or report's own {@link RunDates} from
-     * {@link RunDateCalculator#resolve} — rather than straight from the CLI options.
+     * {@link RunDateCalculator#evaluateDataSource}/{@link RunDateCalculator#evaluateReport} — rather than straight from the CLI options.
      * {@code options} still supplies {@code --customParamsJson}.
      */
     public static String resolve(String template, Map<String, String> paramMappings,

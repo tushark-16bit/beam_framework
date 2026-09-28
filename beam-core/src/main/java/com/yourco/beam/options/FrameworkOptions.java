@@ -319,11 +319,19 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // =========================================================================
 
     @Description("The business date this pipeline run is processing. ISO-8601 format (YYYY-MM-DD). "
-                 + "Defaults to today (UTC) if not set. "
+                 + "Defaults to today in --businessTimeZone (default UTC) if not set. "
                  + "Set explicitly for reprocessing historical dates: --runDate=2024-01-15. "
                  + "Airflow typically passes this as: \"--runDate\": \"{{ ds }}\"")
     String getRunDate();
     void setRunDate(String value);
+
+    @Description("IANA time zone (e.g. America/New_York) used to take 'today' as the business "
+                 + "date when --runDate is not set. Finance Automation's Business Date is today "
+                 + "in the framework's configured time zone; default UTC keeps the previous "
+                 + "behaviour.")
+    @Default.String("UTC")
+    String getBusinessTimeZone();
+    void setBusinessTimeZone(String value);
 
     @Description("Number of business days to look back from runDate when computing the "
                  + "reporting window. Example: 1 = yesterday's business day. "

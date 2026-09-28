@@ -9,8 +9,11 @@ import java.time.format.DateTimeFormatter;
  * reads its dates from, instead of reading {@code --runDate}/{@code --periodStart}/
  * {@code --periodEnd}/{@code --periodId} directly.
  *
- * <p>Produced by {@code RunDateCalculator.resolve()} (beam-utils): from the source's/report's
- * {@link RunScheduleConfig} when one is configured, otherwise straight from the CLI options.
+ * <p>Produced by {@code RunDateCalculator.evaluateDataSource()}/{@code evaluateReport()}
+ * (beam-utils) for an item that is eligible to run: from the source's/report's
+ * {@link RunScheduleConfig} (Finance Automation rules) when one is configured, otherwise straight
+ * from the CLI options. {@link #runDate} is the BAU Business Date; the other three fields are the
+ * BAU Reporting Period.
  *
  * <h2>Expected formats</h2>
  * <table>

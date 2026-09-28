@@ -52,11 +52,13 @@ public final class DataSourcePipelineFactory {
 
     /**
      * Validates parameters, creates LOADING checkpoints, assembles the Beam pipeline graph,
-     * and returns the pipeline ready for {@code run()} in {@link Main}.
+     * and returns it ready for {@code run()} in {@link Main} — or an empty assembly
+     * ({@link DataSourceAssembly#isEmpty()}) when no source is eligible and pending, which
+     * {@code Main} must not submit.
      *
      * <p>Does NOT call {@code pipeline.run()} — that is the caller's responsibility.
      */
-    public Pipeline assemble(FrameworkOptions options) {
+    public DataSourceAssembly assemble(FrameworkOptions options) {
         LOG.info("DATA_SOURCE_DOWNLOAD | datasource={} | period={} | subprocess={}",
                  options.getDatasourceName(), options.getPeriodId(), options.getSubprocessName());
 
@@ -74,7 +76,7 @@ public final class DataSourcePipelineFactory {
         }
         LOG.info("Found {} source config(s) for this run", sourceConfigs.size());
 
-        return assembleForConfigs(options, sourceConfigs).pipeline;
+        return assembleForConfigs(options, sourceConfigs);
     }
 
     /**
@@ -125,23 +127,25 @@ public final class DataSourcePipelineFactory {
         // Each source gets its own run dates, resolved before the COMPLETED skip-check and
         // checkpoint creation below, so DaRefer is keyed by the resolved periodId — the same value
         // a report reading this source resolves to — not the raw --periodId.
-        // A source whose run date falls outside its freqRunDay..maxFreqRunDay window is skipped
-        // here — no checkpoint, no branch, not a failure: before the window the period isn't
-        // open for loading yet; after it, the period is closed for this source.
+        // Finance Automation scheduling (RunDateCalculator): each source is evaluated on its own
+        // — WHEN may it run on the Business Date, and WHICH period does it process. Only an
+        // ELIGIBLE source goes on to the COMPLETED check and gets a DaRefer row and a branch.
+        // A skip is not persisted anywhere: BAU re-evaluates every item on every execution, so a
+        // NOT_YET_ELIGIBLE source is simply picked up by a later run inside its window.
+        // The source's periodId is replaced with its calculated one before the COMPLETED check
+        // and checkpoint creation, so DaRefer is keyed by the period actually processed.
         Map<String, RunDates> runDates = new HashMap<>();
         List<SourceConfig> datedConfigs = new ArrayList<>();
         for (SourceConfig config : sourceConfigs) {
-            RunDates dates = RunDateCalculator.resolve(config.runScheduleConfig, options);
-            LOG.info("Run dates for '{}': {}", config.datasourceName, dates);
-            RunDateCalculator.RunWindow window =
-                RunDateCalculator.checkRunWindow(config.runScheduleConfig, dates);
-            if (!window.shouldRun()) {
-                LOG.info("Skipping '{}' for periodId={}: outside its run window — {}",
-                         config.datasourceName, dates.periodId, window);
+            RunDateCalculator.ScheduleDecision decision =
+                RunDateCalculator.evaluateDataSource(config.runScheduleConfig, options);
+            if (!decision.shouldRun()) {
+                reportSkip(options, config, decision);
                 continue;
             }
-            runDates.put(config.datasourceName, dates);
-            datedConfigs.add(config.toBuilder().periodId(dates.periodId).build());
+            LOG.info("Source '{}' eligible: {}", config.datasourceName, decision);
+            runDates.put(config.datasourceName, decision.dates);
+            datedConfigs.add(config.toBuilder().periodId(decision.dates.periodId).build());
         }
 
         BigQueryDataSourceCheckpointAdapter checkpointAdapter =
@@ -149,8 +153,8 @@ public final class DataSourcePipelineFactory {
 
         List<SourceConfig> toProcess = filterByCheckpoint(datedConfigs, checkpointAdapter, options);
         if (toProcess.isEmpty()) {
-            LOG.info("Nothing to process: of {} source(s), {} outside their run window, the rest "
-                     + "already completed (set --overrideDownload=true to force re-download).",
+            LOG.info("Nothing to process: of {} source(s), {} not eligible today, the rest "
+                     + "already completed (set --manualOverrun=true to force a re-run).",
                      sourceConfigs.size(), sourceConfigs.size() - datedConfigs.size());
             return new DataSourceAssembly(Pipeline.create(options), new ArrayList<>());
         }
@@ -190,6 +194,31 @@ public final class DataSourcePipelineFactory {
         }
 
         return assemblePipeline(options, toProcess, dataSourceIds, previousDaIds, runDates);
+    }
+
+    /**
+     * Logs a source skipped by its schedule. The ordinary BAU outcomes — not yet eligible,
+     * expired window, DAILY on a non-business day — are expected and only logged. NOT_EVALUABLE
+     * (bad frequency, missing/unknown calendarKey, no calendar provider, unparseable WD/lag) is a
+     * configuration problem: it is also sent through {@link FailureNotifier} as a
+     * {@code DataSourceDownloadException(INVALID_INPUT)} so it isn't lost in the logs — without
+     * failing the other sources in the same run (BAU: the failing item is skipped and re-evaluated
+     * next execution; others carry on).
+     */
+    private static void reportSkip(FrameworkOptions options, SourceConfig config,
+                                   RunDateCalculator.ScheduleDecision decision) {
+        if (decision.status != RunDateCalculator.ScheduleDecision.Status.NOT_EVALUABLE) {
+            LOG.info("Skipping source '{}': {}", config.datasourceName, decision);
+            return;
+        }
+        LOG.error("Skipping source '{}' — run schedule could not be evaluated: {}",
+                  config.datasourceName, decision);
+        FailureNotifier.notify(options, new DataSourceDownloadException(
+            DataSourceDownloadException.Reason.INVALID_INPUT, config.datasourceName,
+            config.subprocessName, config.periodId,
+            "Run schedule for '" + config.datasourceName + "' could not be evaluated on business date "
+            + decision.businessDate + ": " + decision.detail + " — source skipped, "
+            + "will be re-evaluated on the next run", null));
     }
 
     // ── Graph assembly ────────────────────────────────────────────────────────

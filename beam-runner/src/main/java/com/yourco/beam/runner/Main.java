@@ -158,10 +158,17 @@ public final class Main {
                  options.getPeriodStart(), options.getPeriodEnd());
 
         DataSourcePipelineFactory factory = new DataSourcePipelineFactory();
-        Pipeline pipeline = factory.assemble(options);
+        DataSourceAssembly assembly = factory.assemble(options);
+        if (assembly.isEmpty()) {
+            // Every source was skipped by its schedule (not yet eligible, expired, non-business
+            // day, not evaluable) or is already COMPLETED — nothing to submit.
+            LOG.info("DATA_SOURCE_DOWNLOAD: nothing to run for datasource={} — no job submitted",
+                     options.getDatasourceName());
+            return;
+        }
 
         LOG.info("Submitting to runner: {}", options.getRunner().getSimpleName());
-        pipeline.run();
+        assembly.pipeline.run();
 
         LOG.info("DATA_SOURCE_DOWNLOAD job submitted: datasource={} — finalization runs on the "
                  + "worker; main() returns now", options.getDatasourceName());

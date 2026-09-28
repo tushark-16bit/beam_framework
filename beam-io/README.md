@@ -131,9 +131,11 @@ io/config/
                                      (DataTransformConfig) — an optional post-storage SQL transform.
                                      Also parses run_details_json — a single nested JSON object, unlike this
                                      file's other *_json keys which are arrays/flat maps — into
-                                     SourceConfig.runScheduleConfig (RunScheduleConfig): dateType/frequency/
-                                     freqRunDay/maxFreqRunDay/dayLag/calendarKey. Retrieval only; no date
-                                     arithmetic happens here. Also parses file_date_pattern into
+                                     SourceConfig.runScheduleConfig (RunScheduleConfig): frequency/freqRunDay/
+                                     maxFreqRunDay/dayLag/dateType/calendarKey, all kept as raw strings
+                                     (maxFreqRunDay is a WD±n expression). Malformed JSON throws rather than
+                                     silently running unscheduled. Retrieval only; the scheduling rules are
+                                     RunDateCalculator (beam-utils). Also parses file_date_pattern into
                                      FileSourceConfig.fileDatePattern for FILE sources.
     BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING
                                      AND PIPELINE (same lookup, same ReportConfig — PIPELINE has no config of its
@@ -144,8 +146,9 @@ io/config/
                                      and top-level output_bq_table / output_bq_input_alias for per-report BQ write.
                                      Also parses the optional top-level "run_details" object into
                                      ReportConfig.runScheduleConfig, via the same package-private
-                                     BigQuerySourceConfigRepository.parseRunSchedule() a source uses — so a
-                                     report's schedule has exactly the same fields and parsing as a source's.
+                                     BigQuerySourceConfigRepository.parseRunSchedule() a source uses — same
+                                     fields, except the run-window start is read from "freqDtl" (BAU naming
+                                     for reports) instead of "freqRunDay".
 
 io/email/
     ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>). Used only by

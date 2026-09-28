@@ -72,8 +72,9 @@ public final class ReportConfig implements Serializable {
     /**
      * Optional run-scheduling config for the report itself, from a nested {@code run_details}
      * object in the report's {@code parameters_val_json} — same fields as a source's
-     * {@code run_details_json}. Never null; {@link RunScheduleConfig#none()} when absent.
-     * Turned into dates by {@code RunDateCalculator.resolve()}, same as for data sources.
+     * {@code run_details_json}, except the run-window start is read from {@code freqDtl} (BAU
+     * naming for reports). Never null; {@link RunScheduleConfig#none()} when absent. Evaluated by
+     * {@code RunDateCalculator.evaluateReport()}.
      */
     public final RunScheduleConfig runScheduleConfig;
 

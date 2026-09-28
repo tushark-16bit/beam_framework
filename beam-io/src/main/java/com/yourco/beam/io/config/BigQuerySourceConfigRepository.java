@@ -92,9 +92,9 @@ import java.util.Map;
  *   "data_transform_min_row_count":  "1",
  *   "data_transform_max_row_count":  "100000",
  *   // Optional per-source run-scheduling config (see RunScheduleConfig)
- *   "run_details_json":         "{\"dateType\":\"LAST_DAY_OF_MONTH\",\"frequency\":\"MONTHLY\",
- *                                  \"freqRunDay\":\"WD+1\",\"maxFreqRunDay\":5,
- *                                  \"dayLag\":\"WD-1\",\"calendarKey\":\"Calendar_EPS\"}"
+ *   "run_details_json":         "{\"frequency\":\"MONTHLY\",\"freqRunDay\":\"WD+3\",
+ *                                  \"maxFreqRunDay\":\"WD+5\",\"dayLag\":\"\",
+ *                                  \"dateType\":\"lastBusDayMonth\",\"calendarKey\":\"Calendar_EPS\"}"
  * }
  * </pre>
  *
@@ -133,11 +133,11 @@ import java.util.Map;
  *
  * <h2>run_details_json — optional per-source run-scheduling config</h2>
  * <p>A single nested JSON object (unlike this framework's other {@code *_json} keys, which hold
- * arrays or flat maps) carrying {@code dateType}/{@code frequency}/{@code freqRunDay}/
- * {@code maxFreqRunDay}/{@code dayLag}/{@code calendarKey} — see
+ * arrays or flat maps) carrying {@code frequency}/{@code freqRunDay}/
+ * {@code maxFreqRunDay}/{@code dayLag}/{@code dateType}/{@code calendarKey} — see
  * {@link com.yourco.beam.model.RunScheduleConfig} for what each means. This repository only
- * retrieves the values; it does not compute a date from them — that's
- * {@code RunDateCalculator.calculateRunDate()} in beam-utils, deliberately left unimplemented.
+ * retrieves the values; the Finance Automation scheduling rules that interpret them are in
+ * {@code RunDateCalculator} (beam-utils).
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
@@ -341,35 +341,56 @@ public final class BigQuerySourceConfigRepository {
     /**
      * Parses {@code run_details_json} — a single nested JSON object, unlike the framework's
      * other {@code *_json} keys which hold arrays or flat maps — into a {@link RunScheduleConfig}.
-     * Absent or malformed JSON returns {@link RunScheduleConfig#none()} rather than failing the
-     * whole config fetch, since this block is optional.
+     * Absent → {@link RunScheduleConfig#none()} (unscheduled: CLI dates). Malformed → throws:
+     * silently treating a broken schedule as "unscheduled" would run the source on the CLI dates
+     * outside its configured window, which is worse than failing the config fetch loudly.
      */
     private RunScheduleConfig toRunScheduleConfig(Map<String, String> p) {
         String json = p.get("run_details_json");
         if (json == null || json.isBlank()) return RunScheduleConfig.none();
+        JsonNode node;
         try {
-            return parseRunSchedule(JSON.readTree(json));
+            node = JSON.readTree(json);
         } catch (Exception e) {
-            LOG.error("Failed to parse run_details_json: {}", e.getMessage());
-            return RunScheduleConfig.none();
+            throw new IllegalArgumentException("run_details_json is not valid JSON: " + json, e);
         }
+        if (!node.isObject()) {
+            throw new IllegalArgumentException("run_details_json must be a JSON object: " + json);
+        }
+        return parseRunSchedule(node, SOURCE_RUN_DAY_KEY);
     }
+
+    /** Data sources store the run-window start as {@code freqRunDay} (BAU naming). */
+    static final String SOURCE_RUN_DAY_KEY = "freqRunDay";
+    /** Reports store the run-window start as {@code freqDtl} (BAU naming). */
+    static final String REPORT_RUN_DAY_KEY = "freqDtl";
 
     /**
      * Maps a run-details JSON object to {@link RunScheduleConfig}. Shared with
      * {@link BigQueryReportRepository} (a report's nested {@code run_details} object) so sources
-     * and reports read the same field names the same way.
+     * and reports read the same fields the same way — except the run-window start, which BAU
+     * names differently: {@code runDayKey} is {@link #SOURCE_RUN_DAY_KEY} ({@code freqRunDay}) for
+     * a data source, {@link #REPORT_RUN_DAY_KEY} ({@code freqDtl}) for a report.
+     *
+     * <p>Values are kept as raw text ({@code maxFreqRunDay} too — it is a {@code WD±n}
+     * expression, e.g. {@code "WD+5"}); a JSON number such as {@code 5} becomes {@code "5"} and
+     * is rejected as not evaluable by {@code RunDateCalculator} rather than guessed at.
      */
-    static RunScheduleConfig parseRunSchedule(JsonNode node) {
+    static RunScheduleConfig parseRunSchedule(JsonNode node, String runDayKey) {
         if (node == null || !node.isObject()) return RunScheduleConfig.none();
         return new RunScheduleConfig(
-            node.path("dateType").asText(null),
-            node.path("frequency").asText(null),
-            node.path("freqRunDay").asText(null),
-            node.path("maxFreqRunDay").asInt(RunScheduleConfig.NO_MAX),
-            node.path("dayLag").asText(null),
-            node.path("calendarKey").asText(null)
+            textOrNull(node, "frequency"),
+            textOrNull(node, runDayKey),
+            textOrNull(node, "maxFreqRunDay"),
+            textOrNull(node, "dayLag"),
+            textOrNull(node, "dateType"),
+            textOrNull(node, "calendarKey")
         );
+    }
+
+    private static String textOrNull(JsonNode node, String key) {
+        JsonNode v = node.get(key);
+        return (v == null || v.isNull()) ? null : v.asText();
     }
 
     private SourceFailureEmailConfig toFailureEmailConfig(Map<String, String> p) {

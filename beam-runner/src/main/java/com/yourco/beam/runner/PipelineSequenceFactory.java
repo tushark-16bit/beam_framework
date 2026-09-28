@@ -116,18 +116,17 @@ public final class PipelineSequenceFactory {
         }
         List<ReportDatasourceRef> datasources = reportConfig.datasources;
 
-        // RUN-DATE PLACEHOLDER (report half of PIPELINE): resolved here in the driver JVM, at
-        // submission, and carried to the worker as a DoFn field — so the report uses the same
-        // dates it would have standalone, not whatever "today" is when the worker gets to it.
-        // Each datasource resolves its own dates inside DataSourcePipelineFactory.
-        RunDates reportDates;
-        try {
-            reportDates = RunDateCalculator.resolveForReport(reportConfig.runScheduleConfig, options);
-        } catch (Exception e) {
-            throw PipelineException.wrap(PipelineException.Reason.CONFIGURATION_ERROR,
-                reportName, reportSubprocess, periodId, e);
-        }
-        LOG.info("Run dates for report '{}': {}", reportName, reportDates);
+        // Finance Automation scheduling for the report half of PIPELINE — decided here in the
+        // driver JVM at submission and carried to the worker as a DoFn field, so the report uses
+        // the dates of the Business Date it was submitted on, not whatever "today" is when the
+        // worker gets to it. Each datasource is evaluated separately inside
+        // DataSourcePipelineFactory against its OWN schedule.
+        //
+        // BAU: data sources and reports are scheduled independently. A report that isn't
+        // eligible today (or is already COMPLETED for its period) does not stop its data sources
+        // from loading, and a skipped data source does not skip the report — the report instead
+        // fails its required-datasource check when it runs, and is retried on a later execution.
+        RunDates reportDates = decideReportRun(options, reportConfig);
 
         // A DataSourceDownloadException raised during assembly/submission already carries the
         // right specific detail — pass it through unchanged rather than re-wrapping. Only an
@@ -147,6 +146,11 @@ public final class PipelineSequenceFactory {
 
     // ── Assembly: batched data-source job + report step, one pipeline, one submit ──
 
+    /**
+     * @param reportDates the report's dates if it should run in this job, or {@code null} if it
+     *                    was skipped by its schedule / COMPLETED check — the data sources are then
+     *                    still loaded, with no report step wired after them
+     */
     private void assembleAndSubmit(FrameworkOptions options, List<ReportDatasourceRef> datasources,
                                     ReportConfig reportConfig, RunDates reportDates) {
         List<SourceConfig> sourceConfigs = new ArrayList<>();
@@ -167,36 +171,92 @@ public final class PipelineSequenceFactory {
             LOG.info("Report declares no datasources — report step will run with nothing to wait for");
         }
 
-        warnOnPeriodMismatch(options, sourceConfigs, reportDates);
+        if (reportDates != null) {
+            warnOnPeriodMismatch(options, sourceConfigs, reportDates);
+        }
 
         // assembleForConfigs() already throws DataSourceDownloadException itself on failure —
-        // let it propagate unchanged, it's already the right type.
+        // let it propagate unchanged, it's already the right type. It also applies each data
+        // source's own schedule, dropping any that aren't eligible today.
         DataSourcePipelineFactory dsFactory = new DataSourcePipelineFactory();
         DataSourceAssembly assembly = dsFactory.assembleForConfigs(options, sourceConfigs);
 
-        // Wire the report step onto the SAME pipeline, gated on every datasource branch's
-        // finalize signal via Wait.on() — no driver-JVM poll loop.
-        ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig,
-            reportDates, options);
+        if (reportDates == null && assembly.isEmpty()) {
+            LOG.info("PIPELINE: report '{}' not run and no datasource eligible/pending — no job "
+                     + "submitted", reportConfig.reportName);
+            return;
+        }
 
-        LOG.info("Submitting batched PIPELINE job ({} datasource(s) + report='{}') to runner: {}",
-                 datasources.size(), reportConfig.reportName, options.getRunner().getSimpleName());
+        if (reportDates != null) {
+            // Wire the report step onto the SAME pipeline, gated on every datasource branch's
+            // finalize signal via Wait.on() — no driver-JVM poll loop.
+            ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig,
+                reportDates, options);
+        }
+
+        LOG.info("Submitting batched PIPELINE job ({} datasource branch(es){}) to runner: {}",
+                 assembly.finalizeSignals.size(),
+                 reportDates != null ? " + report='" + reportConfig.reportName + "'" : ", no report step",
+                 options.getRunner().getSimpleName());
         assembly.pipeline.run();
+    }
+
+    /**
+     * Evaluates the report's own schedule and COMPLETED status.
+     *
+     * @return the report's dates if it should run in this job; {@code null} if it is skipped
+     *         (not eligible today, already COMPLETED, or its schedule is not evaluable — the last
+     *         is also sent through {@link FailureNotifier}, without failing the data sources)
+     */
+    private static RunDates decideReportRun(FrameworkOptions options, ReportConfig reportConfig) {
+        String reportName = reportConfig.reportName;
+        RunDateCalculator.ScheduleDecision decision;
+        try {
+            decision = RunDateCalculator.evaluateReport(reportConfig.runScheduleConfig, options);
+        } catch (Exception e) {
+            // e.g. an invalid --runDate / --periodStart / --businessTimeZone: nothing can run.
+            throw PipelineException.wrap(PipelineException.Reason.CONFIGURATION_ERROR,
+                reportName, reportConfig.reportSubprocess, options.getPeriodId(), e);
+        }
+        if (decision.status == RunDateCalculator.ScheduleDecision.Status.NOT_EVALUABLE) {
+            LOG.error("Report '{}' skipped — run schedule could not be evaluated: {}",
+                      reportName, decision);
+            FailureNotifier.notify(options, new PipelineException(
+                PipelineException.Reason.CONFIGURATION_ERROR, reportName,
+                reportConfig.reportSubprocess, options.getPeriodId(),
+                "Run schedule for report '" + reportName + "' could not be evaluated on business date "
+                + decision.businessDate + ": " + decision.detail + " — report skipped, its data "
+                + "sources still run; will be re-evaluated on the next run"));
+            return null;
+        }
+        if (!decision.shouldRun()) {
+            LOG.info("Report '{}' not run today: {} — its data sources are still evaluated",
+                     reportName, decision);
+            return null;
+        }
+        LOG.info("Report '{}' eligible: {}", reportName, decision);
+        if (ReportPipelineFactory.isAlreadyCompleted(options, decision, reportName)) {
+            return null;
+        }
+        return decision.dates;
     }
 
     /**
      * The report finds each datasource's DaRefer row by the report's own {@code periodId}, so a
      * datasource whose schedule resolves to a different one can never be picked up by this
      * report. Warn at submission rather than only discovering it after the download runs.
-     * A datasource whose dates fail to resolve is skipped here — {@code assembleForConfigs()}
-     * fails it with the proper exception right after.
+     * Only data sources eligible today are compared; the others are skipped (and reported) by
+     * {@code assembleForConfigs()} right after.
      */
     private static void warnOnPeriodMismatch(FrameworkOptions options, List<SourceConfig> sourceConfigs,
                                              RunDates reportDates) {
         for (SourceConfig config : sourceConfigs) {
             int sourcePeriodId;
             try {
-                sourcePeriodId = RunDateCalculator.resolve(config.runScheduleConfig, options).periodId;
+                RunDateCalculator.ScheduleDecision decision =
+                    RunDateCalculator.evaluateDataSource(config.runScheduleConfig, options);
+                if (!decision.shouldRun()) continue;
+                sourcePeriodId = decision.dates.periodId;
             } catch (Exception e) {
                 continue;
             }

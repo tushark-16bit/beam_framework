@@ -24,4 +24,14 @@ final class DataSourceAssembly {
         this.pipeline        = pipeline;
         this.finalizeSignals = finalizeSignals;
     }
+
+    /**
+     * True when no source branch was assembled (every source was skipped by its schedule or is
+     * already COMPLETED). Such a pipeline has no transforms and must not be submitted — an empty
+     * job is not a valid Dataflow submission. With Finance Automation run windows this is the
+     * normal outcome on most days, not an edge case.
+     */
+    boolean isEmpty() {
+        return finalizeSignals.isEmpty();
+    }
 }

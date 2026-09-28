@@ -70,15 +70,16 @@ import java.util.stream.Collectors;
  *             "from_address": "pipeline-alerts@example.com", "encrypted": false},
  *   "output_bq_table":       "project.dataset.daily_trades_report",
  *   "output_bq_input_alias": "summary",
- *   "run_details": {"dateType": "LAST_DAY_OF_MONTH", "frequency": "MONTHLY",
- *                   "freqRunDay": "WD+1", "calendarKey": "Calendar_EPS"}
+ *   "run_details": {"frequency": "MONTHLY", "freqDtl": "WD+3", "maxFreqRunDay": "WD+5",
+ *                   "dayLag": "", "calendarKey": "Calendar_EPS"}
  * }
  * </pre>
  *
  * <p>{@code run_details} is optional — the report's own run schedule, same fields as a data
  * source's {@code run_details_json} (a nested object here since report config is nested JSON
- * natively). Parsed into {@code ReportConfig.runScheduleConfig}; dates come from
- * {@code RunDateCalculator.resolve()}.
+ * natively), except that the run-window start is {@code freqDtl} (BAU naming for reports), not
+ * {@code freqRunDay}. A report-level {@code dateType} is not used (BAU). Parsed into
+ * {@code ReportConfig.runScheduleConfig}; evaluated by {@code RunDateCalculator.evaluateReport()}.
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
@@ -176,7 +177,8 @@ public final class BigQueryReportRepository {
             return new ReportConfig(reportName, reportSubprocess, periodId, overrideKey,
                                     datasources, preprocessing, transforms, outputs, email,
                                     outputBqTable, outputBqInputAlias,
-                                    BigQuerySourceConfigRepository.parseRunSchedule(root.path("run_details")));
+                                    BigQuerySourceConfigRepository.parseRunSchedule(root.path("run_details"),
+                                        BigQuerySourceConfigRepository.REPORT_RUN_DAY_KEY));
         } catch (IllegalArgumentException | IllegalStateException e) {
             throw e;
         } catch (Exception e) {

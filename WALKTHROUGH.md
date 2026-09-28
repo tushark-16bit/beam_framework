@@ -251,7 +251,7 @@ sequenceDiagram
         BQRepo-->>RPF: ReportConfig (parsed from JSON)
     end
 
-    RPF->>RPF: RunDateCalculator.resolveForReport(config.runScheduleConfig, options) → RunDates
+    RPF->>RPF: RunDateCalculator.evaluateReport(config.runScheduleConfig, options) → ScheduleDecision (skip unless ELIGIBLE; scheduled + COMPLETED → skip)
     Note over RPF: every date below (perId, query tokens, file names,<br/>email tokens) comes from RunDates — CLI flags<br/>when no run_details schedule is configured
     RPF->>RptAdapter: createCheckpoint(rptNm=reportName, perId=dates.periodId, rptDs=reportName)
     RptAdapter-->>RPF: rpt_id (LOADING row inserted into RptRefer)
@@ -937,7 +937,7 @@ sequenceDiagram
     Main->>PSF: execute(options)
     PSF->>RR: fetchReportConfig(reportName, reportSubprocess, periodId)
     RR-->>PSF: ReportConfig.datasources[] (List<ReportDatasourceRef>)
-    PSF->>PSF: RunDateCalculator.resolveForReport(reportConfig.runScheduleConfig, options) → reportDates
+    PSF->>PSF: decideReportRun(): evaluateReport() + RptRefer COMPLETED check → reportDates or null (no report step; datasources still run)
     Note over PSF: resolved at submission in the driver JVM,<br/>carried to the worker as a DoFn field.<br/>Each datasource resolves its own RunDates<br/>inside assembleForConfigs().
 
     loop each declared datasource
