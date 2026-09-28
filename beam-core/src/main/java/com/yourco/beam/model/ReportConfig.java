@@ -69,6 +69,14 @@ public final class ReportConfig implements Serializable {
      */
     public final String outputBqInputAlias;
 
+    /**
+     * Optional run-scheduling config for the report itself, from a nested {@code run_details}
+     * object in the report's {@code parameters_val_json} — same fields as a source's
+     * {@code run_details_json}. Never null; {@link RunScheduleConfig#none()} when absent.
+     * Turned into dates by {@code RunDateCalculator.resolve()}, same as for data sources.
+     */
+    public final RunScheduleConfig runScheduleConfig;
+
     public ReportConfig(String reportName, String reportSubprocess, int periodId,
                         boolean overrideKey,
                         List<ReportDatasourceRef>    datasources,
@@ -77,7 +85,8 @@ public final class ReportConfig implements Serializable {
                         List<ReportOutputConfig>     outputConfigs,
                         ReportEmailConfig            emailConfig,
                         String                       outputBqTable,
-                        String                       outputBqInputAlias) {
+                        String                       outputBqInputAlias,
+                        RunScheduleConfig            runScheduleConfig) {
         this.reportName         = reportName;
         this.reportSubprocess   = reportSubprocess;
         this.periodId           = periodId;
@@ -89,6 +98,7 @@ public final class ReportConfig implements Serializable {
         this.emailConfig        = emailConfig;
         this.outputBqTable      = outputBqTable;
         this.outputBqInputAlias = outputBqInputAlias;
+        this.runScheduleConfig  = runScheduleConfig != null ? runScheduleConfig : RunScheduleConfig.none();
     }
 
     public boolean hasPreprocessing()   { return !preprocessingSteps.isEmpty(); }

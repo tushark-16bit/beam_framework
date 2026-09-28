@@ -3,13 +3,12 @@ package com.yourco.beam.runner;
 import com.yourco.beam.io.report.BigQueryJobService;
 import com.yourco.beam.model.ReportConfig;
 import com.yourco.beam.model.ReportOutputConfig;
+import com.yourco.beam.model.RunDates;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.ReportOutputSinkType;
-import com.yourco.beam.utils.DateUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.LocalDate;
 
 /**
  * Routes a single {@link ReportOutputConfig} to the right sink (GCS / BQ / API).
@@ -35,14 +34,16 @@ public final class ReportOutputSinkRouter {
      * @param sourceTable fully-qualified BQ table ref holding the transform result
      * @param config      full report config (provides reportName, periodId, etc.)
      * @param options     pipeline options
+     * @param dates       this report run's resolved dates — the GCS file name uses
+     *                    {@code dates.periodId} and {@code dates.runDate} (yyyy-MM-dd)
      */
     public OutputResult route(ReportOutputConfig output, String sourceTable,
-                               ReportConfig config, FrameworkOptions options) {
+                               ReportConfig config, FrameworkOptions options, RunDates dates) {
         ReportOutputSinkType sinkType = output.sinkType != null
                                         ? output.sinkType : ReportOutputSinkType.GCS;
 
         return switch (sinkType) {
-            case GCS -> routeToGcs(output, sourceTable, config, options);
+            case GCS -> routeToGcs(output, sourceTable, config, dates);
             case BQ  -> routeToBq(output, sourceTable, options);
             case API -> routeToApi(output, sourceTable, options);
         };
@@ -51,10 +52,9 @@ public final class ReportOutputSinkRouter {
     // ── GCS ───────────────────────────────────────────────────────────────────
 
     private OutputResult routeToGcs(ReportOutputConfig output, String sourceTable,
-                                     ReportConfig config, FrameworkOptions options) {
-        LocalDate runDate = DateUtils.resolveRunDate(options);
+                                     ReportConfig config, RunDates dates) {
         String fileName = (output.filePrefix != null ? output.filePrefix : "")
-            + config.reportName + "_" + config.periodId + "_" + runDate
+            + config.reportName + "_" + dates.periodId + "_" + dates.runDateIso()
             + (output.fileSuffix != null ? output.fileSuffix : "")
             + (output.isCsv() ? ".csv" : ".json");
 

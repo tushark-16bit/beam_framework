@@ -4,6 +4,7 @@ import com.yourco.beam.exception.PipelineException;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.model.ReportConfig;
 import com.yourco.beam.model.ReportDatasourceRef;
+import com.yourco.beam.model.RunDates;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -44,7 +45,7 @@ import java.util.List;
  *                                                │    retry/timeout — Wait.on() already
  *                                                │    guarantees every branch reached a terminal
  *                                                │    state; this just checks it was COMPLETED)
- *                                                ├─ ReportPipelineFactory.execute(options, config)
+ *                                                ├─ ReportPipelineFactory.execute(options, config, dates)
  *                                                │    (report + its own completion email)
  *                                                └─ on any exception: FailureNotifier.notify()
  *                                                     (caught here, not rethrown — this is the
@@ -64,9 +65,12 @@ final class ReportFinalizeTransform {
      * {@link PostDownloadFinalizeTransform} — has been produced, whether that branch succeeded or
      * failed. If {@code finalizeSignals} is empty (the report declares no datasources), the report
      * step runs immediately with nothing to wait for.
+     *
+     * <p>{@code dates} is the report's {@link RunDates}, already resolved in the driver JVM at
+     * submission — the worker never re-resolves them.
      */
     static void wire(Pipeline pipeline, List<PCollection<?>> finalizeSignals,
-                     ReportConfig config, FrameworkOptions options) {
+                     ReportConfig config, RunDates dates, FrameworkOptions options) {
         String project = options.getCheckpointBqProject() != null
                         && !options.getCheckpointBqProject().isBlank()
                         ? options.getCheckpointBqProject() : options.getProject();
@@ -81,7 +85,7 @@ final class ReportFinalizeTransform {
             : trigger.apply("WaitForDatasources-" + config.reportName, Wait.on(finalizeSignals));
 
         gated.apply("RunReport-" + config.reportName,
-            ParDo.of(new ReportRunDoFn(config, daReferTableRef)));
+            ParDo.of(new ReportRunDoFn(config, dates, daReferTableRef)));
     }
 
     // ── Named DoFn — required for Beam serialization safety ──────────────────
@@ -91,10 +95,12 @@ final class ReportFinalizeTransform {
         private static final long serialVersionUID = 1L;
 
         private final ReportConfig config;
+        private final RunDates     dates;
         private final String       daReferTableRef;
 
-        ReportRunDoFn(ReportConfig config, String daReferTableRef) {
+        ReportRunDoFn(ReportConfig config, RunDates dates, String daReferTableRef) {
             this.config          = config;
+            this.dates           = dates;
             this.daReferTableRef = daReferTableRef;
         }
 
@@ -106,10 +112,10 @@ final class ReportFinalizeTransform {
             FrameworkOptions options = pipelineOptions.as(FrameworkOptions.class);
             LOG.info("Running report '{}' (subprocess={} period={}) — all batched datasource "
                      + "branch(es) have reached a terminal state",
-                     config.reportName, config.reportSubprocess, config.periodId);
+                     config.reportName, config.reportSubprocess, dates.periodId);
             try {
                 verifyRequiredDatasources(options);
-                new ReportPipelineFactory().execute(options, config);
+                new ReportPipelineFactory().execute(options, config, dates);
                 LOG.info("Report '{}' completed", config.reportName);
             } catch (Exception e) {
                 LOG.error("Report '{}' failed: {}", config.reportName, e.getMessage(), e);
@@ -129,13 +135,13 @@ final class ReportFinalizeTransform {
             List<String> failedRequired = new ArrayList<>();
             for (ReportDatasourceRef ref : config.datasources) {
                 if (!ref.required) continue;
-                if (!checkpointAdapter.isCompleted(ref.datasourceName, config.periodId)) {
+                if (!checkpointAdapter.isCompleted(ref.datasourceName, dates.periodId)) {
                     failedRequired.add(ref.datasourceName);
                 }
             }
             if (!failedRequired.isEmpty()) {
                 throw new PipelineException(PipelineException.Reason.ABORTED_REQUIRED_DATASOURCE,
-                    config.reportName, config.reportSubprocess, config.periodId,
+                    config.reportName, config.reportSubprocess, dates.periodId,
                     "PIPELINE required data source(s) did not reach COMPLETED, report '"
                     + config.reportName + "' will not run: " + failedRequired);
             }

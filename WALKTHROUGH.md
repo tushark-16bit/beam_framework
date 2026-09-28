@@ -251,7 +251,9 @@ sequenceDiagram
         BQRepo-->>RPF: ReportConfig (parsed from JSON)
     end
 
-    RPF->>RptAdapter: createCheckpoint(rptNm=reportName, perId, rptDs=reportName)
+    RPF->>RPF: RunDateCalculator.resolve(config.runScheduleConfig, options) → RunDates
+    Note over RPF: every date below (perId, query tokens, file names,<br/>email tokens) comes from RunDates — CLI flags<br/>when no run_details schedule is configured
+    RPF->>RptAdapter: createCheckpoint(rptNm=reportName, perId=dates.periodId, rptDs=reportName)
     RptAdapter-->>RPF: rpt_id (LOADING row inserted into RptRefer)
 
     rect rgb(255, 245, 220)
@@ -935,6 +937,8 @@ sequenceDiagram
     Main->>PSF: execute(options)
     PSF->>RR: fetchReportConfig(reportName, reportSubprocess, periodId)
     RR-->>PSF: ReportConfig.datasources[] (List<ReportDatasourceRef>)
+    PSF->>PSF: RunDateCalculator.resolve(reportConfig.runScheduleConfig, options) → reportDates
+    Note over PSF: resolved at submission in the driver JVM,<br/>carried to the worker as a DoFn field.<br/>Each datasource resolves its own RunDates<br/>inside assembleForConfigs().
 
     loop each declared datasource
         PSF->>SCR: fetchSourceConfigs(parent, dsName, subprocess, periodId)
@@ -945,7 +949,7 @@ sequenceDiagram
     Note over DSF: skips any datasource already COMPLETED —<br/>same DaRefer skip-logic as standalone<br/>DATA_SOURCE_DOWNLOAD. Throws DataSourceDownloadException<br/>directly on a config/assembly failure.
     DSF-->>PSF: DataSourceAssembly { pipeline, finalizeSignals: List<PCollection<Long>> }
 
-    PSF->>RFT: wire(pipeline, finalizeSignals, reportConfig, options)
+    PSF->>RFT: wire(pipeline, finalizeSignals, reportConfig, reportDates, options)
     Note over RFT: adds Create.of(1) → Wait.on(finalizeSignals) →<br/>ParDo(ReportRunDoFn) to the SAME pipeline —<br/>no separate job, no extra pipeline.run() call.
 
     PSF->>Beam: pipeline.run()   [ONE submit — datasources + report step, same job]
@@ -970,7 +974,7 @@ sequenceDiagram
         RRD->>RRD: throw PipelineException(ABORTED_REQUIRED_DATASOURCE)
         RRD->>FN: notify(options, e) — caught here, NOT rethrown
     else all required datasources COMPLETED
-        RRD->>RPF: execute(options, config)   [pre-fetched ReportConfig — no BigQueryReportRepository call on the worker]
+        RRD->>RPF: execute(options, config, dates)   [pre-fetched ReportConfig — no BigQueryReportRepository call on the worker]
         alt report succeeds
             RPF-->>RRD: RptRefer COMPLETED (report's own completion email already sent)
         else report throws ReportProcessingException
@@ -1078,7 +1082,7 @@ classDiagram
 
     class ReportFinalizeTransform {
         <<beam-runner, package-private>>
-        +static wire(pipeline, finalizeSignals, config, options) void
+        +static wire(pipeline, finalizeSignals, config, dates, options) void
         note "Adds Create.of(1) -> Wait.on(finalizeSignals)\n-> ParDo(ReportRunDoFn) to the pipeline.\nReportRunDoFn: verifyRequiredDatasources()\n(one-shot, throws PipelineException) then\nReportPipelineFactory.execute(options,config);\ncatches any exception and calls\nFailureNotifier.notify() itself, worker-side."
     }
 
@@ -1101,7 +1105,7 @@ classDiagram
 |---|---|---|
 | `DataSourceDownloadException` | `DataSourcePipelineFactory.assemble()`/`assembleForConfigs()` | direct try/catch around config load, graph assembly, and submission — synchronous, driver JVM |
 | `DataSourceDownloadException` | `DataSourceStatusChecker.checkSingle()` | maps an observed terminal `sta_cd` in `DaRefer` to `JOB_FAILURE` — the optional `STATUS_CHECK` diagnostic only |
-| `ReportProcessingException` | `ReportPipelineFactory.execute()`/`execute(options, config)` | a `currentReason` local, updated before each of the 7 phases runs |
+| `ReportProcessingException` | `ReportPipelineFactory.execute()`/`execute(options, config, dates)` | a `currentReason` local, updated before each of the 7 phases runs |
 | `PipelineException` | `PipelineSequenceFactory.execute()` | wraps anything that isn't already `DataSourceDownloadException` during assembly/submission — synchronous, driver JVM |
 | `PipelineException` (`ABORTED_REQUIRED_DATASOURCE`) | `ReportFinalizeTransform`'s `ReportRunDoFn.verifyRequiredDatasources()` | worker-side, one-shot (no retry/timeout) — runs only after `Wait.on()` confirms every batched datasource branch reached a terminal state |
 

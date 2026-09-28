@@ -213,6 +213,19 @@ public static boolean isBusinessDay(LocalDate date, String calendarName) {
 Once implemented, use them via `CalendarUtils.resolveEffectiveDate(options)` which
 combines `--runDate`, `--businessDayOffset`, and `--calendarName` automatically.
 
+### Per-source / per-report run dates — `RunDateCalculator`
+
+Every data source (`run_details_json` in its params) and every report (`run_details` in its
+config) can carry its own run schedule. All flows — `DATA_SOURCE_DOWNLOAD`, `REPORT_PROCESSING`
+and both halves of `PIPELINE` — get their dates from one call,
+`RunDateCalculator.resolve(schedule, options)`, which returns a `RunDates`
+(`runDate`, `periodStart`, `periodEnd`, `periodId`). With no schedule configured it returns
+exactly `--runDate`/`--periodStart`/`--periodEnd`/`--periodId`, so existing runs are unchanged.
+With a schedule it calls `RunDateCalculator.calculateRunDates()` — a stub you implement once for
+everything. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
+email tokens and report file names; `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for
+FILE `{fileDate}`; `periodId` as an int in the `--periodId` encoding. See `beam-utils/README.md`.
+
 ---
 
 ## How to handle secrets
@@ -362,8 +375,9 @@ Adding a new datasource requires only a BQ row in `parameter_store` — no code 
 
 ### Query parameter injection
 
-Pass `--periodStart=2024-01-01` and `--periodEnd=2024-01-31` as pipeline options. These are
-injected into the `bq_query` template at runtime via `QueryParameterResolver`:
+Pass `--periodStart=2024-01-01` and `--periodEnd=2024-01-31` as pipeline options (or configure
+a per-source `run_details_json` schedule — see `RunDateCalculator` above). The source's resolved
+dates are injected into the `bq_query` template at runtime via `QueryParameterResolver`:
 
 ```sql
 -- In parameter_store.parameters_val_json bq_query value:

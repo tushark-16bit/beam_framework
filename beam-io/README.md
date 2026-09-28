@@ -9,7 +9,7 @@ Also contains the `DeadLetterSinkTransform` for writing failed records.
 
 ```
 io/source/
-    SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD); overload with nullable Schema param passes pre-fetched schema to BigQuerySourceTransform
+    SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD); overload with nullable Schema param passes pre-fetched schema to BigQuerySourceTransform. routeFromConfig takes the source's resolved RunDates.runDate from beam-runner (beam-io can't call RunDateCalculator itself); FILE {periodId} comes from SourceConfig.periodId, already set to RunDates.periodId
     BigQuerySourceTransform   — reads from BQ table or SQL query; typed mode uses a pre-fetched Schema (passed from beam-runner) with a custom TableRow→Row mapping; generic fallback when schema is null
                                 resolves real column names via a SELECT * LIMIT 1 preview query (no tables.get needed), all-STRING;
                                 falls back further to Schemas.RAW_JSON blob if even that query fails
@@ -142,6 +142,10 @@ io/config/
                                      parameter_name=reportName). Parses parameters_val_json into ReportConfig.
                                      Includes datasources, preprocessing, transforms, outputs, email arrays,
                                      and top-level output_bq_table / output_bq_input_alias for per-report BQ write.
+                                     Also parses the optional top-level "run_details" object into
+                                     ReportConfig.runScheduleConfig, via the same package-private
+                                     BigQuerySourceConfigRepository.parseRunSchedule() a source uses — so a
+                                     report's schedule has exactly the same fields and parsing as a source's.
 
 io/email/
     ReportEmailAdapter        — interface: send(subject, body, to, cc, List<EmailAttachment>). Used only by

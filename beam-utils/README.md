@@ -16,7 +16,7 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `MetricsUtils` | Factory for consistently-named Beam counters, distributions, and gauges |
 | `CalendarUtils` | Business calendar stubs: `isBusinessDay`, `nextBusinessDay`, `applyOffset`, etc. |
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
-| `RunDateCalculator` | Stub: `calculateRunDate(RunScheduleConfig, LocalDate asOfDate)`. Computes a source's actual run date from its retrieved `dateType`/`frequency`/`freqRunDay`/`maxFreqRunDay`/`dayLag`/`calendarKey` — a per-source-configurable analog of `CalendarUtils`, resolved against a separate external calendar DB keyed by `calendarKey`. Same unimplemented-stub convention as `CalendarUtils` |
+| `RunDateCalculator` | The one place run dates are decided for every source and report. `resolve(RunScheduleConfig, options)` → `RunDates`: no schedule → `fromOptions(options)` (the CLI flags, unchanged behaviour); schedule configured → `calculateRunDates(schedule, asOfDate)`, a **stub** to implement (per-source/report analog of `CalendarUtils`, resolved against a separate external calendar DB keyed by `calendarKey`) |
 | `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens (also available as `%periodStart%`/`%periodEnd%`/`%periodId%`/`%runDate%` — a fixed percent-delimited alternative, same underlying values, for SQL dialects where curly braces collide with something else), then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
 
 There is no JDBC / relational-DB adapter in this module — the framework has no JDBC dependency
@@ -226,22 +226,35 @@ combines `--runDate`, `--businessDayOffset`, and `--calendarName` into a single 
 
 ## RunDateCalculator — stub to implement
 
-Same convention as `CalendarUtils` above, but per-source rather than framework-wide: a source's
-retrieved `RunScheduleConfig` (from `run_details_json` in `parameter_store` — see
-`beam-io/README.md`) is passed in, and the method should resolve an actual `LocalDate` from it.
+Every flow gets its dates from `RunDateCalculator.resolve()` and nothing else, so implementing
+`calculateRunDates()` once changes sources, reports and PIPELINE consistently:
+
+| Call site | Flow | What it does with the `RunDates` |
+|---|---|---|
+| `DataSourcePipelineFactory.assembleForConfigs()` | `DATA_SOURCE_DOWNLOAD`, datasource half of `PIPELINE` | once per source: `SourceConfig.periodId` (COMPLETED check, DaRefer `per_id`), BQ query tokens, FILE `{date}`/`{dateCompact}`/`{fileDate}`/`{periodId}` |
+| `ReportPipelineFactory.execute(options)` | `REPORT_PROCESSING` | once per report: RptRefer/DaRefer `per_id`, preprocessing/transform query tokens, GCS output file names, email tokens |
+| `PipelineSequenceFactory.execute()` | report half of `PIPELINE` | resolved in the driver JVM at submission, carried to the worker's report step as a DoFn field |
 
 ```java
-RunScheduleConfig schedule = sourceConfig.runScheduleConfig;
-if (schedule.hasSchedule()) {
-    LocalDate runDate = RunDateCalculator.calculateRunDate(schedule, LocalDate.now());
-}
+RunDates dates = RunDateCalculator.resolve(sourceConfig.runScheduleConfig, options);
+// no run_details_json → exactly --runDate/--periodStart/--periodEnd/--periodId
+// run_details_json set → calculateRunDates(schedule, --runDate or today UTC)  ← implement this
 ```
 
-Implement by combining, in order: `frequency` (which period contains the reference date),
-`dateType`/`freqRunDay` (which date within that period), or — for `DAILY` sources —
-`dayLag` counted back from the reference date instead. Any `WD`/business-day-aware offset in
-`freqRunDay`/`dayLag` resolves against whichever calendar `calendarKey` identifies — a separate
-external calendar database, not the same system `CalendarUtils`/`--calendarName` stub above.
+`calculateRunDates()` must return a `RunDates` (see `beam-core/README.md` for each field's
+meaning and format). Implement by combining, in order: `frequency` (which period contains the
+reference date → `periodStart`/`periodEnd`/`periodId`), `dateType`/`freqRunDay`/`maxFreqRunDay`
+(which date within that period is the business `runDate`, and which period the reference date is
+still reporting on), or — for `DAILY` — `dayLag` counted back from the reference date instead. Any
+`WD`/business-day offset resolves against whichever calendar `calendarKey` identifies — a separate
+external calendar database, not the `CalendarUtils`/`--calendarName` stub above. All call sites run
+in the driver JVM, so the implementation may call that database directly.
+
+A report and the datasources it reads must resolve to the same `periodId` — the report finds them
+in `DaRefer` by its own. `PIPELINE` logs a warning at submission when they differ.
+
+`QueryParameterResolver.resolve(template, params, options, dates)` takes the `RunDates` for its
+standard tokens; the 3-arg overload uses `RunDateCalculator.fromOptions(options)`.
 
 ---
 

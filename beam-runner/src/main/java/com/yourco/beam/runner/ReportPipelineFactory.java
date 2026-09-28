@@ -15,9 +15,11 @@ import com.yourco.beam.model.ReportDatasourceRef;
 import com.yourco.beam.model.ReportOutputConfig;
 import com.yourco.beam.model.ReportPreprocessingStep;
 import com.yourco.beam.model.ReportTransformStep;
+import com.yourco.beam.model.RunDates;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.io.config.BigQueryReportRepository;
 import com.yourco.beam.utils.QueryParameterResolver;
+import com.yourco.beam.utils.RunDateCalculator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +46,9 @@ import java.util.ServiceLoader;
  * <h2>Execution phases</h2>
  * <ol>
  *   <li>Load {@link ReportConfig} from parameter_store</li>
+ *   <li>Resolve this report's {@link RunDates} via {@code RunDateCalculator.resolve()} (from its
+ *       {@code run_details} schedule, else the CLI options) — every later phase reads its dates
+ *       from this one value</li>
  *   <li>Insert RptRefer row with {@code sta_cd=LOADING}</li>
  *   <li>Run preprocessing steps (BQ queries or API enrichment)</li>
  *   <li>Verify each required datasource has {@code sta_cd=COMPLETED} in DaRefer for this period</li>
@@ -134,22 +139,38 @@ public final class ReportPipelineFactory {
                 reportName, reportSubprocess, periodId, e);
         }
 
-        execute(options, config);
+        // ── 1b. Resolve this report's run dates ───────────────────────────────
+        // RUN-DATE PLACEHOLDER: every date this report uses (RptRefer per_id, DaRefer lookups,
+        // query tokens, output file names, email tokens) comes from here. Without a
+        // run_details schedule this is exactly the CLI options.
+        RunDates dates;
+        try {
+            dates = RunDateCalculator.resolve(config.runScheduleConfig, options);
+        } catch (Exception e) {
+            throw ReportProcessingException.wrap(ReportProcessingException.Reason.UNKNOWN,
+                reportName, reportSubprocess, periodId, e);
+        }
+        LOG.info("Run dates for report '{}': {}", reportName, dates);
+
+        execute(options, config, dates);
     }
 
     /**
      * Same as {@link #execute(FrameworkOptions)}, but skips the {@code BigQueryReportRepository}
-     * lookup and runs the report using an already-fetched {@link ReportConfig} instead.
+     * lookup and run-date resolution, using an already-fetched {@link ReportConfig} and
+     * already-resolved {@link RunDates} instead.
      *
      * <p>Exists so {@link ReportFinalizeTransform} can call this from inside a worker DoFn — the
-     * driver JVM pre-fetches {@code ReportConfig} (a plain {@code Serializable} data object) and
-     * passes it in as a DoFn field, avoiding the {@code BigQueryReportRepository}-inside-a-DoFn
-     * violation that calling {@link #execute(FrameworkOptions)} directly on a worker would cause.
+     * driver JVM pre-fetches {@code ReportConfig} and resolves {@code RunDates} (both plain
+     * {@code Serializable} data objects) and passes them in as DoFn fields, avoiding the
+     * {@code BigQueryReportRepository}-inside-a-DoFn violation that calling
+     * {@link #execute(FrameworkOptions)} directly on a worker would cause, and guaranteeing the
+     * report uses the dates decided at submission time rather than whenever the worker runs.
      */
-    public void execute(FrameworkOptions options, ReportConfig config) {
+    public void execute(FrameworkOptions options, ReportConfig config, RunDates dates) {
         String reportName       = config.reportName;
         String reportSubprocess = config.reportSubprocess;
-        int    periodId         = config.periodId;
+        int    periodId         = dates.periodId;
 
         // ── 2. RptRefer: LOADING ──────────────────────────────────────────────
         ReportCheckpointAdapter      reportAdapter = new BigQueryReportCheckpointAdapter(options);
@@ -163,21 +184,21 @@ public final class ReportPipelineFactory {
             // ── 3. Preprocessing ──────────────────────────────────────────────
             currentReason = ReportProcessingException.Reason.PREPROCESSING_FAILURE;
             if (config.hasPreprocessing()) {
-                runPreprocessing(config, options);
+                runPreprocessing(config, options, dates);
             }
 
             // ── 4. Datasource availability check ──────────────────────────────
             currentReason = ReportProcessingException.Reason.DATASOURCE_UNAVAILABLE;
-            checkDatasourceAvailability(config, dsAdapter);
+            checkDatasourceAvailability(config, periodId, dsAdapter);
 
             // ── 5. Build alias registry (stage DaRec rows into RptStageDa) ───
             currentReason = ReportProcessingException.Reason.STAGING_FAILURE;
-            Map<String, String> aliasRegistry = buildAliasRegistry(config, rptId, dsAdapter, reportAdapter);
+            Map<String, String> aliasRegistry = buildAliasRegistry(config, periodId, rptId, dsAdapter, reportAdapter);
 
             // ── 6. Transformation chain ───────────────────────────────────────
             currentReason = ReportProcessingException.Reason.TRANSFORM_FAILURE;
             if (config.hasTransforms()) {
-                runTransformChain(config, options, aliasRegistry);
+                runTransformChain(config, options, dates, aliasRegistry);
             }
 
             // ── 6b. Write final result to per-report BQ table ─────────────────
@@ -188,7 +209,7 @@ public final class ReportPipelineFactory {
 
             // ── 7. Route outputs to sinks (GCS / BQ / API) ───────────────────
             List<ReportOutputSinkRouter.OutputResult> outputResults =
-                exportOutputs(config, options, aliasRegistry);
+                exportOutputs(config, options, dates, aliasRegistry);
             outputCount = outputResults.size();
 
             // ── 8. Write RptOutput rows ───────────────────────────────────────
@@ -209,7 +230,7 @@ public final class ReportPipelineFactory {
                     .filter(ReportOutputSinkRouter.OutputResult::hasAttachment)
                     .map(r -> new ExportedFile(r.destination(), r.fileName(), r.contentType()))
                     .toList();
-                sendEmail(config, options, attachments);
+                sendEmail(config, dates, attachments);
             }
 
             // ── 11. RptRefer: COMPLETED ───────────────────────────────────────
@@ -229,7 +250,7 @@ public final class ReportPipelineFactory {
 
     // ── Phase implementations ─────────────────────────────────────────────────
 
-    private void runPreprocessing(ReportConfig config, FrameworkOptions options) {
+    private void runPreprocessing(ReportConfig config, FrameworkOptions options, RunDates dates) {
         LOG.info("Running {} preprocessing step(s)", config.preprocessingSteps.size());
         for (ReportPreprocessingStep step : config.preprocessingSteps) {
             LOG.info("Preprocessing step {}: type={} name={}",
@@ -237,7 +258,7 @@ public final class ReportPipelineFactory {
             switch (step.stepType) {
                 case ReportPreprocessingStep.BQ_QUERY -> {
                     String sql = QueryParameterResolver.resolve(
-                            step.bqQuery, step.queryParams, options);
+                            step.bqQuery, step.queryParams, options, dates);
                     if (step.bqOutputTable != null && !step.bqOutputTable.isBlank()) {
                         bqJobService.runQueryToTable(sql, step.bqOutputTable);
                     } else {
@@ -254,22 +275,22 @@ public final class ReportPipelineFactory {
         }
     }
 
-    private void checkDatasourceAvailability(ReportConfig config,
+    private void checkDatasourceAvailability(ReportConfig config, int periodId,
                                               DataSourceCheckpointAdapter dsAdapter) {
         LOG.info("Checking availability of {} datasource(s)", config.datasources.size());
         List<String> missing = new ArrayList<>();
         for (ReportDatasourceRef ref : config.datasources) {
             if (!ref.required) continue;
-            boolean completed = dsAdapter.isCompleted(ref.datasourceName, config.periodId);
+            boolean completed = dsAdapter.isCompleted(ref.datasourceName, periodId);
             if (!completed) {
                 missing.add(ref.datasourceName + "/" + ref.datasourceSubprocess
-                            + " (not COMPLETED for period=" + config.periodId + ")");
+                            + " (not COMPLETED for period=" + periodId + ")");
             }
         }
         if (!missing.isEmpty()) {
             throw new IllegalStateException(
                 "Required datasource(s) not yet COMPLETED for period="
-                + config.periodId + ": " + missing);
+                + periodId + ": " + missing);
         }
         LOG.info("All required datasources are available");
     }
@@ -281,7 +302,7 @@ public final class ReportPipelineFactory {
      * 3. Staging DaRec rows for that da_id into RptStageDa
      * 4. Registering the alias as a RptStageDa subquery
      */
-    private Map<String, String> buildAliasRegistry(ReportConfig config, long rptId,
+    private Map<String, String> buildAliasRegistry(ReportConfig config, int periodId, long rptId,
                                                     DataSourceCheckpointAdapter dsAdapter,
                                                     ReportCheckpointAdapter reportAdapter) {
         Map<String, String> registry = new LinkedHashMap<>();
@@ -289,14 +310,14 @@ public final class ReportPipelineFactory {
         for (ReportDatasourceRef ref : config.datasources) {
             long daId;
             try {
-                daId = dsAdapter.fetchLatestCompletedDaId(ref.datasourceName, config.periodId);
+                daId = dsAdapter.fetchLatestCompletedDaId(ref.datasourceName, periodId);
             } catch (IllegalArgumentException e) {
                 if (ref.required) {
                     throw e;  // required datasource must be present
                 }
                 LOG.warn("Optional datasource '{}' has no COMPLETED DaRefer row for period={} "
                          + "— alias '{}' will not be registered",
-                         ref.datasourceName, config.periodId, ref.transformAlias);
+                         ref.datasourceName, periodId, ref.transformAlias);
                 continue;
             }
 
@@ -310,7 +331,7 @@ public final class ReportPipelineFactory {
         return registry;
     }
 
-    private void runTransformChain(ReportConfig config, FrameworkOptions options,
+    private void runTransformChain(ReportConfig config, FrameworkOptions options, RunDates dates,
                                    Map<String, String> aliasRegistry) {
         LOG.info("Running {} transformation step(s)", config.transformSteps.size());
         for (ReportTransformStep step : config.transformSteps) {
@@ -320,7 +341,7 @@ public final class ReportPipelineFactory {
             // Alias tokens first ({trades} → staged subquery or `project.dataset.table`),
             // then standard + custom params ({periodStart}, {exchange}, etc.)
             String sql = resolveAliasTokens(step.queryTemplate, aliasRegistry);
-            sql = QueryParameterResolver.resolve(sql, step.queryParams, options);
+            sql = QueryParameterResolver.resolve(sql, step.queryParams, options, dates);
 
             bqJobService.runQueryToTable(sql, step.outputBqTable);
             aliasRegistry.put(step.outputAlias, step.outputBqTable);
@@ -330,7 +351,7 @@ public final class ReportPipelineFactory {
     }
 
     private List<ReportOutputSinkRouter.OutputResult> exportOutputs(
-            ReportConfig config, FrameworkOptions options,
+            ReportConfig config, FrameworkOptions options, RunDates dates,
             Map<String, String> aliasRegistry) {
         List<ReportOutputSinkRouter.OutputResult> result = new ArrayList<>();
 
@@ -354,7 +375,7 @@ public final class ReportPipelineFactory {
                      output.outputOrder, output.sinkType, output.inputAlias, sourceTable);
 
             ReportOutputSinkRouter.OutputResult outputResult =
-                sinkRouter.route(output, sourceTable, config, options);
+                sinkRouter.route(output, sourceTable, config, options, dates);
             result.add(outputResult);
 
             LOG.info("Output {} done → {}", output.outputOrder, outputResult.destination());
@@ -400,7 +421,7 @@ public final class ReportPipelineFactory {
         LOG.info("Final report written to {}", config.outputBqTable);
     }
 
-    private void sendEmail(ReportConfig config, FrameworkOptions options,
+    private void sendEmail(ReportConfig config, RunDates dates,
                            List<ExportedFile> exportedFiles) {
         if (emailUtility == null) {
             LOG.warn("No EmailSendUtility available (none injected, none discovered via SPI) — "
@@ -408,8 +429,8 @@ public final class ReportPipelineFactory {
             return;
         }
 
-        String subject = resolveEmailTokens(config.emailConfig.subjectTemplate, config, options);
-        String body    = resolveEmailTokens(config.emailConfig.bodyTemplate,    config, options);
+        String subject = resolveEmailTokens(config.emailConfig.subjectTemplate, config, dates);
+        String body    = resolveEmailTokens(config.emailConfig.bodyTemplate,    config, dates);
 
         List<EmailAttachment> attachments = new ArrayList<>();
         for (ExportedFile file : exportedFiles) {
@@ -444,18 +465,16 @@ public final class ReportPipelineFactory {
     }
 
     private static String resolveEmailTokens(String template, ReportConfig config,
-                                              FrameworkOptions options) {
+                                              RunDates dates) {
         if (template == null) return "";
         return template
             .replace("{reportName}",       config.reportName)
             .replace("{reportSubprocess}", config.reportSubprocess)
-            .replace("{periodId}",         String.valueOf(config.periodId))
-            .replace("{periodStart}",      nvl(options.getPeriodStart()))
-            .replace("{periodEnd}",        nvl(options.getPeriodEnd()))
-            .replace("{runDate}",          nvl(options.getRunDate()));
+            .replace("{periodId}",         String.valueOf(dates.periodId))
+            .replace("{periodStart}",      dates.periodStartIso())
+            .replace("{periodEnd}",        dates.periodEndIso())
+            .replace("{runDate}",          dates.runDateIso());
     }
-
-    private static String nvl(String v) { return v != null ? v : ""; }
 
     // ── Inner types ───────────────────────────────────────────────────────────
 

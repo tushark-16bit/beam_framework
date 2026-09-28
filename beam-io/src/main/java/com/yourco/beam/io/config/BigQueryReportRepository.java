@@ -69,9 +69,16 @@ import java.util.stream.Collectors;
  *             "body_template": "Please find the attached report.",
  *             "from_address": "pipeline-alerts@example.com", "encrypted": false},
  *   "output_bq_table":       "project.dataset.daily_trades_report",
- *   "output_bq_input_alias": "summary"
+ *   "output_bq_input_alias": "summary",
+ *   "run_details": {"dateType": "LAST_DAY_OF_MONTH", "frequency": "MONTHLY",
+ *                   "freqRunDay": "WD+1", "calendarKey": "Calendar_EPS"}
  * }
  * </pre>
+ *
+ * <p>{@code run_details} is optional — the report's own run schedule, same fields as a data
+ * source's {@code run_details_json} (a nested object here since report config is nested JSON
+ * natively). Parsed into {@code ReportConfig.runScheduleConfig}; dates come from
+ * {@code RunDateCalculator.resolve()}.
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
@@ -168,7 +175,8 @@ public final class BigQueryReportRepository {
 
             return new ReportConfig(reportName, reportSubprocess, periodId, overrideKey,
                                     datasources, preprocessing, transforms, outputs, email,
-                                    outputBqTable, outputBqInputAlias);
+                                    outputBqTable, outputBqInputAlias,
+                                    BigQuerySourceConfigRepository.parseRunSchedule(root.path("run_details")));
         } catch (IllegalArgumentException | IllegalStateException e) {
             throw e;
         } catch (Exception e) {

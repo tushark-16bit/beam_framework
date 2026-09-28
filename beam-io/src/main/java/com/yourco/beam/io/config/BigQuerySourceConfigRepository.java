@@ -348,20 +348,28 @@ public final class BigQuerySourceConfigRepository {
         String json = p.get("run_details_json");
         if (json == null || json.isBlank()) return RunScheduleConfig.none();
         try {
-            JsonNode node = JSON.readTree(json);
-            if (!node.isObject()) return RunScheduleConfig.none();
-            return new RunScheduleConfig(
-                node.path("dateType").asText(null),
-                node.path("frequency").asText(null),
-                node.path("freqRunDay").asText(null),
-                node.path("maxFreqRunDay").asInt(RunScheduleConfig.NO_MAX),
-                node.path("dayLag").asText(null),
-                node.path("calendarKey").asText(null)
-            );
+            return parseRunSchedule(JSON.readTree(json));
         } catch (Exception e) {
             LOG.error("Failed to parse run_details_json: {}", e.getMessage());
             return RunScheduleConfig.none();
         }
+    }
+
+    /**
+     * Maps a run-details JSON object to {@link RunScheduleConfig}. Shared with
+     * {@link BigQueryReportRepository} (a report's nested {@code run_details} object) so sources
+     * and reports read the same field names the same way.
+     */
+    static RunScheduleConfig parseRunSchedule(JsonNode node) {
+        if (node == null || !node.isObject()) return RunScheduleConfig.none();
+        return new RunScheduleConfig(
+            node.path("dateType").asText(null),
+            node.path("frequency").asText(null),
+            node.path("freqRunDay").asText(null),
+            node.path("maxFreqRunDay").asInt(RunScheduleConfig.NO_MAX),
+            node.path("dayLag").asText(null),
+            node.path("calendarKey").asText(null)
+        );
     }
 
     private SourceFailureEmailConfig toFailureEmailConfig(Map<String, String> p) {

@@ -6,11 +6,12 @@ import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.sink.DataSourceRecordSinkTransform;
 import com.yourco.beam.io.source.SourceRouter;
 import com.yourco.beam.model.BqFetchConfig;
+import com.yourco.beam.model.RunDates;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.SourceType;
 import com.yourco.beam.utils.BigQuerySchemaUtils;
-import com.yourco.beam.utils.DateUtils;
+import com.yourco.beam.utils.RunDateCalculator;
 import com.yourco.beam.utils.QueryParameterResolver;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.options.ValueProvider;
@@ -20,7 +21,6 @@ import org.apache.beam.sdk.values.Row;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -106,7 +106,8 @@ public final class DataSourcePipelineFactory {
                 .collect(Collectors.joining(","));
             int periodId = sourceConfigs.isEmpty() ? options.getPeriodId() : sourceConfigs.get(0).periodId;
             DataSourceDownloadException.Reason reason =
-                (e instanceof IllegalArgumentException || e instanceof IllegalStateException)
+                (e instanceof IllegalArgumentException || e instanceof IllegalStateException
+                    || e instanceof UnsupportedOperationException)
                 ? DataSourceDownloadException.Reason.INVALID_INPUT
                 : DataSourceDownloadException.Reason.CONNECTIVITY_FAILURE;
             throw DataSourceDownloadException.wrap(reason, names, null, periodId, e);
@@ -121,10 +122,22 @@ public final class DataSourcePipelineFactory {
         }
         LOG.info("Assembling {} source config(s) | jobRunId={}", sourceConfigs.size(), jobRunId);
 
+        // Each source gets its own run dates, resolved before the COMPLETED skip-check and
+        // checkpoint creation below, so DaRefer is keyed by the resolved periodId — the same value
+        // a report reading this source resolves to — not the raw --periodId.
+        Map<String, RunDates> runDates = new HashMap<>();
+        List<SourceConfig> datedConfigs = new ArrayList<>();
+        for (SourceConfig config : sourceConfigs) {
+            RunDates dates = RunDateCalculator.resolve(config.runScheduleConfig, options);
+            runDates.put(config.datasourceName, dates);
+            datedConfigs.add(config.toBuilder().periodId(dates.periodId).build());
+            LOG.info("Run dates for '{}': {}", config.datasourceName, dates);
+        }
+
         BigQueryDataSourceCheckpointAdapter checkpointAdapter =
             new BigQueryDataSourceCheckpointAdapter(options);
 
-        List<SourceConfig> toProcess = filterByCheckpoint(sourceConfigs, checkpointAdapter, options);
+        List<SourceConfig> toProcess = filterByCheckpoint(datedConfigs, checkpointAdapter, options);
         if (toProcess.isEmpty()) {
             LOG.info("All {} source(s) already completed. "
                      + "Set --overrideDownload=true to force re-download.", sourceConfigs.size());
@@ -165,7 +178,7 @@ public final class DataSourcePipelineFactory {
             LOG.info("DaRefer LOADING row created for '{}': da_id={}", config.datasourceName, dsId);
         }
 
-        return assemblePipeline(options, toProcess, dataSourceIds, previousDaIds);
+        return assemblePipeline(options, toProcess, dataSourceIds, previousDaIds, runDates);
     }
 
     // ── Graph assembly ────────────────────────────────────────────────────────
@@ -173,11 +186,10 @@ public final class DataSourcePipelineFactory {
     private static DataSourceAssembly assemblePipeline(FrameworkOptions options,
                                              List<SourceConfig> configs,
                                              Map<String, Long> dataSourceIds,
-                                             Map<String, Long> previousDaIds) {
+                                             Map<String, Long> previousDaIds,
+                                             Map<String, RunDates> runDates) {
         Pipeline  pipeline = Pipeline.create(options);
         List<PCollection<?>> finalizeSignals = new ArrayList<>();
-        LocalDate runDate  = DateUtils.resolveRunDate(options);
-        LOG.info("Effective run date: {}", runDate);
 
         // Pre-compute the checkpoint table refs once — passed to FinalizeDoFn fields (Strings are
         // serializable; FrameworkOptions is not, so we extract what we need here in the driver JVM).
@@ -194,10 +206,11 @@ public final class DataSourcePipelineFactory {
             LOG.info("Assembling source branch: {} ({}) → DaRec (da_id={})",
                      config.datasourceName, config.sourceType, dsId);
 
-            SourceConfig resolved = resolveQueryTokens(config, options);
+            RunDates dates = runDates.get(config.datasourceName);
+            SourceConfig resolved = resolveQueryTokens(config, options, dates);
             Schema bqSchema = fetchBqSchema(config);
             PCollection<Row> sourceData = SourceRouter.routeFromConfig(
-                pipeline, resolved, options, runDate, bqSchema);
+                pipeline, resolved, options, dates.runDate, bqSchema);
 
             PCollection<Row> transformed = SourceTransformChainAssembler.assemble(
                 sourceData, config, options, pipeline);
@@ -226,20 +239,22 @@ public final class DataSourcePipelineFactory {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /**
-     * For BQ sources, resolves {periodStart}/{periodEnd}/{periodId}/{runDate} and custom
+     * For BQ sources, resolves {periodStart}/{periodEnd}/{periodId}/{runDate} (from this source's
+     * own {@code dates}) and custom
      * tokens in {@code bqFetchConfig.query} before the query reaches BigQueryIO.
      * Must run here in beam-runner (not in beam-io SourceRouter) because
      * QueryParameterResolver is in beam-utils and beam-io cannot depend on beam-utils.
      * Non-BQ sources are returned unchanged.
      */
-    private static SourceConfig resolveQueryTokens(SourceConfig config, FrameworkOptions options) {
+    private static SourceConfig resolveQueryTokens(SourceConfig config, FrameworkOptions options,
+                                                   RunDates dates) {
         if (config.sourceType != SourceType.BQ
                 || config.bqFetchConfig == null
                 || !config.bqFetchConfig.hasQuery()) {
             return config;
         }
         BqFetchConfig bq = config.bqFetchConfig;
-        String resolvedQuery = QueryParameterResolver.resolve(bq.query, bq.queryParams, options);
+        String resolvedQuery = QueryParameterResolver.resolve(bq.query, bq.queryParams, options, dates);
         BqFetchConfig resolvedBq = new BqFetchConfig(
             bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema);
         // toBuilder() copies every existing field first, so swapping in the token-resolved

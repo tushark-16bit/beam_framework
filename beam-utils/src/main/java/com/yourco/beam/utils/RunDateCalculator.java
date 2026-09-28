@@ -1,69 +1,105 @@
 package com.yourco.beam.utils;
 
+import com.yourco.beam.model.RunDates;
 import com.yourco.beam.model.RunScheduleConfig;
+import com.yourco.beam.options.FrameworkOptions;
 
 import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 
 /**
- * Computes the effective run date for a data source from its {@link RunScheduleConfig}.
+ * The one place run dates are decided, for every data source and every report, in every flow
+ * ({@code DATA_SOURCE_DOWNLOAD}, {@code REPORT_PROCESSING}, and both halves of {@code PIPELINE}).
  *
- * <p>This is a thin wrapper around whatever business-date arithmetic an operator's own calendar
- * rules require — it retrieves nothing itself (that's already done by the time a
- * {@link RunScheduleConfig} reaches here) and performs no I/O of its own. What it must do,
- * combining the fields on {@link RunScheduleConfig}:
+ * <p>Flows always call {@link #resolve} and read the returned {@link RunDates} — never
+ * {@code --runDate}/{@code --periodStart}/{@code --periodEnd}/{@code --periodId} directly — so
+ * date logic can't drift between flows:
+ * <ul>
+ *   <li>No {@link RunScheduleConfig} configured → {@link #fromOptions}: exactly the CLI options,
+ *       i.e. the behaviour before run scheduling existed.</li>
+ *   <li>Configured → {@link #calculateRunDates}, which is <b>not implemented</b> — see below.</li>
+ * </ul>
+ *
+ * <h2>What {@link #calculateRunDates} needs to do</h2>
+ * Combine the {@link RunScheduleConfig} fields into a {@link RunDates} (see that class for the
+ * expected meaning and format of each field):
  * <ol>
- *   <li>Resolve the period containing {@code asOfDate} according to {@link RunScheduleConfig#frequency}
- *       (DAILY/WEEKLY/MONTHLY/QUARTERLY/YEARLY).</li>
- *   <li>Land on the specific date within that period per {@link RunScheduleConfig#dateType}
- *       (e.g. {@code LAST_DAY_OF_MONTH}) and/or {@link RunScheduleConfig#freqRunDay} (the
- *       {@code WD+n}/{@code CD+n} offset DSL — a workday or calendar-day count from the start of
- *       the period).</li>
- *   <li>For {@link RunScheduleConfig#DAILY} sources, instead apply {@link RunScheduleConfig#dayLag}
- *       (the same {@code WD-n}/{@code CD-n} DSL, counted backward from {@code asOfDate}).</li>
- *   <li>Resolve any {@code WD}/business-day-aware offset against the calendar identified by
- *       {@link RunScheduleConfig#calendarKey} — fetched from an external calendar database. This
- *       is a different data source from {@code FrameworkOptions.getCalendarName()}/
- *       {@code CalendarUtils}, which stub a small set of framework-wide named calendars; a
- *       {@code calendarKey} is a per-source lookup key into a separate calendar system.</li>
- *   <li>If {@link RunScheduleConfig#hasMaxRunDayCheck()}, validate the resolved date falls within
- *       {@link RunScheduleConfig#maxFreqRunDay} days of the period start (or whatever "stale run"
- *       definition applies) — the caller decides what to do with a violation (fail the run, log
- *       a warning, etc.); this method's contract is only to compute the date.</li>
+ *   <li>{@code frequency} — which period contains {@code asOfDate}: gives
+ *       {@code periodStart}/{@code periodEnd}/{@code periodId}.</li>
+ *   <li>{@code dateType} (e.g. {@code LAST_DAY_OF_MONTH}) — which date within that period is
+ *       the business {@code runDate}; for {@code DAILY}, {@code dayLag} ({@code WD-n}/{@code CD-n})
+ *       counted back from {@code asOfDate} instead.</li>
+ *   <li>{@code freqRunDay}/{@code maxFreqRunDay} — when in the following period the run is
+ *       expected/allowed; use them to decide which period {@code asOfDate} is still reporting on
+ *       (e.g. on {@code WD+1} of February, a monthly source reports January).</li>
+ *   <li>{@code WD} offsets resolve against the calendar named by {@code calendarKey}, fetched from
+ *       the external calendar DB — a different system from {@code CalendarUtils}/
+ *       {@code --calendarName}.</li>
  * </ol>
+ * Every call site runs in the driver JVM before the job is submitted (including
+ * {@code PIPELINE}'s report step, whose dates are resolved at submission and carried to the
+ * worker), so an implementation may call external systems such as the calendar DB.
  *
- * <p><b>Not implemented.</b> Integrate with your calendar database and business-date rules —
- * see {@link CalendarUtils} for the equivalent stub pattern already used elsewhere in this
- * framework for named-calendar business-day arithmetic.
- *
- * <h2>Example usage (once implemented)</h2>
- * <pre>{@code
- * RunScheduleConfig schedule = sourceConfig.runScheduleConfig;
- * if (schedule.hasSchedule()) {
- *     LocalDate runDate = RunDateCalculator.calculateRunDate(schedule, LocalDate.now());
- * }
- * }</pre>
+ * <h2>Call sites</h2>
+ * <ul>
+ *   <li>{@code DataSourcePipelineFactory.assembleForConfigs()} — once per data source
+ *       ({@code DATA_SOURCE_DOWNLOAD}, and the datasource half of {@code PIPELINE}).</li>
+ *   <li>{@code ReportPipelineFactory.execute(options)} — once per report
+ *       ({@code REPORT_PROCESSING}).</li>
+ *   <li>{@code PipelineSequenceFactory.execute()} — once for the report half of
+ *       {@code PIPELINE}.</li>
+ * </ul>
  */
 public final class RunDateCalculator {
 
     private RunDateCalculator() {}
 
     /**
-     * Computes the run date for a source given its {@link RunScheduleConfig}, as of a reference
-     * date (typically "today", or {@code DateUtils.resolveRunDate(options)}).
+     * Entry point every flow calls. Dispatches on whether a schedule is configured.
      *
-     * <p><b>Not implemented.</b> See class Javadoc for what this method needs to do.
+     * @param scheduleConfig the source's or report's retrieved schedule; never null
+     * @param options        CLI options — the fallback when no schedule is configured, and the
+     *                       source of {@code asOfDate} ({@code --runDate}, or today UTC) when one is
+     */
+    public static RunDates resolve(RunScheduleConfig scheduleConfig, FrameworkOptions options) {
+        if (!scheduleConfig.hasSchedule()) {
+            return fromOptions(options);
+        }
+        return calculateRunDates(scheduleConfig, DateUtils.resolveRunDate(options));
+    }
+
+    /**
+     * Computes a source's or report's run dates from its schedule.
      *
-     * @param scheduleConfig the source's retrieved run-scheduling values; never null, but may be
-     *                       {@link RunScheduleConfig#none()} (no schedule configured) — callers
-     *                       should check {@link RunScheduleConfig#hasSchedule()} before calling
-     * @param asOfDate       the reference date to resolve the schedule relative to
-     * @return the resolved run date
+     * <p><b>Not implemented.</b> See class Javadoc.
+     *
+     * @param scheduleConfig a configured schedule ({@link RunScheduleConfig#hasSchedule()} is true)
+     * @param asOfDate       the reference date — {@code --runDate} if passed, otherwise today UTC
      * @throws UnsupportedOperationException until implemented
      */
-    public static LocalDate calculateRunDate(RunScheduleConfig scheduleConfig, LocalDate asOfDate) {
+    public static RunDates calculateRunDates(RunScheduleConfig scheduleConfig, LocalDate asOfDate) {
         throw new UnsupportedOperationException(
-            "RunDateCalculator.calculateRunDate() is not yet implemented. "
+            "RunDateCalculator.calculateRunDates() is not yet implemented. "
             + "Integrate with your calendar database and business-date rules. "
             + "scheduleConfig=" + scheduleConfig + ", asOfDate=" + asOfDate);
+    }
+
+    /** Run dates taken straight from {@code --runDate}/{@code --periodStart}/{@code --periodEnd}/{@code --periodId}. */
+    public static RunDates fromOptions(FrameworkOptions options) {
+        return new RunDates(
+            DateUtils.resolveRunDate(options),
+            parseIsoOrNull(options.getPeriodStart(), "--periodStart"),
+            parseIsoOrNull(options.getPeriodEnd(),   "--periodEnd"),
+            options.getPeriodId());
+    }
+
+    private static LocalDate parseIsoOrNull(String value, String flag) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            return LocalDate.parse(value.trim());
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(
+                flag + " '" + value + "' is not a valid ISO-8601 date (yyyy-MM-dd)", e);
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.yourco.beam.utils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yourco.beam.model.RunDates;
 import com.yourco.beam.options.FrameworkOptions;
 
 import java.util.LinkedHashMap;
@@ -72,9 +73,21 @@ public final class QueryParameterResolver {
     public static String resolve(String template, Map<String, String> paramMappings,
                                  FrameworkOptions options) {
         if (template == null || template.isBlank()) return template;
+        return resolve(template, paramMappings, options, RunDateCalculator.fromOptions(options));
+    }
+
+    /**
+     * Same as {@link #resolve(String, Map, FrameworkOptions)}, but standard tokens come from
+     * {@code dates} — a source's or report's own {@link RunDates} from
+     * {@link RunDateCalculator#resolve} — rather than straight from the CLI options.
+     * {@code options} still supplies {@code --customParamsJson}.
+     */
+    public static String resolve(String template, Map<String, String> paramMappings,
+                                 FrameworkOptions options, RunDates dates) {
+        if (template == null || template.isBlank()) return template;
 
         // Pass 1: resolve standard tokens
-        String result = resolveStandardTokens(template, options);
+        String result = resolveStandardTokens(template, dates);
 
         // Pass 2: resolve custom params — step-level query_params_json first, then
         // --customParamsJson on top, so an operator can override any step's configured value
@@ -85,7 +98,7 @@ public final class QueryParameterResolver {
 
         for (Map.Entry<String, String> entry : merged.entrySet()) {
             String value = resolveStandardTokens(
-                (entry.getValue() != null ? entry.getValue() : ""), options);
+                (entry.getValue() != null ? entry.getValue() : ""), dates);
             result = result.replace("{" + entry.getKey() + "}", value);
         }
 
@@ -99,11 +112,11 @@ public final class QueryParameterResolver {
 
     // ── Private ───────────────────────────────────────────────────────────────
 
-    private static String resolveStandardTokens(String s, FrameworkOptions options) {
-        String periodStart = nvl(options.getPeriodStart());
-        String periodEnd   = nvl(options.getPeriodEnd());
-        String periodId    = String.valueOf(options.getPeriodId());
-        String runDate     = DateUtils.resolveRunDate(options).toString();
+    private static String resolveStandardTokens(String s, RunDates dates) {
+        String periodStart = dates.periodStartIso();
+        String periodEnd   = dates.periodEndIso();
+        String periodId    = String.valueOf(dates.periodId);
+        String runDate     = dates.runDateIso();
         return s
             .replace("{periodStart}", periodStart)
             .replace("{periodEnd}",   periodEnd)
@@ -136,9 +149,5 @@ public final class QueryParameterResolver {
         Map<String, String> result = new LinkedHashMap<>();
         root.fields().forEachRemaining(e -> result.put(e.getKey(), e.getValue().asText()));
         return result;
-    }
-
-    private static String nvl(String s) {
-        return s != null ? s : "";
     }
 }

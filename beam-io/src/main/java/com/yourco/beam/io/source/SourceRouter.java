@@ -63,9 +63,11 @@ public final class SourceRouter {
      * DATA_SOURCE_DOWNLOAD mode: routes based on a {@link SourceConfig} fetched from
      * the parameter DB. Each source in the parallel loop calls this method once.
      *
-     * <p>{@code runDate} must be resolved by the caller (e.g., {@code DateUtils.resolveRunDate(options)}
-     * from beam-runner which has access to beam-utils). This keeps beam-io free of a
-     * beam-utils dependency.
+     * <p>{@code runDate} must be resolved by the caller — this source's own
+     * {@code RunDates.runDate} from {@code RunDateCalculator.resolve()} in beam-runner, which has
+     * access to beam-utils. This keeps beam-io free of a beam-utils dependency. A FILE source's
+     * {@code {periodId}} comes from {@link SourceConfig#periodId}, which the caller has already
+     * set to the same resolved period.
      *
      * <p>The node label includes the datasource name so each source branch appears
      * separately in the Dataflow UI for easy monitoring.
@@ -93,7 +95,7 @@ public final class SourceRouter {
             case API  -> pipeline.apply("Source-" + label, new ApiSourceTransform(config));
             case FILE -> pipeline.apply("Source-" + label,
                              new FileSourceTransform(config,
-                                 String.valueOf(options.getPeriodId()), runDate));
+                                 String.valueOf(config.periodId), runDate));
             case BQ   -> {
                 BqFetchConfig bq = Objects.requireNonNull(config.bqFetchConfig,
                     "bqFetchConfig is required for sourceType=BQ in source: " + config.datasourceName);

@@ -180,10 +180,21 @@ model/RunScheduleConfig.java          Optional per-source run-scheduling config,
                                        dayLag (DAILY-only WD-n/CD-n DSL), calendarKey (lookup key into an external calendar DB,
                                        distinct from --calendarName/CalendarUtils). hasSchedule()/hasMaxRunDayCheck()/
                                        hasCalendarKey() guard optional checks; none() default when run_details_json is absent.
+                                       Carried on SourceConfig.runScheduleConfig and ReportConfig.runScheduleConfig (a report's
+                                       own schedule comes from a nested "run_details" object in its config JSON).
                                        Never computes a date itself — see beam-utils/RunDateCalculator.java.
+model/RunDates.java                   The dates one source/report run operates on: runDate (LocalDate, required), periodStart/
+                                       periodEnd (LocalDate, nullable), periodId (int). Produced ONLY by RunDateCalculator.resolve();
+                                       every flow reads its dates from this instead of --runDate/--periodStart/--periodEnd/--periodId.
+                                       Formats: runDateIso()/periodStartIso()/periodEndIso() yyyy-MM-dd (empty string when null) for
+                                       {runDate}/{periodStart}/{periodEnd} and %…% tokens, email tokens, FILE {date}, report GCS file
+                                       names; runDateCompact() yyyyMMdd for FILE {dateCompact}; FILE {fileDate} uses the source's
+                                       file_date_pattern; periodId int in the same encoding as --periodId (DaRefer/RptRefer per_id).
 
 -- REPORT_PROCESSING models --
-model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int.
+model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int (the
+                                       --periodId it was fetched with; ReportPipelineFactory uses RunDates.periodId instead).
+                                       runScheduleConfig from the optional "run_details" object (RunScheduleConfig.none() if absent).
 model/ReportDatasourceRef.java        Required DS for a report + transform alias.
 model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
 model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
@@ -209,7 +220,7 @@ see `runner/PipelineSequenceFactory.java` in the beam-runner section below.
 ### beam-io — connectors and I/O adapters
 
 ```
-source/SourceRouter.java              Stateless factory: route() (REPORT_PROCESSING) + routeFromConfig() (DATA_SOURCE_DOWNLOAD). Both have overloads with nullable Schema that pass a pre-fetched schema to BigQuerySourceTransform; schema fetched by caller in beam-runner.
+source/SourceRouter.java              Stateless factory: route() (REPORT_PROCESSING) + routeFromConfig() (DATA_SOURCE_DOWNLOAD). Both have overloads with nullable Schema that pass a pre-fetched schema to BigQuerySourceTransform; schema fetched by caller in beam-runner. routeFromConfig() takes the source's resolved RunDates.runDate from the caller; FILE {periodId} comes from SourceConfig.periodId (already set to RunDates.periodId).
 source/BigQuerySourceTransform.java   BigQueryIO.read() with two modes: typed (pre-fetched Schema → custom TableRow conversion: INT64/DOUBLE/BOOLEAN as native types, temporal and STRING as String) and generic fallback (null schema → expand() runs a SELECT * LIMIT 1 preview query in the driver JVM to learn real column names — needs only query-execution rights, not bigquery.tables.get — builds one nullable-STRING field per column, applied consistently to setRowSchema() and every Row; falls back further to Schemas.RAW_JSON blob if even the preview query fails). Does NOT use BigQueryUtils.toBeamRow() — that assumes Avro encoding and throws NumberFormatException on ISO temporal strings.
 source/GcsSourceTransform.java        GCS glob → newline-delimited JSON rows.
 source/PubSubSourceTransform.java     Pub/Sub subscription → streaming rows.
@@ -283,6 +294,8 @@ config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOUR
                                            fetchSourceConfigs(). Row → SourceConfig mapping. Also parses
                                            data_transform_query/data_transform_min_row_count/
                                            data_transform_max_row_count into DataTransformConfig.
+                                           parseRunSchedule(JsonNode) (package-private, also used by BigQueryReportRepository
+                                           for a report's "run_details") builds the RunScheduleConfig.
                                            toRunScheduleConfig() parses run_details_json (a single nested JSON object, unlike
                                            this file's other *_json keys which are arrays/flat maps) into RunScheduleConfig.
                                            toFileConfig() also parses file_date_pattern into FileSourceConfig.fileDatePattern.
@@ -306,13 +319,21 @@ RowValidationUtils.java     requireFields(), matchesPattern(), inRange(), oneOf(
 MetricsUtils.java           transformCounter(), pipelineDlqTotal(). Consistent naming for Dataflow UI.
 CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyOffset(). Must be implemented.
 DateUtils.java              resolveRunDate(), partitionedPath(), shardedTable(), toDisplayString().
-RunDateCalculator.java      STUB — calculateRunDate(RunScheduleConfig, LocalDate asOfDate). Must be implemented.
-                             Computes a source's actual run date from its retrieved dateType/frequency/freqRunDay/
+RunDateCalculator.java      The ONE place run dates are decided, for every source and report in every flow.
+                             resolve(RunScheduleConfig, options) → RunDates: no schedule → fromOptions(options) (exactly the
+                             CLI flags, pre-scheduling behaviour); schedule configured → calculateRunDates(schedule,
+                             asOfDate = --runDate or today UTC), which is a STUB — must be implemented.
+                             Call sites (all driver JVM): DataSourcePipelineFactory.assembleForConfigs() per source,
+                             ReportPipelineFactory.execute(options) per report, PipelineSequenceFactory.execute() for
+                             PIPELINE's report (carried to the worker as a DoFn field).
+                             Computes a source's/report's actual dates from its retrieved dateType/frequency/freqRunDay/
                              maxFreqRunDay/dayLag/calendarKey (RunScheduleConfig, beam-core) — a per-source-configurable
                              analog of CalendarUtils' framework-wide --calendarName stubs, resolved against a separate
                              external calendar DB keyed by calendarKey. Same "throws UnsupportedOperationException until
                              implemented" convention as CalendarUtils.
-QueryParameterResolver.java resolve(template, paramMappings, options). Two-pass: standard then custom tokens.
+QueryParameterResolver.java resolve(template, paramMappings, options[, RunDates]). Two-pass: standard then custom tokens.
+                             Standard tokens come from the RunDates passed in (the source's/report's own); the 3-arg
+                             overload uses RunDateCalculator.fromOptions(options).
                              Custom tokens merge paramMappings (a step's query_params_json) with
                              options.getCustomParamsJson() (--customParamsJson CLI flag) — the CLI value
                              wins on a key collision. Malformed/non-object --customParamsJson throws.
@@ -346,6 +367,12 @@ PipelineFactory.java            Legacy REPORT_PROCESSING: source → transform c
 DataSourceStatusChecker.java    Package-private, non-blocking only. checkSingle()/checkPipeline(): one BQ read (or a handful) against DaRefer via BigQueryDataSourceCheckpointAdapter.getLatest() — checkSingle() for a single datasource, checkPipeline() for every datasource a report's ReportConfig.datasources[] declares, applying the required/optional gate (PipelineException(ABORTED_REQUIRED_DATASOURCE) for a failed required one). This pair is ProcessType.STATUS_CHECK's entire implementation — an optional diagnostic; nothing here blocks or sleeps. The previous awaitSingle()/awaitPipeline() poll-loop wrappers are gone — DATA_SOURCE_DOWNLOAD and PIPELINE no longer poll from the driver JVM at all (see Main.java and ReportFinalizeTransform.java).
 FailureNotifier.java            Package-private: notify(options, Throwable) — the single failure-notification entry point, called both from Main's driver-JVM catch block AND from inside ReportFinalizeTransform's worker DoFn (a PIPELINE report/datasource failure discovered only after main() has already returned never reaches Main's catch, so ReportFinalizeTransform calls this itself). Picks a subject/body template by exception type (DataSourceDownloadException/ReportProcessingException/PipelineException, plus a default for anything else), always logs it, and — only if --opsFailureEmail is set and an EmailSendUtility is discoverable via SPI — emails it. Every step inside is try/caught so a notification failure can never mask the original exception.
 DataSourcePipelineFactory.java  DATA_SOURCE_DOWNLOAD: per-source branches; creates LOADING checkpoint per source in driver JVM, wires RecordSink → PostDownloadFinalizeTransform in graph. fetchBqSchema() calls BigQuerySchemaUtils (beam-utils) at driver-JVM time.
+                                RUN-DATE PLACEHOLDER: assembleForConfigs() first calls RunDateCalculator.resolve() once per
+                                source and rebuilds each SourceConfig with periodId = RunDates.periodId (toBuilder()) — so
+                                the COMPLETED check, DaRefer checkpoint, finalize and FILE {periodId} all use the source's
+                                own period — then passes RunDates.runDate to SourceRouter and the RunDates to
+                                resolveQueryTokens(). An unimplemented calculator (UnsupportedOperationException) is
+                                classified DataSourceDownloadException(INVALID_INPUT).
                                 fetchBqSchema() prefers BqFetchConfig.schema (operator-declared bq_schema_json) via
                                 BigQuerySchemaUtils.toBeamSchema() over table-metadata fetch when present — a bad
                                 declared type throws IllegalArgumentException uncaught, failing the run before any
@@ -388,8 +415,13 @@ ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ
                                 classpath provides one; sendEmail() logs a warning and skips
                                 sending rather than failing the report when it's null.
                                 execute(options) fetches ReportConfig from BigQueryReportRepository (driver-JVM only —
-                                forbidden inside a DoFn, CLAUDE.md §12) then delegates to execute(options, config).
-                                execute(options, config) — the overload ReportFinalizeTransform's worker DoFn calls,
+                                forbidden inside a DoFn, CLAUDE.md §12), resolves the report's RunDates via
+                                RunDateCalculator.resolve(config.runScheduleConfig, options) (RUN-DATE PLACEHOLDER; failure
+                                → ReportProcessingException(UNKNOWN)), then delegates to execute(options, config, dates).
+                                Every date in the run comes from `dates`: RptRefer/DaRefer per_id (dates.periodId),
+                                preprocessing/transform query tokens, ReportOutputSinkRouter GCS file names
+                                ({reportName}_{periodId}_{yyyy-MM-dd}), and email {periodId}/{periodStart}/{periodEnd}/{runDate}.
+                                execute(options, config, dates) — the overload ReportFinalizeTransform's worker DoFn calls,
                                 passing in the ReportConfig it already carries as a Serializable DoFn field, so no
                                 BigQueryReportRepository call ever happens on a worker — runs Phase 2 onward
                                 (RptRefer LOADING, preprocessing, datasource availability, staging, transform chain,
@@ -406,7 +438,8 @@ ReportFinalizeTransform.java    Wires the REPORT_PROCESSING step of a PIPELINE r
                                 finalizeSignals (one PCollection<Long> per datasource branch, from
                                 PostDownloadFinalizeTransform) has been produced, success or failure alike. No sleep,
                                 no timeout, no DaRefer re-read — a direct Beam completion signal.
-                                ReportRunDoFn (named static inner class, field: ReportConfig) reconstructs
+                                ReportRunDoFn (named static inner class, fields: ReportConfig, RunDates — the report's
+                                dates resolved in the driver JVM; verifyRequiredDatasources() uses RunDates.periodId) reconstructs
                                 FrameworkOptions on the worker via the PipelineOptions parameter Beam injects into
                                 @ProcessElement (pipelineOptions.as(FrameworkOptions.class)) — avoiding both
                                 FrameworkOptions-as-DoFn-field (not Serializable) and re-parsing raw CLI args.
@@ -414,7 +447,7 @@ ReportFinalizeTransform.java    Wires the REPORT_PROCESSING step of a PIPELINE r
                                 already guarantees every branch reached a terminal state) that every required
                                 datasource's terminal DaRefer status was actually COMPLETED; throws
                                 PipelineException(ABORTED_REQUIRED_DATASOURCE) otherwise. Then calls
-                                ReportPipelineFactory.execute(options, config) — running the report and its own
+                                ReportPipelineFactory.execute(options, config, dates) — running the report and its own
                                 completion email. Any exception (verification or the report itself) is caught here,
                                 passed to FailureNotifier.notify(options, e), and NOT rethrown — this is the pipeline's
                                 last step; rethrowing would only trigger Beam bundle retries with no benefit, and
@@ -431,9 +464,15 @@ PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSu
                                 as standalone DATA_SOURCE_DOWNLOAD) — never one job per datasource.
                                 execute() then wires the report step onto that SAME pipeline via
                                 ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig,
-                                options) — gated on Wait.on(), not a poll loop — and submits ONCE
+                                reportDates, options) — gated on Wait.on(), not a poll loop — and submits ONCE
                                 (assembly.pipeline.run()). execute() returns immediately after that; it never blocks.
                                 options.reportName/reportSubprocess are never touched.
+                                RUN-DATE PLACEHOLDER: resolves the report's RunDates (RunDateCalculator.resolve() on
+                                ReportConfig.runScheduleConfig) in the driver JVM at submission — failure →
+                                PipelineException(CONFIGURATION_ERROR) — and passes them to wire(), so the worker uses
+                                submission-time dates, never "today" at whenever it runs. warnOnPeriodMismatch() logs a
+                                WARN for any datasource whose own resolved periodId differs from the report's (the
+                                report looks datasources up by its own periodId, so it could never find that run).
                                 Composes the existing DataSourcePipelineFactory and ReportPipelineFactory rather than
                                 reimplementing either.
                                 execute() wraps its own assembly/submit body: a DataSourceDownloadException raised
@@ -599,6 +638,8 @@ Main.runDataSourceDownload(options)
 │
 ├─ DataSourcePipelineFactory.assemble(options)   [driver JVM]
 │   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load SourceConfig from BQ; throws if row missing
+│   ├─ RunDateCalculator.resolve(runScheduleConfig, options)  per source → RunDates (RUN-DATE PLACEHOLDER);
+│   │                                                          SourceConfig.periodId := RunDates.periodId
 │   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources (bypassed under
 │   │                                                          --manualOverrun / --overrideDownload)
 │   ├─ Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE createCheckpoint()
@@ -607,14 +648,14 @@ Main.runDataSourceDownload(options)
 │   │   Always a fresh INSERT — DaRefer only ever gains new rows, never overwritten
 │   │
 │   └─ for each SourceConfig (graph assembly — no data moves yet):
-│       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc.
+│       ├─ DataSourcePipelineFactory.resolveQueryTokens()     BQ only: inject {periodStart} etc. from RunDates
 │       ├─ DataSourcePipelineFactory.fetchBqSchema()          BQ sources, in order:
 │       │   ├─ 1. BqFetchConfig.schema (operator-declared bq_schema_json) →
 │       │   │      BigQuerySchemaUtils.toBeamSchema() — no BQ call, throws on a bad type name
 │       │   ├─ 2. else BigQuerySchemaUtils.fetchBeamSchema() (table metadata)
 │       │   └─ 3. else null → BigQuerySourceTransform.expand() resolves real column names
 │       │          itself via a SELECT * LIMIT 1 preview query (no tables.get)
-│       ├─ SourceRouter.routeFromConfig(schema)               API / FILE / BQ → PCollection<Row>
+│       ├─ SourceRouter.routeFromConfig(runDate, schema)      API / FILE / BQ → PCollection<Row>
 │       ├─ SourceTransformChainAssembler.assemble()           LOOKUP → GROUP_BY → SORT_BY chain
 │       ├─ DataSourceRecordSinkTransform(da_id)               rows → paginated JSON arrays → DaRec
 │       │   ├─ GroupByKey collects all rows, paginate at 250 rows/page, 1 DaRec row per page
@@ -702,7 +743,10 @@ Main.runReportProcessing(options)
     │                                                    AND parameter_data_source=reportSubprocess
     │                                                    AND parameter_name=reportName
     │                                                  → parse nested JSON → ReportConfig (periodId: int)
-    ├─ BigQueryReportCheckpointAdapter.createCheckpoint(reportName, periodId, reportName)
+    ├─ RunDateCalculator.resolve(config.runScheduleConfig, options) → RunDates   (RUN-DATE PLACEHOLDER)
+    │   every phase below reads periodId/periodStart/periodEnd/runDate from this, not from the CLI
+    ├─ execute(options, config, dates)
+    ├─ BigQueryReportCheckpointAdapter.createCheckpoint(reportName, dates.periodId, reportName)
     │   → rpt_id (LOADING row in RptRefer)
     │
     ├─ Phase 1: Preprocessing (optional)
@@ -753,10 +797,10 @@ Main.runReportProcessing(options)
 **When PIPELINE runs this same factory, it runs on a worker, not the driver JVM.** `execute(options)`
 above (the `Main.runReportProcessing()` entry point, for standalone `REPORT_PROCESSING`) is a thin
 wrapper that fetches `ReportConfig` via `BigQueryReportRepository`, then delegates to
-`execute(options, config)` — everything from `Phase 2` onward, unchanged. `PipelineSequenceFactory`
-(§17) instead pre-fetches `ReportConfig` in the driver JVM (as part of assembling the batched
-pipeline), passes it as a field on `ReportFinalizeTransform`'s `ReportRunDoFn`, and that DoFn calls
-`execute(options, config)` directly from inside a Beam worker — skipping the `fetchReportConfig()`
+`execute(options, config, dates)` — everything from `Phase 2` onward, unchanged. `PipelineSequenceFactory`
+(§17) instead pre-fetches `ReportConfig` and resolves the report's `RunDates` in the driver JVM (as
+part of assembling the batched pipeline), passes both as fields on `ReportFinalizeTransform`'s `ReportRunDoFn`, and that DoFn calls
+`execute(options, config, dates)` directly from inside a Beam worker — skipping the `fetchReportConfig()`
 BQ call entirely, since `BigQueryReportRepository` may never run inside a DoFn (CLAUDE.md §12).
 `options` on the worker is reconstructed via Beam's `PipelineOptions` DoFn-parameter injection
 (`pipelineOptions.as(FrameworkOptions.class)`), not passed as a serialized field.
@@ -800,8 +844,9 @@ PIPELINE has no config of its own: it reads the same report config as REPORT_PRO
 nested object rather than an array or flat map — see `RunScheduleConfig` (beam-core) for what
 each field means. `BigQuerySourceConfigRepository` only retrieves these values into
 `SourceConfig.runScheduleConfig`; it never computes a date from them itself — that's
-`RunDateCalculator.calculateRunDate()` (beam-utils), a deliberately unimplemented stub, same
-convention as `CalendarUtils`.
+`RunDateCalculator.calculateRunDates()` (beam-utils), a deliberately unimplemented stub, same
+convention as `CalendarUtils`, reached via `RunDateCalculator.resolve()` — see §4's `RunDates`
+entry for the formats each date is expected in.
 
 A `FILE` source's `file_date_pattern` (e.g. `"yyyyMM"`) is a separate, simpler mechanism — it
 just enables a `{fileDate}` placeholder in `file_prefix`/`file_suffix`, formatted with that
@@ -846,9 +891,17 @@ to `BigQuerySourceTransform`'s own name-only preview-query fallback.
                    "subject_template": "Report {periodId}", "body_template": "Attached.",
                    "from_address": "pipeline-alerts@example.com", "encrypted": false},
   "output_bq_table":       "project.dataset.daily_trades_report",
-  "output_bq_input_alias": "summary"
+  "output_bq_input_alias": "summary",
+  "run_details":  {"dateType": "LAST_DAY_OF_MONTH", "frequency": "MONTHLY", "freqRunDay": "WD+1",
+                   "maxFreqRunDay": 5, "calendarKey": "Calendar_EPS"}
 }
 ```
+
+`run_details` is optional — the report's own run schedule, same fields as a source's
+`run_details_json` but as a nested object (the whole report config is already JSON). It feeds
+`RunDateCalculator.resolve()`, exactly like a source's schedule; absent → the CLI dates. A report
+looks its datasources up in `DaRefer` by its own resolved `periodId`, so a report and the
+datasources it reads must resolve to the same `periodId` (PIPELINE logs a warning when they don't).
 
 The `datasources[]` array (with each entry's `is_required`) is the **same config PIPELINE reads**
 — there is no separate pipeline config. `--processType=PIPELINE` takes the identical
@@ -895,15 +948,16 @@ Layer 1 — Alias tokens (REPORT_PROCESSING only)
     {trades} → `project.dataset.trades_output`
 
 Layer 2 — Standard tokens (both process types)
-    QueryParameterResolver.resolve() — pass 1
-    {periodStart} → options.getPeriodStart()          %periodStart% → same value
-    {periodEnd}   → options.getPeriodEnd()            %periodEnd%   → same value
-    {periodId}    → options.getPeriodId()             %periodId%    → same value
-    {runDate}     → DateUtils.resolveRunDate(options)  %runDate%     → same value
-                       .toString()
+    QueryParameterResolver.resolve(..., RunDates dates) — pass 1
+    {periodStart} → dates.periodStartIso()  (yyyy-MM-dd)   %periodStart% → same value
+    {periodEnd}   → dates.periodEndIso()    (yyyy-MM-dd)   %periodEnd%   → same value
+    {periodId}    → dates.periodId          (int)          %periodId%    → same value
+    {runDate}     → dates.runDateIso()      (yyyy-MM-dd)   %runDate%     → same value
+    `dates` is the source's/report's own RunDates from RunDateCalculator.resolve() — identical to
+    the CLI flags when no run schedule is configured.
     The %name% percent-delimited forms are a fixed, built-in alternative to the same four
     {name} tokens — for queries where curly braces collide with something else in the SQL
-    dialect. Both styles resolve the identical underlying FrameworkOptions values; there is
+    dialect. Both styles resolve the identical underlying RunDates values; there is
     no query_params_json entry to declare for them, unlike Layer 3 below.
 
 Layer 3 — Custom tokens (both process types, from query_params_json column,
@@ -1183,7 +1237,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --checkpointBqDataset=pipeline_metadata
 # On the worker, once every batched datasource branch reaches a terminal state (Wait.on()):
 #   - a required datasource didn't reach COMPLETED → PipelineException(ABORTED_REQUIRED_DATASOURCE)
-#   - otherwise the report runs (ReportPipelineFactory.execute(options, config))
+#   - otherwise the report runs (ReportPipelineFactory.execute(options, config, dates))
 # Either way, FailureNotifier.notify() is called directly from the worker on any exception — this
 # never flows back through main()'s catch block, since main() has already returned by then.
 
@@ -1255,7 +1309,7 @@ PipelineException             CONFIGURATION_ERROR | CONFIG_NOT_FOUND | ABORTED_R
   finalize failure (`PostDownloadFinalizeTransform`) never becomes this exception: it's handled
   entirely inside that DoFn (checkpoint update + failure email), and `main()` has already returned
   by the time the worker runs, so there's no driver-JVM call left to throw it from.
-- `ReportProcessingException` — `ReportPipelineFactory.execute()`/`execute(options, config)`,
+- `ReportProcessingException` — `ReportPipelineFactory.execute()`/`execute(options, config, dates)`,
   which tracks a `currentReason` local updated right before each phase (preprocessing, datasource
   availability, staging, transform chain, output routing, email) runs, so the catch block wraps
   with the `Reason` matching wherever the failure actually occurred. This factory runs entirely in

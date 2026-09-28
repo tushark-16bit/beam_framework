@@ -7,8 +7,10 @@ import com.yourco.beam.io.config.BigQueryReportRepository;
 import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
 import com.yourco.beam.model.ReportConfig;
 import com.yourco.beam.model.ReportDatasourceRef;
+import com.yourco.beam.model.RunDates;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.options.FrameworkOptions;
+import com.yourco.beam.utils.RunDateCalculator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -114,11 +116,24 @@ public final class PipelineSequenceFactory {
         }
         List<ReportDatasourceRef> datasources = reportConfig.datasources;
 
+        // RUN-DATE PLACEHOLDER (report half of PIPELINE): resolved here in the driver JVM, at
+        // submission, and carried to the worker as a DoFn field — so the report uses the same
+        // dates it would have standalone, not whatever "today" is when the worker gets to it.
+        // Each datasource resolves its own dates inside DataSourcePipelineFactory.
+        RunDates reportDates;
+        try {
+            reportDates = RunDateCalculator.resolve(reportConfig.runScheduleConfig, options);
+        } catch (Exception e) {
+            throw PipelineException.wrap(PipelineException.Reason.CONFIGURATION_ERROR,
+                reportName, reportSubprocess, periodId, e);
+        }
+        LOG.info("Run dates for report '{}': {}", reportName, reportDates);
+
         // A DataSourceDownloadException raised during assembly/submission already carries the
         // right specific detail — pass it through unchanged rather than re-wrapping. Only an
         // exception PIPELINE doesn't recognize gets wrapped here.
         try {
-            assembleAndSubmit(options, datasources, reportConfig);
+            assembleAndSubmit(options, datasources, reportConfig, reportDates);
         } catch (DataSourceDownloadException | PipelineException e) {
             throw e;
         } catch (Exception e) {
@@ -133,7 +148,7 @@ public final class PipelineSequenceFactory {
     // ── Assembly: batched data-source job + report step, one pipeline, one submit ──
 
     private void assembleAndSubmit(FrameworkOptions options, List<ReportDatasourceRef> datasources,
-                                    ReportConfig reportConfig) {
+                                    ReportConfig reportConfig, RunDates reportDates) {
         List<SourceConfig> sourceConfigs = new ArrayList<>();
         if (!datasources.isEmpty()) {
             String names = datasources.stream().map(ref -> ref.datasourceName).distinct()
@@ -152,6 +167,8 @@ public final class PipelineSequenceFactory {
             LOG.info("Report declares no datasources — report step will run with nothing to wait for");
         }
 
+        warnOnPeriodMismatch(options, sourceConfigs, reportDates);
+
         // assembleForConfigs() already throws DataSourceDownloadException itself on failure —
         // let it propagate unchanged, it's already the right type.
         DataSourcePipelineFactory dsFactory = new DataSourcePipelineFactory();
@@ -159,11 +176,36 @@ public final class PipelineSequenceFactory {
 
         // Wire the report step onto the SAME pipeline, gated on every datasource branch's
         // finalize signal via Wait.on() — no driver-JVM poll loop.
-        ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig, options);
+        ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig,
+            reportDates, options);
 
         LOG.info("Submitting batched PIPELINE job ({} datasource(s) + report='{}') to runner: {}",
                  datasources.size(), reportConfig.reportName, options.getRunner().getSimpleName());
         assembly.pipeline.run();
+    }
+
+    /**
+     * The report finds each datasource's DaRefer row by the report's own {@code periodId}, so a
+     * datasource whose schedule resolves to a different one can never be picked up by this
+     * report. Warn at submission rather than only discovering it after the download runs.
+     * A datasource whose dates fail to resolve is skipped here — {@code assembleForConfigs()}
+     * fails it with the proper exception right after.
+     */
+    private static void warnOnPeriodMismatch(FrameworkOptions options, List<SourceConfig> sourceConfigs,
+                                             RunDates reportDates) {
+        for (SourceConfig config : sourceConfigs) {
+            int sourcePeriodId;
+            try {
+                sourcePeriodId = RunDateCalculator.resolve(config.runScheduleConfig, options).periodId;
+            } catch (Exception e) {
+                continue;
+            }
+            if (sourcePeriodId != reportDates.periodId) {
+                LOG.warn("Datasource '{}' resolves to periodId={} but report resolves to periodId={} "
+                         + "— the report will not find this datasource's run",
+                         config.datasourceName, sourcePeriodId, reportDates.periodId);
+            }
+        }
     }
 
     // ── Validation ───────────────────────────────────────────────────────────
