@@ -404,7 +404,7 @@ side/SideEffectEmailTransform.java  Sends SMTP email per Row. No attachments. Be
 META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 ```
 
-### beam-runner — entry point and orchestrators
+### beam-runner — entry point and pipeline factories
 
 ```
 Main.java                       Parses CLI → routes by processType + reportName. main() wraps the whole dispatch in one catch: calls FailureNotifier.notify(options, e) then rethrows unchanged, so the process still exits non-zero — but this only covers synchronous driver-JVM failures (config/assembly/submit). runDataSourceDownload() and runPipelineSequence() submit the pipeline (pipeline.run()) and return immediately — never calls waitUntilFinish() or any poll loop. This is required by the Dataflow Flex Template launch contract this deployment uses: the launcher process (main()) must build the pipeline, submit it, and exit promptly, since the launch operation is considered complete once the launcher exits, not once the job finishes — any blocking call here breaks the launch itself and was traced to a real incident (Airflow timing out at the graph level while the Dataflow job was still, or already, running). Everything that used to block here — waiting for a datasource, running the report, sending completion/failure email — now happens worker-side (PostDownloadFinalizeTransform, ReportFinalizeTransform), gated by Wait.on() instead of a poll loop. runStatusCheck() (STATUS_CHECK) is still only an optional, non-blocking diagnostic — STATUS_PENDING_EXIT_CODE (75) lets a caller of that mode alone tell "still in progress" apart from ready (0) or a terminal failure (JVM-default non-zero, already routed through FailureNotifier).
@@ -554,34 +554,6 @@ example/ExampleWorkflow.java    Self-contained end-to-end example. Shows: BigQue
                                 → exportToCsv → GCS. See EXAMPLE.md for BQ setup + run command.
 ```
 
-### beam-orchestrator — standalone orchestration JAR (no Beam dependency)
-
-Triggered by an Airflow DAG. Reads parameter_store from BigQuery, creates task records in BQ,
-and writes a manifest JSON to GCS so the DAG can fan out to individual pipeline JAR invocations.
-Zero dependency on beam-core or any sibling beam-* module — it is a fully independent JAR.
-
-```
-OrchestratorMain.java           Entry point. Wires concrete impls → Orchestrator and runs it.
-OrchestratorOptions.java        --key=value CLI parser. No Beam PipelineOptions dependency.
-Orchestrator.java               Core logic: resolve period → schedule → build tasks → save → manifest.
-
-model/ResolvedPeriod.java       Period value: periodId (int), periodStart, periodEnd, runDate, frequency.
-model/RunSpec.java              One schedulable unit: runType, parentId, name, subprocess, period, runOrder, extraParams.
-model/TaskItem.java             Persisted task: taskId (UUID), runId, RunSpec, status, createdAt, metadata.
-
-period/PeriodResolver.java      @FunctionalInterface: resolve(runDate, frequency) → ResolvedPeriod.
-period/StandardPeriodResolver.java DAILY (YYYYMMDD), MONTHLY (YYYYMM), WEEKLY (YYYYWW ISO week).
-
-schedule/RunScheduleResolver.java  @FunctionalInterface: resolve(parentId, frequency, period) → List<RunSpec>.
-schedule/BigQueryRunScheduleResolver.java Queries parameter_store; opts in via run_type/enabled/frequency/run_order fields.
-
-task/TaskRepository.java        Interface: save(List<TaskItem>).
-task/BigQueryTaskRepository.java BQ streaming insert impl. taskId as deduplication key.
-
-manifest/ManifestWriter.java    @FunctionalInterface: write(runId, parentId, frequency, runDate, tasks) → location.
-manifest/GcsManifestWriter.java Writes JSON manifest to GCS. Default path: manifests/{runId}/tasks.json.
-```
-
 ---
 
 ## 5. Architecture rules — non-negotiable
@@ -594,7 +566,6 @@ beam-transforms → beam-core, beam-utils
 beam-io → beam-core   (NOT beam-utils, NOT beam-transforms)
 beam-utils → beam-core
 beam-core → (nothing internal)
-beam-orchestrator → (nothing internal — standalone, no sibling module deps)
 ```
 
 **Violations**: if `beam-io` imports from `beam-utils`, it breaks this rule. The compiler will

@@ -276,7 +276,6 @@ ul.plain li{margin-bottom:6px;}
         <div class="mod"><div class="name">beam-transforms</div><div class="desc">Pluggable BeamTransform SPI impls + per-source transforms. → core, utils.</div></div>
         <div class="mod"><div class="name">beam-runner</div><div class="desc">Entry point &amp; orchestration factories. → everything else.</div></div>
       </div>
-      <div class="divider-note">beam-orchestrator (standalone Airflow-fanout JAR) depends on none of the above — a deliberate island, see the trade-off below.</div>
 
       <h3 class="sub">The rule that matters most</h3>
       <p><code>beam-io</code> never imports from <code>beam-utils</code> or <code>beam-transforms</code>. That's not
