@@ -341,9 +341,9 @@ public final class BigQuerySourceConfigRepository {
     /**
      * Parses {@code run_details_json} — a single nested JSON object, unlike the framework's
      * other {@code *_json} keys which hold arrays or flat maps — into a {@link RunScheduleConfig}.
-     * Absent → {@link RunScheduleConfig#none()} (unscheduled: CLI dates). Malformed → throws:
-     * silently treating a broken schedule as "unscheduled" would run the source on the CLI dates
-     * outside its configured window, which is worse than failing the config fetch loudly.
+     * Absent → {@link RunScheduleConfig#none()}, which {@code RunDateCalculator} treats as "not
+     * processed" (every item needs a schedule and a calendar). Malformed → throws, so a broken
+     * schedule fails the config fetch loudly instead of being mistaken for an absent one.
      */
     private RunScheduleConfig toRunScheduleConfig(Map<String, String> p) {
         String json = p.get("run_details_json");

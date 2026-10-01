@@ -226,13 +226,13 @@ Finance Automation framework: `frequency + freqRunDay (freqDtl for reports) + ma
 calendarKey` decide **whether it runs today** (DAILY: business day only; others: inside the
 inclusive run window), `frequency + dayLag` decide **which period** it processes, and
 `dateType + calendarKey` the **period-end date** (data sources). Items outside their window are
-skipped, not failed, and re-evaluated on every run. **`--periodId` is optional**: for an item with a
-schedule the period id is calculated from the Business Date (`--runDate`, or today in
-`--businessTimeZone`) and stored with the dates. **`--manualOverrun` never changes eligibility or
+skipped, not failed, and re-evaluated on every run. **Every item needs a run schedule and an
+existing calendar** — one without is not processed (a failure notification is raised), with no fallback
+to command-line dates. **`--periodId` is not needed**: the period id is calculated from the Business
+Date (`--runDate`, or today in `--businessTimeZone`) and stored with the dates. A DAILY `dayLag` is
+`WD-n`/`CAL-n`; a positive one is an error. **`--manualOverrun` never changes eligibility or
 dates** — it only bypasses the COMPLETED check and overwrites stored data, so when forcing a re-run
-also pass the `--runDate` that is eligible. With no schedule configured an item uses exactly
-`--runDate`/`--periodStart`/`--periodEnd`/`--periodId` (and needs `--periodId`), so existing runs are
-unchanged. The only piece to implement is the calendar DB lookup (`BusinessCalendarProvider`, SPI). Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
+also pass the `--runDate` that is eligible. The only piece to implement is the calendar DB lookup (`BusinessCalendarProvider`, SPI). Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
 email tokens and report file names; `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for
 FILE `{fileDate}`; `periodId` as an int — DAILY `yyyyMMdd`, MONTHLY `yyyyMM`, QUARTERLY `yyyyMMddqq` (first date of the
 quarter + quarter number, Q1 2026 → `2026010101`), ANNUALLY `yyyy`. See `beam-utils/README.md`.
@@ -538,8 +538,8 @@ options={
     "--parentId":             "TRADING",          # → parameter_group_name in parameter_store
     "--reportName":           "daily_trades_summary",
     "--reportSubprocess":     "eod",
-    "--periodId":             "202401",           # integer, e.g. YYYYMM or YYYYMMDD — only needed for an
-                                                  # item with no run schedule; calculated otherwise
+    "--periodId":             "202401",           # ignored — the period id is calculated from the run_details
+                                                  # schedule (see DATE_SCHEDULING_RULES.md)
     "--periodStart":          "2024-01-01",
     "--periodEnd":            "2024-01-31",
     "--runDate":              "{{ ds }}",

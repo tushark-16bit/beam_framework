@@ -44,7 +44,7 @@ against a WD+3..WD+5 window, window rollover, WD-n month-end windows, WD+0, empt
 windows, quarterly/annual windows, DAILY gate and lag across holidays / year end / leap day, the
 non-DAILY prefix rule, previous/current periods across year boundaries, all four quarterly period
 ids, every kind of month end for `lastBusDayMonth`, `dateType` ignored for non-monthly and reports,
-independent report/data-source windows, every not-evaluable cause, the optional `--periodId`,
+independent report/data-source windows, every not-evaluable cause (incl. no schedule, no calendar, positive DAILY lag), `--periodId` ignored,
 `--manualOverrun` not changing anything, and a sweep of 11 schedules × a year of days × both item
 types asserting that every evaluable decision (skipped ones included) carries a consistent period.
 `DateUtilsTest.java`: Business Date from `--runDate` / `--businessTimeZone`.
@@ -259,16 +259,16 @@ framework, kept **as is** — including its quirks (marked `BAU PARITY` in the c
 | `frequency` | ✓ | ✓ | `DAILY` (business-day gate, id `yyyyMMdd`), `MONTHLY` (window, `yyyyMM`), `QUARTERLY` (window, `yyyyMMddqq`), `ANNUALLY` (window, `yyyy`). Anything else, incl. `WEEKLY` → not evaluable |
 | `freqRunDay` (source) / `freqDtl` (report) | ✓ | – | Window start. `WD+n` n-th business day, `WD-n` n-th-last, `WD+0` last calendar day of previous month. Ignored for DAILY |
 | `maxFreqRunDay` | ✓ | – | Window end, inclusive, same `WD±n` syntax. Blank → no upper bound (eligible until the period rolls over). Ignored for DAILY |
-| `dayLag` | – | ✓ | DAILY: `WD+n` n business days back, `CAL+n` n calendar days back (a negative DAILY lag is not evaluable). Non-DAILY: starts with `WD-`/`CAL-` → current period; anything else (blank, `WD+5`, …) → previous period — the number is ignored |
+| `dayLag` | – | ✓ | DAILY: `WD-n` n business days back, `CAL-n` n calendar days back (owner decision D4 — a positive DAILY lag is an error). Non-DAILY: starts with `WD-`/`CAL-` → current period; anything else (blank, `WD+5`, …) → previous period — the number is ignored |
 | `calendarKey` | ✓ | ✓ | Required for every scheduled item. Missing/unknown → not evaluable |
 | `dateType` | – | ✓ | Data source MONTHLY only: `lastBusDayMonth` → last business day; anything else → last calendar day. Reports: not used |
 
 ### Period id — calculated, not passed
 
-`--periodId` is **optional**: for an item with a run schedule, `RunDates.periodId` is calculated from
-the Business Date + `frequency` + `dayLag` and stored alongside the other dates; a `--periodId` passed
-as well is ignored (with a warning when it differs). An item with **no** run schedule has no frequency
-to calculate from, so it still needs `--periodId` (otherwise `NOT_EVALUABLE`). Encodings:
+`--periodId` is **not needed** and not used to run an item: `RunDates.periodId` is calculated from the
+Business Date + `frequency` + `dayLag` and stored alongside the other dates; a `--periodId` passed anyway is
+ignored (with a warning when it differs). Every item must have a run schedule **and** a calendar (D5) —
+without them it is `NOT_EVALUABLE`, not processed. Encodings:
 
 | Frequency | Period id | Example |
 |---|---|---|
@@ -280,8 +280,8 @@ to calculate from, so it still needs `--periodId` (otherwise `NOT_EVALUABLE`). E
 ### Decision flow (per item, every execution)
 
 ```
-no run schedule                         → ELIGIBLE, dates = CLI flags (needs --periodId)
-bad frequency / calendar / WD / lag     → NOT_EVALUABLE   skip + FailureNotifier; others continue
+no schedule / no calendar / bad config
+  / positive DAILY lag                  → NOT_EVALUABLE   not processed + FailureNotifier; others continue
 DAILY, Business Date not a business day → NON_BUSINESS_DAY skip; never caught up
 non-DAILY, before freqRunDay date       → NOT_YET_ELIGIBLE skip; picked up by a later run
 non-DAILY, after maxFreqRunDay date     → EXPIRED          skip
@@ -325,14 +325,14 @@ public final class CalendarDbProvider implements BusinessCalendarProvider {
 //   com.yourorg.CalendarDbProvider
 ```
 
-Without a registered provider, every **scheduled** item is `NOT_EVALUABLE` (skipped, reported);
-unscheduled items don't touch the calendar.
+A calendar must exist (D5): without a registered provider, or when `forKey` fails, every item is
+`NOT_EVALUABLE` (not processed, reported). There is no unscheduled/calendar-less mode.
 
 ### Open items
 
 The assumptions where the BAU description is silent (quarter/annual window month, `WD+n` beyond the
 month's business days, blank DAILY lag, case sensitivity, report `paramReplace[].dateType`, …) and the
-two pending confirmations (quarterly example, negative DAILY lag) are tracked in **Part 3 of
+list of assumptions is tracked in **Part 3 of
 `DATE_SCHEDULING_RULES.md`** — the single list. Code comments labelled `OPEN QUESTION` point at them.
 
 ---

@@ -74,8 +74,8 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 ### Data source selection (DATA_SOURCE_DOWNLOAD only)
 ```
 --datasourceName=trades
---periodId=20240115          # OPTIONAL when the source has run_details — then calculated from the Business
-                             # Date (--runDate / today in --businessTimeZone); required for an unscheduled source
+--periodId=20240115          # IGNORED — the source needs run_details + a calendar, and its period id is
+                             # calculated from the Business Date (--runDate / today in --businessTimeZone)
 --subprocessName=eod
 --overrideDownload=false    # legacy re-run bypass; prefer --manualOverrun
 --manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer and overwrites storage.

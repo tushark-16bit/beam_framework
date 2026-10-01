@@ -556,13 +556,41 @@ has a run schedule. It is stored alongside the dates (`RunDates.periodId`) and i
 `RptRefer` `per_id` are keyed by. If `--periodId` is also passed for a scheduled item, the calculated
 value is used.
 
-An item with **no run schedule** has no frequency to calculate from, so it still needs `--periodId`.
+*(The earlier remark here that an item with no run schedule "still needs `--periodId`" is
+superseded by D5: such an item is not processed at all.)*
 
 ### D3 — Quarterly period ID format (2026-10-01)
 
 Part 1 §2 says only "Quarter period ID". The format is **`yyyyMMddqq`**: `yyyyMMdd` is the **first
 date of the quarter** (e.g. `20260101`) and `qq` the zero-padded quarter number `01`–`04`.
 Example: first quarter of 2026 → `2026010101`.
+
+**Confirmed by the owner, 2026-10-01:** quarters are calendar quarters and the fourth quarter of 2026
+is `2026100104` (the earlier example "third quarter → `2026100103`" was a slip). So Q1 → `…0101`,
+Q2 → `…0402`, Q3 → `…0703`, Q4 → `…1004` for the matching year.
+
+### D4 — DAILY `dayLag` is `WD-n` / `CAL-n`; a positive lag is an error (2026-10-01)
+
+*Overrides Part 1 §5 "DAILY", which writes the DAILY lag as `WD+n` / `CAL+n`.*
+
+For a DAILY item the lag is written with a **minus**: `WD-n` = go back `n` business days, `CAL-n` = go
+back `n` calendar days — the calculation itself is exactly the one Part 1 §5 describes (business-day
+lag skips weekends and holidays; calendar lag does not), only the sign convention differs.
+Example: Business Date Tue Sep 8, Sep 7 a holiday, `dayLag = WD-1` → Fri Sep 4.
+
+A **positive** DAILY lag (`WD+n`, `CAL+n`) is not expected — it should be filtered out where the
+parameters are stored — but as a safety check it is an **error**: the item is not processed and the
+standard failure notification is raised (an email when `--opsFailureEmail` is configured). Blank
+DAILY lag remains an assumption (Part 3 #3). Non-DAILY `dayLag` (the prefix rule) is unchanged.
+
+### D5 — An item with no schedule or no calendar is not processed (2026-10-01)
+
+Every data source and report must have a run schedule **and** an existing calendar. An item with no
+run schedule (no `run_details`), a schedule without a `calendarKey`, or a `calendarKey` that cannot be
+resolved to a calendar is **not processed** and raises the standard failure notification — there is no
+fallback to dates passed on the command line. Consequently `--periodId`, `--periodStart` and
+`--periodEnd` are never used to run a data source or report; the period and its dates are always
+calculated.
 
 ---
 
@@ -571,18 +599,16 @@ Example: first quarter of 2026 → `2026010101`.
 *Safe to update as the implementation changes, but every item under "Assumptions" is a guess that
 needs the owner's confirmation. Remove an item only when the owner confirms or corrects it.*
 
-### Pending confirmation (raised 2026-10-01)
+### Pending confirmation
 
-| # | Item | Current behaviour |
-|---|---|---|
-| P1 | The owner's D3 example says "third quarter becomes `2026100103`", but `20261001` is the first date of the **fourth** calendar quarter; by the rule, Q3 2026 is `2026070103`. | Implemented the **rule** (calendar quarters; Q3 2026 = `2026070103`, Q4 2026 = `2026100104`). Confirm the example was a typo, or tell us the quarters are fiscal. |
-| P2 | **DAILY `dayLag` with `-`** (`WD-1`): Part 1 §5 defines only `WD+n`/`CAL+n` for DAILY ("`+n` = go backward n"). Earlier, `WD-1` and `WD+1` silently gave the same result. | Now **NOT_EVALUABLE** (skipped + failure notification) rather than guessed. Tell us what BAU does with a negative DAILY lag. |
+None. (P1 quarterly example and P2 negative DAILY lag, raised 2026-10-01, were resolved by the
+owner the same day — see D3 and D4.)
 
 ### Assumptions where Part 1 is silent
 
 1. **QUARTERLY/ANNUALLY window month** — Part 1 mentions a "quarter/annual month lookup" without its contents. Assumed: `WD` run days are counted in the first month of the Business Date's calendar quarter (Jan/Apr/Jul/Oct) / in January.
 2. **`WD+n` larger than the month's business days** — assumed the count continues into the next month (and `WD-n` into the previous) rather than failing.
-3. **DAILY with blank `dayLag`** — assumed lag 0 (period = Business Date).
+3. **DAILY with blank `dayLag`** — assumed lag 0 (period = Business Date). (A positive DAILY lag is an error — D4.)
 4. **Non-DAILY with blank `freqRunDay`** — assumed no lower bound.
 5. **Exact, case-sensitive matching** of `WD`/`CAL` prefixes, `lastBusDayMonth` and frequency names (`monthly` ≠ `MONTHLY`).
 6. **Report `paramReplace[].dateType`** (`periodId` / `RunDate` / period end + `periodOffset`, Part 1 §7B) — not implemented; its config shape and `periodOffset` unit are not described.

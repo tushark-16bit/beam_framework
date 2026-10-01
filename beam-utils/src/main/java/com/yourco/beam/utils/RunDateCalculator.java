@@ -54,12 +54,11 @@ import java.util.regex.Pattern;
  *
  * <h2>Decision flow ({@link #evaluate})</h2>
  * <pre>
- *   no run schedule configured ─────────────────────────────► ELIGIBLE, dates = CLI flags
- *                                                              (pre-scheduling behaviour; needs
- *                                                              --periodId, else NOT_EVALUABLE)
- *   frequency missing/unsupported, calendarKey missing,
- *   calendar lookup fails, unparseable WD/lag expression ───► NOT_EVALUABLE  (skip + report;
- *                                                              re-evaluated next execution)
+ *   no run schedule, frequency missing/unsupported,
+ *   calendarKey missing or unknown (no calendar), unparseable
+ *   WD/lag expression, positive DAILY lag ──────────────────► NOT_EVALUABLE  (not processed + failure
+ *                                                              notification; re-evaluated next
+ *                                                              execution — owner decisions D4, D5)
  *   DAILY and Business Date not a business day ─────────────► NON_BUSINESS_DAY (skip; no catch-up)
  *   non-DAILY and Business Date &lt; freqRunDay date ─────────► NOT_YET_ELIGIBLE (skip; recheck)
  *   non-DAILY and Business Date &gt; maxFreqRunDay date ───────► EXPIRED  (skip)
@@ -85,8 +84,17 @@ import java.util.regex.Pattern;
  * {@code dayLag}; a {@code --periodId} passed as well is ignored (with a warning if it differs).
  * Encodings: DAILY {@code yyyyMMdd}, MONTHLY {@code yyyyMM}, QUARTERLY {@code yyyyMMddqq}
  * (first date of the quarter + zero-padded quarter number, Q1 2026 → {@code 2026010101}),
- * ANNUALLY {@code yyyy}. An item with no run schedule has no frequency to calculate from, so it
- * still needs {@code --periodId}.
+ * ANNUALLY {@code yyyy}.
+ *
+ * <h2>No schedule or no calendar → not processed (owner decision D5)</h2>
+ * Every item needs a run schedule <b>and</b> a calendar that exists. Without them the item is
+ * {@code NOT_EVALUABLE} — there is no fallback to command-line dates, so {@code --periodId},
+ * {@code --periodStart} and {@code --periodEnd} never run an item. {@link #fromOptions} remains only
+ * for callers outside the scheduled flows (e.g. the legacy example workflow).
+ *
+ * <h2>DAILY dayLag is {@code WD-n}/{@code CAL-n} (owner decision D4)</h2>
+ * The calculation is BAU's (go back n business / calendar days); a positive DAILY lag is not
+ * expected and is an error ({@code NOT_EVALUABLE}, with the standard failure notification).
  *
  * <h2>Calendar</h2>
  * Every business-day question goes to the {@link BusinessCalendar} for the item's
@@ -114,12 +122,11 @@ public final class RunDateCalculator {
     private static final Pattern RUN_DAY = Pattern.compile("WD([+-])(\\d+)");
 
     /**
-     * DAILY lag expression: {@code WD+n} = n business days back, {@code CAL+n} = n calendar days
-     * back. Only the {@code +} form is defined for DAILY (contract Part 1 §5); a {@code -} form is
-     * rejected, not guessed (contract Part 3, P2).
+     * DAILY lag expression (owner decision D4): {@code WD-n} = n business days back, {@code CAL-n} =
+     * n calendar days back. The positive form is rejected as an error.
      */
-    private static final Pattern DAILY_LAG = Pattern.compile("(WD|CAL)\\+(\\d+)");
-    private static final Pattern DAILY_LAG_NEGATIVE = Pattern.compile("(WD|CAL)-(\\d+)");
+    private static final Pattern DAILY_LAG = Pattern.compile("(WD|CAL)-(\\d+)");
+    private static final Pattern DAILY_LAG_POSITIVE = Pattern.compile("(WD|CAL)\\+(\\d+)");
 
     /** Guard against a calendar with no business days sending the day-by-day walks into an endless loop. */
     private static final int MAX_DAYS_SCANNED = 400;
@@ -152,18 +159,8 @@ public final class RunDateCalculator {
     /** Same as the two entry points above, with an explicit calendar provider. */
     public static ScheduleDecision evaluate(RunScheduleConfig schedule, FrameworkOptions options,
                                             ItemType itemType, BusinessCalendarProvider calendars) {
-        if (!schedule.hasSchedule()) {
-            // No run details at all → pre-scheduling behaviour: CLI dates, always eligible. There
-            // is no frequency to calculate a period id from, so --periodId must have been passed.
-            RunDates dates = fromOptions(options);
-            if (dates.periodId <= 0) {
-                return ScheduleDecision.notEvaluable(dates.runDate, dates,
-                    "no run schedule is configured for this item, so its period id cannot be "
-                    + "calculated — pass --periodId, or configure run_details");
-            }
-            return ScheduleDecision.unscheduled(dates);
-        }
-        // Scheduled: Business Date = --runDate or today; the period id is calculated from it.
+        // Business Date = --runDate or today; the period id is calculated from it. An item with no
+        // schedule is rejected by the pure evaluate() below (owner decision D5).
         // --manualOverrun is deliberately not passed down — it never affects eligibility or dates.
         ScheduleDecision decision = evaluate(schedule, DateUtils.resolveRunDate(options),
                                              itemType, calendars);
@@ -183,6 +180,13 @@ public final class RunDateCalculator {
      */
     public static ScheduleDecision evaluate(RunScheduleConfig schedule, LocalDate businessDate,
                                             ItemType itemType, BusinessCalendarProvider calendars) {
+        // ── Step 0: an item must have a run schedule (owner decision D5). No fallback to CLI dates.
+        if (!schedule.hasSchedule()) {
+            return ScheduleDecision.notEvaluable(businessDate,
+                "no run schedule is configured (run_details missing) — an item without a schedule "
+                + "and a calendar is not processed");
+        }
+
         // ── Step 1: frequency — selects DAILY (business-day gate) vs window logic, and the
         //    period grain. Missing/unsupported → no task is created; re-evaluated next execution.
         String frequency = schedule.frequency;
@@ -395,15 +399,14 @@ public final class RunDateCalculator {
      *
      * <h3>DAILY — lag walks back from the Business Date</h3>
      * <ul>
-     *   <li>{@code WD+n} → n business days back. E.g. Business Date Tue 2026-09-08, Mon 09-07 a
-     *       holiday, {@code WD+1} → Fri 2026-09-04 (holiday and weekend skipped).</li>
-     *   <li>{@code CAL+n} → n calendar days back, no business-day adjustment (Monday with
-     *       {@code CAL+1} → Sunday).</li>
+     *   <li>{@code WD-n} → n business days back. E.g. Business Date Tue 2026-09-08, Mon 09-07 a
+     *       holiday, {@code WD-1} → Fri 2026-09-04 (holiday and weekend skipped).</li>
+     *   <li>{@code CAL-n} → n calendar days back, no business-day adjustment (Monday with
+     *       {@code CAL-1} → Sunday).</li>
      *   <li>OPEN QUESTION: blank {@code dayLag} — assumed lag 0 (period = Business Date).</li>
-     *   <li>{@code WD-n}/{@code CAL-n} on a DAILY item — the contract defines only the {@code +}
-     *       form, so a negative lag is <b>not evaluable</b> rather than guessed (contract Part 3,
-     *       P2: owner to confirm what BAU does).</li>
-     *   <li>Anything else (e.g. {@code CD+1}, {@code wd+1}) → not evaluable.</li>
+     *   <li>A <b>positive</b> lag ({@code WD+n}/{@code CAL+n}) is an error → not evaluable
+     *       (owner decision D4).</li>
+     *   <li>Anything else (e.g. {@code CD-1}, {@code wd-1}) → not evaluable.</li>
      * </ul>
      * periodId {@code yyyyMMdd}; period start = end = that day.
      *
@@ -466,15 +469,16 @@ public final class RunDateCalculator {
         if (dayLag == null) {
             return businessDate;
         }
-        if (DAILY_LAG_NEGATIVE.matcher(dayLag).matches()) {
+        if (DAILY_LAG_POSITIVE.matcher(dayLag).matches()) {
             throw new IllegalArgumentException(
-                "DAILY dayLag '" + dayLag + "' is negative; only WD+n / CAL+n are defined for DAILY "
-                + "(DATE_SCHEDULING_RULES.md Part 3, P2 — owner to confirm)");
+                "DAILY dayLag '" + dayLag + "' is positive; a DAILY lag must be WD-n or CAL-n "
+                + "(DATE_SCHEDULING_RULES.md D4) — this should have been filtered out where the "
+                + "parameters are stored");
         }
         Matcher m = DAILY_LAG.matcher(dayLag);
         if (!m.matches()) {
             throw new IllegalArgumentException(
-                "DAILY dayLag '" + dayLag + "' is not WD+n or CAL+n");
+                "DAILY dayLag '" + dayLag + "' is not WD-n or CAL-n");
         }
         int n = Integer.parseInt(m.group(2));
         return "WD".equals(m.group(1))
@@ -526,11 +530,14 @@ public final class RunDateCalculator {
         return ((month - 1) / 3) * 3 + 1;
     }
 
-    // ── Unscheduled items ────────────────────────────────────────────────────
+    // ── Command-line dates (not used by the scheduled flows) ─────────────────
 
     /**
      * Run dates taken straight from {@code --runDate}/{@code --periodStart}/{@code --periodEnd}/
-     * {@code --periodId} — used for any item with no run schedule configured.
+     * {@code --periodId}. <b>Not used to run a data source or report</b> — an item without a
+     * schedule is not processed (owner decision D5). Kept for callers outside the scheduled flows
+     * that only need token values from the command line, e.g.
+     * {@code QueryParameterResolver.resolve(template, params, options)} in the legacy example.
      */
     public static RunDates fromOptions(FrameworkOptions options) {
         return new RunDates(
@@ -594,43 +601,35 @@ public final class RunDateCalculator {
         public final LocalDate freqRunDate;
         /** Null when not configured or not reached. */
         public final LocalDate maxFreqRunDate;
-        /** True when the item had a run schedule (false → dates are the CLI flags). */
-        public final boolean   scheduled;
         /** Human-readable reason, for logs and failure notifications. */
         public final String    detail;
 
         private ScheduleDecision(Status status, RunDates dates, LocalDate businessDate,
                                  LocalDate freqRunDate, LocalDate maxFreqRunDate,
-                                 boolean scheduled, String detail) {
+                                 String detail) {
             this.status         = status;
             this.dates          = dates;
             this.businessDate   = businessDate;
             this.freqRunDate    = freqRunDate;
             this.maxFreqRunDate = maxFreqRunDate;
-            this.scheduled      = scheduled;
             this.detail         = detail;
-        }
-
-        static ScheduleDecision unscheduled(RunDates dates) {
-            return new ScheduleDecision(Status.ELIGIBLE, dates, dates.runDate, null, null, false,
-                "no run schedule configured — dates from CLI flags");
         }
 
         static ScheduleDecision eligible(RunDates dates, LocalDate freqRunDate, LocalDate maxFreqRunDate) {
             return new ScheduleDecision(Status.ELIGIBLE, dates, dates.runDate, freqRunDate,
-                maxFreqRunDate, true, "eligible");
+                maxFreqRunDate, "eligible");
         }
 
         static ScheduleDecision skip(Status status, RunDates dates, LocalDate businessDate,
                                      LocalDate freqRunDate, LocalDate maxFreqRunDate, String detail) {
             return new ScheduleDecision(status, dates, businessDate, freqRunDate, maxFreqRunDate,
-                true, detail);
+                detail);
         }
 
         /** {@code dates} may be null when the period itself could not be calculated. */
         static ScheduleDecision notEvaluable(LocalDate businessDate, RunDates dates, String detail) {
             return new ScheduleDecision(Status.NOT_EVALUABLE, dates, businessDate, null, null,
-                true, detail);
+                detail);
         }
 
         static ScheduleDecision notEvaluable(LocalDate businessDate, String detail) {

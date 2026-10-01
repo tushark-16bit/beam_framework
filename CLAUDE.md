@@ -198,7 +198,7 @@ model/RunScheduleConfig.java          Optional Finance Automation run schedule f
                                        BAU naming), maxFreqRunDay (run-window end, inclusive, WD±n string; null = no upper bound),
                                        dayLag, dateType (lastBusDayMonth/lastDayMonth — data source MONTHLY only), calendarKey.
                                        Source: run_details_json in parameters_val_json; report: nested "run_details" object.
-                                       hasSchedule() = any attribute set (none → unscheduled: CLI dates, always eligible).
+                                       hasSchedule() = any attribute set (none → the item is NOT processed, owner decision D5).
                                        Interpreted only by beam-utils/RunDateCalculator.java.
 model/RunDates.java                   The dates one eligible source/report run operates on: runDate = BAU Business Date
                                        (--runDate or today in --businessTimeZone), periodStart/periodEnd/periodId = BAU
@@ -344,14 +344,14 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                              behaviour away from it without the owner's approval; contradiction → ask). Port of BAU, quirks
                              preserved ("BAU PARITY" comments); guesses marked "OPEN QUESTION" = contract Part 3 assumptions.
                              evaluateDataSource()/evaluateReport(schedule, options) → ScheduleDecision {status, dates,
-                             businessDate, freqRunDate, maxFreqRunDate, scheduled, detail}:
-                               no schedule → ELIGIBLE with fromOptions() (CLI flags; needs --periodId else NOT_EVALUABLE);
-                               bad/unsupported frequency, missing/unknown calendarKey, no calendar provider, unparseable
-                                 WD/lag, negative DAILY lag → NOT_EVALUABLE;
+                             businessDate, freqRunDate, maxFreqRunDate, detail}:
+                               NO schedule, or no calendar (calendarKey missing/unknown, no provider) → NOT_EVALUABLE: the item
+                                 is not processed, no fallback to CLI dates (D5); also bad/unsupported frequency, unparseable
+                                 WD/lag, POSITIVE DAILY lag (D4) → NOT_EVALUABLE (not processed + failure notification);
                                WHEN — DAILY: Business Date must be a business day (else NON_BUSINESS_DAY; no catch-up);
                                  non-DAILY: freqRunDate <= Business Date <= maxFreqRunDate, inclusive (NOT_YET_ELIGIBLE /
                                  EXPIRED); non-DAILY does NOT require the Business Date itself to be a business day;
-                               WHICH — DAILY: dayLag WD+n / CAL+n days back; non-DAILY: dayLag prefix WD-/CAL- → current
+                               WHICH — DAILY: dayLag WD-n / CAL-n = n business / calendar days back (D4); non-DAILY: dayLag prefix WD-/CAL- → current
                                  period, anything else (blank, WD+5, ...) → previous period (numeric amount ignored);
                                WHAT — data source MONTHLY + dateType lastBusDayMonth → last business day, else calendar
                                  end; reports never apply dateType.
@@ -375,7 +375,7 @@ BusinessCalendar.java       @FunctionalInterface isBusinessDay(LocalDate) — on
 BusinessCalendarProvider.java forKey(calendarKey) → BusinessCalendar, from the external calendar DB. NO implementation ships
                              here: register one via META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider
                              (discover() uses ServiceLoader, like EmailSendUtility). Without one, every SCHEDULED item is
-                             NOT_EVALUABLE (skipped + reported); unscheduled items are unaffected.
+                             NOT_EVALUABLE (not processed + reported) — a calendar must exist (D5).
 QueryParameterResolver.java resolve(template, paramMappings, options[, RunDates]). Two-pass: standard then custom tokens.
                              Standard tokens come from the RunDates passed in (the source's/report's own); the 3-arg
                              overload uses RunDateCalculator.fromOptions(options).
@@ -469,7 +469,7 @@ ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ
                                 RunDateCalculator.evaluateReport(): NOT_EVALUABLE → ReportProcessingException(UNKNOWN);
                                 NOT_YET_ELIGIBLE/EXPIRED/NON_BUSINESS_DAY → return (no RptRefer row, exit 0);
                                 ELIGIBLE and scheduled → isAlreadyCompleted() checks RptRefer for the calculated period
-                                (skip unless --manualOverrun; unscheduled reports always re-run, as before); then
+                                (skip unless --manualOverrun; a report without a schedule is NOT_EVALUABLE, not run); then
                                 delegates to execute(options, config, dates).
                                 Every date in the run comes from `dates`: RptRefer/DaRefer per_id (dates.periodId),
                                 preprocessing/transform query tokens, ReportOutputSinkRouter GCS file names
@@ -546,8 +546,8 @@ PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSu
                                 bypass-COMPLETED-guard-and-supersede treatment DataSourcePipelineFactory already
                                 gives it standalone. The report step is the same: a SCHEDULED report already COMPLETED for
                                 its calculated period is skipped (ReportPipelineFactory.isAlreadyCompleted()) unless
-                                --manualOverrun; an unscheduled report has no such guard and always re-runs. In neither case
-                                does --manualOverrun change eligibility or dates (contract D1).
+                                --manualOverrun (every report must have a schedule, D5). --manualOverrun never changes
+                                eligibility or dates (contract D1).
 
 example/ExampleWorkflow.java    Self-contained end-to-end example. Shows: BigQueryParameterAdapter
                                 → fetchRequiredParameters → resolve tokens → BigQueryJobService
@@ -697,8 +697,9 @@ Main.runDataSourceDownload(options)
 ├─ DataSourcePipelineFactory.assemble(options)   [driver JVM]
 │   ├─ BigQuerySourceConfigRepository.fetchSourceConfigs()    load SourceConfig from BQ; throws if row missing
 │   ├─ RunDateCalculator.evaluateDataSource(schedule, options) per source (Finance Automation rules):
-│   │   ├─ no schedule                         → ELIGIBLE, dates = CLI flags
-│   │   ├─ NOT_EVALUABLE (config/calendar)     → skip + FailureNotifier; other sources continue
+│   │   ├─ no schedule / no calendar / bad config / positive DAILY lag
+│   │   │                                      → NOT_EVALUABLE: not processed + FailureNotifier (D4, D5);
+│   │   │                                        other sources continue
 │   │   ├─ DAILY on weekend/holiday            → skip (NON_BUSINESS_DAY; no catch-up)
 │   │   ├─ before freqRunDay date              → skip (NOT_YET_ELIGIBLE; recheck next run)
 │   │   ├─ after maxFreqRunDay date            → skip (EXPIRED) — --manualOverrun does NOT change any of this
@@ -914,7 +915,7 @@ PIPELINE has no config of its own: it reads the same report config as REPORT_PRO
 nested object rather than an array or flat map — see `RunScheduleConfig` (beam-core) for what
 each field means. `BigQuerySourceConfigRepository` only retrieves these values into
 `SourceConfig.runScheduleConfig` (malformed JSON fails the config fetch rather than silently
-running unscheduled); the Finance Automation rules that interpret them — WHEN
+being mistaken for an absent one — an absent schedule means the item is not processed); the Finance Automation rules that interpret them — WHEN
 (`frequency + freqRunDay + maxFreqRunDay + calendarKey`), WHICH period (`frequency + dayLag`),
 WHAT period-end date (`dateType + calendarKey`) — are `RunDateCalculator` (beam-utils; see §4 and
 `beam-utils/README.md`). `maxFreqRunDay` is a `WD±n` string like `freqRunDay`; a bare number is
@@ -972,7 +973,7 @@ to `BigQuerySourceTransform`'s own name-only preview-query fallback.
 `run_details` is optional — the report's own run schedule, same fields as a source's
 `run_details_json` but as a nested object, except the run-window start is **`freqDtl`** (BAU
 naming for reports) and `dateType` is ignored (BAU doesn't use a report's run-level `dateType`).
-It feeds `RunDateCalculator.evaluateReport()`; absent → the CLI dates, always run. A report is
+It feeds `RunDateCalculator.evaluateReport()`; absent → the report is not processed (NOT_EVALUABLE, owner decision D5). A report is
 scheduled independently of its datasources: a scheduled report already `COMPLETED` for its
 calculated period is skipped unless `--manualOverrun`. A report
 looks its datasources up in `DaRefer` by its own resolved `periodId`, so a report and the
@@ -1028,8 +1029,9 @@ Layer 2 — Standard tokens (both process types)
     {periodEnd}   → dates.periodEndIso()    (yyyy-MM-dd)   %periodEnd%   → same value
     {periodId}    → dates.periodId          (int)          %periodId%    → same value
     {runDate}     → dates.runDateIso()      (yyyy-MM-dd)   %runDate%     → same value
-    `dates` is the source's/report's own RunDates from RunDateCalculator.evaluate*() — identical to
-    the CLI flags when no run schedule is configured.
+    `dates` is the source's/report's own RunDates from RunDateCalculator.evaluate*(); an item with no
+    run schedule/calendar is not processed, so there are no CLI-derived dates in the scheduled flows
+    (the 3-arg resolve() overload, used only by the legacy example, reads the CLI flags).
     The %name% percent-delimited forms are a fixed, built-in alternative to the same four
     {name} tokens — for queries where curly braces collide with something else in the SQL
     dialect. Both styles resolve the identical underlying RunDates values; there is
@@ -1265,10 +1267,11 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --checkpointBqProject=my-gcp-project \
   --checkpointBqDataset=pipeline_metadata
 
-# --periodId / --periodStart / --periodEnd above are only needed for an item with NO run schedule.
-# For an item with run_details they are calculated from the Business Date (--runDate, or today in
-# --businessTimeZone) + frequency + dayLag — leave them out (a --periodId passed anyway is ignored).
-# Only STATUS_CHECK always needs --periodId. See DATE_SCHEDULING_RULES.md.
+# --periodId / --periodStart / --periodEnd above are NOT used to run an item: every data source and
+# report must have run_details and an existing calendar, and its period and dates are calculated from the
+# Business Date (--runDate, or today in --businessTimeZone) + frequency + dayLag. Leave them out (values
+# passed anyway are ignored); an item with no schedule/calendar is not processed (failure notification).
+# Only STATUS_CHECK reads --periodId. See DATE_SCHEDULING_RULES.md (D4, D5).
 
 # Force re-run when DaRefer already shows COMPLETED (explicit operator override). ONLY about storage and
 # overwriting: it never changes eligibility or dates (owner decision D1) — also pass the --runDate that is

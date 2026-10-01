@@ -133,8 +133,8 @@ io/config/
                                      file's other *_json keys which are arrays/flat maps — into
                                      SourceConfig.runScheduleConfig (RunScheduleConfig): frequency/freqRunDay/
                                      maxFreqRunDay/dayLag/dateType/calendarKey, all kept as raw strings
-                                     (maxFreqRunDay is a WD±n expression). Malformed JSON throws rather than
-                                     silently running unscheduled. Retrieval only; the scheduling rules are
+                                     (maxFreqRunDay is a WD±n expression). Malformed JSON throws rather than being
+                                     mistaken for an absent schedule (an absent one means the item is not processed). Retrieval only; the scheduling rules are
                                      RunDateCalculator (beam-utils). Also parses file_date_pattern into
                                      FileSourceConfig.fileDatePattern for FILE sources.
     BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING

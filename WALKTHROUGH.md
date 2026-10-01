@@ -252,7 +252,7 @@ sequenceDiagram
     end
 
     RPF->>RPF: RunDateCalculator.evaluateReport(config.runScheduleConfig, options) → ScheduleDecision (skip unless ELIGIBLE; scheduled + COMPLETED → skip)
-    Note over RPF: every date below (perId, query tokens, file names,<br/>email tokens) comes from RunDates — CLI flags<br/>when no run_details schedule is configured
+    Note over RPF: every date below (perId, query tokens, file names,<br/>email tokens) comes from RunDates —<br/>calculated from the run_details schedule; no schedule/calendar → not processed
     RPF->>RptAdapter: createCheckpoint(rptNm=reportName, perId=dates.periodId, rptDs=reportName)
     RptAdapter-->>RPF: rpt_id (LOADING row inserted into RptRefer)
 

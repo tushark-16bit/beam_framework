@@ -334,7 +334,7 @@ class RunDateCalculatorTest {
 
     @Test
     void dailySkippedDayStillCarriesThePeriodItWouldHaveProcessed() {
-        ScheduleDecision saturday = source(schedule(RunScheduleConfig.DAILY, null, null, "WD+1", null), d(2026, 9, 5));
+        ScheduleDecision saturday = source(schedule(RunScheduleConfig.DAILY, null, null, "WD-1", null), d(2026, 9, 5));
         assertEquals(Status.NON_BUSINESS_DAY, saturday.status);
         assertPeriod(saturday, d(2026, 9, 4), d(2026, 9, 4), 20260904);
     }
@@ -349,68 +349,72 @@ class RunDateCalculatorTest {
 
     @Test
     void dailyWorkdayLagSkipsHolidayAndWeekend() {
-        ScheduleDecision d = daily("WD+1", d(2026, 9, 8));            // the documented BAU example
+        ScheduleDecision d = daily("WD-1", d(2026, 9, 8));            // the documented BAU example
         assertPeriod(d, d(2026, 9, 4), d(2026, 9, 4), 20260904);
         assertEquals(d(2026, 9, 8), d.dates.runDate);                  // Business Date stays the run date
     }
 
     @Test
     void dailyWorkdayLagFromMondaySkipsTheWeekend() {
-        assertPeriod(daily("WD+1", d(2026, 9, 14)), d(2026, 9, 11), d(2026, 9, 11), 20260911);
+        assertPeriod(daily("WD-1", d(2026, 9, 14)), d(2026, 9, 11), d(2026, 9, 11), 20260911);
     }
 
     @Test
     void dailyWorkdayLagTwoAcrossAHoliday() {
-        assertPeriod(daily("WD+2", d(2026, 9, 8)), d(2026, 9, 3), d(2026, 9, 3), 20260903);
+        assertPeriod(daily("WD-2", d(2026, 9, 8)), d(2026, 9, 3), d(2026, 9, 3), 20260903);
     }
 
     @Test
     void dailyZeroLagIsTheBusinessDate() {
-        assertPeriod(daily("WD+0", d(2026, 9, 9)), d(2026, 9, 9), d(2026, 9, 9), 20260909);
-        assertPeriod(daily("CAL+0", d(2026, 9, 9)), d(2026, 9, 9), d(2026, 9, 9), 20260909);
+        assertPeriod(daily("WD-0", d(2026, 9, 9)), d(2026, 9, 9), d(2026, 9, 9), 20260909);
+        assertPeriod(daily("CAL-0", d(2026, 9, 9)), d(2026, 9, 9), d(2026, 9, 9), 20260909);
     }
 
     @Test
     void dailyCalendarLagDoesNotAdjustForWeekends() {
-        ScheduleDecision sunday = daily("CAL+1", d(2026, 9, 14));     // Monday → Sunday
+        ScheduleDecision sunday = daily("CAL-1", d(2026, 9, 14));     // Monday → Sunday
         assertPeriod(sunday, d(2026, 9, 13), d(2026, 9, 13), 20260913);
-        assertPeriod(daily("CAL+3", d(2026, 9, 14)), d(2026, 9, 11), d(2026, 9, 11), 20260911);
+        assertPeriod(daily("CAL-3", d(2026, 9, 14)), d(2026, 9, 11), d(2026, 9, 11), 20260911);
     }
 
     @Test
     void dailyLagAcrossYearEnd() {
-        assertPeriod(daily("WD+1", d(2026, 1, 2)), d(2025, 12, 31), d(2025, 12, 31), 20251231);   // Jan 1 holiday
-        assertPeriod(daily("WD+1", d(2026, 1, 5)), d(2026, 1, 2), d(2026, 1, 2), 20260102);
-        assertPeriod(daily("WD+2", d(2026, 1, 5)), d(2025, 12, 31), d(2025, 12, 31), 20251231);
+        assertPeriod(daily("WD-1", d(2026, 1, 2)), d(2025, 12, 31), d(2025, 12, 31), 20251231);   // Jan 1 holiday
+        assertPeriod(daily("WD-1", d(2026, 1, 5)), d(2026, 1, 2), d(2026, 1, 2), 20260102);
+        assertPeriod(daily("WD-2", d(2026, 1, 5)), d(2025, 12, 31), d(2025, 12, 31), 20251231);
     }
 
     @Test
     void dailyLagAcrossMonthBoundariesAndLeapDay() {
-        assertPeriod(daily("CAL+1", d(2026, 10, 1)), d(2026, 9, 30), d(2026, 9, 30), 20260930);
-        assertPeriod(daily("CAL+5", d(2026, 3, 3)), d(2026, 2, 26), d(2026, 2, 26), 20260226);
-        assertPeriod(daily("CAL+1", d(2028, 3, 1)), d(2028, 2, 29), d(2028, 2, 29), 20280229);
+        assertPeriod(daily("CAL-1", d(2026, 10, 1)), d(2026, 9, 30), d(2026, 9, 30), 20260930);
+        assertPeriod(daily("CAL-5", d(2026, 3, 3)), d(2026, 2, 26), d(2026, 2, 26), 20260226);
+        assertPeriod(daily("CAL-1", d(2028, 3, 1)), d(2028, 2, 29), d(2028, 2, 29), 20280229);
     }
 
     @Test
     void dailyWorkdayLagAroundThanksgivingAndGoodFriday() {
-        assertPeriod(daily("WD+1", d(2026, 11, 27)), d(2026, 11, 25), d(2026, 11, 25), 20261125);
-        assertPeriod(daily("WD+1", d(2026, 4, 6)), d(2026, 4, 2), d(2026, 4, 2), 20260402);
+        assertPeriod(daily("WD-1", d(2026, 11, 27)), d(2026, 11, 25), d(2026, 11, 25), 20261125);
+        assertPeriod(daily("WD-1", d(2026, 4, 6)), d(2026, 4, 2), d(2026, 4, 2), 20260402);
     }
 
-    /** CONTRACT Part 3, P2: the contract defines only WD+n / CAL+n for DAILY — WD-1 must not silently equal WD+1. */
+    /** CONTRACT D4: a DAILY lag is WD-n / CAL-n; a positive lag is an error (filtered upstream, checked here). */
     @Test
-    void dailyNegativeLagIsNotEvaluable_notSilentlyTheSameAsPositive() {
-        ScheduleDecision plus  = daily("WD+1", d(2026, 9, 9));
+    void dailyPositiveLagIsAnError_andNegativeLagIsTheValidForm() {
         ScheduleDecision minus = daily("WD-1", d(2026, 9, 9));
-        assertEquals(Status.ELIGIBLE, plus.status);
-        assertEquals(Status.NOT_EVALUABLE, minus.status);
-        assertTrue(minus.detail.contains("negative"), minus.detail);
-        assertEquals(Status.NOT_EVALUABLE, daily("CAL-1", d(2026, 9, 9)).status);
+        assertEquals(Status.ELIGIBLE, minus.status);
+        assertPeriod(minus, d(2026, 9, 8), d(2026, 9, 8), 20260908);
+
+        for (String positive : new String[] {"WD+1", "CAL+1", "WD+0", "CAL+3"}) {
+            ScheduleDecision dec = daily(positive, d(2026, 9, 9));
+            assertEquals(Status.NOT_EVALUABLE, dec.status, positive);
+            assertTrue(dec.detail.contains("positive"), dec.detail);
+            assertFalse(dec.shouldRun());
+        }
     }
 
     @Test
     void dailyMalformedLagsAreNotEvaluable() {
-        for (String lag : new String[] {"CD+1", "wd+1", "cal+1", " WD+1", "WD+1 ", "WD+", "WD+x", "WD", "1", "WD+1.5"}) {
+        for (String lag : new String[] {"CD-1", "wd-1", "cal-1", " WD-1", "WD-1 ", "WD-", "WD-x", "WD", "1", "WD-1.5"}) {
             assertEquals(Status.NOT_EVALUABLE, daily(lag, d(2026, 9, 9)).status, "dayLag='" + lag + "'");
         }
     }
@@ -672,7 +676,7 @@ class RunDateCalculatorTest {
         assertTrue(dec.detail.contains("no business days"), dec.detail);
         // ...and neither can a business-day lag, or a last-business-day month end.
         assertEquals(Status.NOT_EVALUABLE, RunDateCalculator.evaluate(
-            schedule(RunScheduleConfig.DAILY, null, null, "WD+1", null), d(2026, 9, 3), ItemType.DATA_SOURCE, closed).status);
+            schedule(RunScheduleConfig.DAILY, null, null, "WD-1", null), d(2026, 9, 3), ItemType.DATA_SOURCE, closed).status);
         assertEquals(Status.NOT_EVALUABLE, RunDateCalculator.evaluate(
             schedule(RunScheduleConfig.MONTHLY, null, null, null, RunScheduleConfig.LAST_BUS_DAY_MONTH),
             d(2026, 9, 3), ItemType.DATA_SOURCE, closed).status);
@@ -686,7 +690,6 @@ class RunDateCalculatorTest {
     void scheduledItemNeedsNoPeriodId_itIsCalculatedFromTheRunDate() {
         ScheduleDecision dec = source(MONTHLY_WD3_TO_WD5, options("2026-09-03", 0));
         assertEquals(Status.ELIGIBLE, dec.status);
-        assertTrue(dec.scheduled);
         assertPeriod(dec, d(2026, 8, 1), d(2026, 8, 31), 202608);
         assertEquals(d(2026, 9, 3), dec.dates.runDate);
     }
@@ -704,23 +707,37 @@ class RunDateCalculatorTest {
         assertEquals(Status.EXPIRED,          source(MONTHLY_WD3_TO_WD5, options("2026-09-09", 0)).status);
     }
 
+    /** CONTRACT D5: an item with no run schedule is not processed — there is no fallback to CLI dates. */
     @Test
-    void unscheduledItemUsesTheCliValuesAsIs() {
-        FrameworkOptions o = options("2024-01-31", 202401);
-        o.setPeriodStart("2024-01-01");
-        o.setPeriodEnd("2024-01-31");
-        ScheduleDecision dec = source(RunScheduleConfig.none(), o);
-        assertEquals(Status.ELIGIBLE, dec.status);
-        assertFalse(dec.scheduled);
-        assertPeriod(dec, d(2024, 1, 1), d(2024, 1, 31), 202401);
-        assertEquals(d(2024, 1, 31), dec.dates.runDate);
+    void anItemWithNoScheduleIsNotProcessed_whateverTheCommandLineSays() {
+        FrameworkOptions full = options("2024-01-31", 202401);
+        full.setPeriodStart("2024-01-01");
+        full.setPeriodEnd("2024-01-31");
+        for (FrameworkOptions o : List.of(full, options("2026-09-03", 0))) {
+            for (ItemType type : ItemType.values()) {
+                ScheduleDecision dec = RunDateCalculator.evaluate(RunScheduleConfig.none(), o, type, PROVIDER);
+                assertEquals(Status.NOT_EVALUABLE, dec.status, type + " " + o.getRunDate());
+                assertFalse(dec.shouldRun());
+                assertNull(dec.dates);
+                assertTrue(dec.detail.contains("no run schedule"), dec.detail);
+            }
+        }
+        // ...also through the pure entry point
+        assertEquals(Status.NOT_EVALUABLE, source(RunScheduleConfig.none(), d(2026, 9, 3)).status);
+        assertEquals(Status.NOT_EVALUABLE, report(RunScheduleConfig.none(), d(2026, 9, 3)).status);
     }
 
+    /** CONTRACT D5: a calendar must exist — a schedule alone is not enough. */
     @Test
-    void unscheduledItemWithoutAPeriodIdIsNotEvaluable() {
-        ScheduleDecision dec = source(RunScheduleConfig.none(), options("2026-09-03", 0));
-        assertEquals(Status.NOT_EVALUABLE, dec.status);
-        assertTrue(dec.detail.contains("--periodId"), dec.detail);
+    void aScheduleWithoutAnExistingCalendarIsNotProcessed() {
+        LocalDate bd = d(2026, 9, 3);
+        // only a calendarKey, no frequency
+        assertEquals(Status.NOT_EVALUABLE, source(new RunScheduleConfig(null, null, null, null, null, "CAL_US"), bd).status);
+        // schedule but no calendarKey / unknown calendarKey (also covered in missingOrUnknownCalendarKeyIsNotEvaluable)
+        assertEquals(Status.NOT_EVALUABLE, source(new RunScheduleConfig(
+            RunScheduleConfig.MONTHLY, "WD+1", null, null, null, null), bd).status);
+        assertEquals(Status.NOT_EVALUABLE, report(new RunScheduleConfig(
+            RunScheduleConfig.MONTHLY, "WD+1", null, null, null, "NOPE"), bd).status);
     }
 
     /** CONTRACT Part 2, D1: --manualOverrun is only about storage — it never changes eligibility or dates. */
@@ -756,14 +773,14 @@ class RunDateCalculatorTest {
     }
 
     @Test
-    void withoutARegisteredCalendarProviderScheduledItemsAreNotEvaluableButUnscheduledOnesRun() {
+    void withoutARegisteredCalendarProviderNothingIsProcessed() {
         // No META-INF/services provider exists on the test classpath.
         ScheduleDecision scheduled = RunDateCalculator.evaluateDataSource(MONTHLY_WD3_TO_WD5, options("2026-09-03", 0));
         assertEquals(Status.NOT_EVALUABLE, scheduled.status);
         assertTrue(scheduled.detail.contains("BusinessCalendarProvider"), scheduled.detail);
 
         ScheduleDecision unscheduled = RunDateCalculator.evaluateReport(RunScheduleConfig.none(), options("2026-09-03", 202609));
-        assertEquals(Status.ELIGIBLE, unscheduled.status);
+        assertEquals(Status.NOT_EVALUABLE, unscheduled.status);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -772,8 +789,8 @@ class RunDateCalculatorTest {
 
     private static final List<RunScheduleConfig> SWEEP_SCHEDULES = List.of(
         schedule(RunScheduleConfig.DAILY, null, null, null, null),
-        schedule(RunScheduleConfig.DAILY, null, null, "WD+1", null),
-        schedule(RunScheduleConfig.DAILY, null, null, "CAL+2", null),
+        schedule(RunScheduleConfig.DAILY, null, null, "WD-1", null),
+        schedule(RunScheduleConfig.DAILY, null, null, "CAL-2", null),
         schedule(RunScheduleConfig.MONTHLY, "WD+3", "WD+5", null, null),
         schedule(RunScheduleConfig.MONTHLY, "WD-3", "WD-1", "WD-1", null),
         schedule(RunScheduleConfig.MONTHLY, "WD+0", null, null, RunScheduleConfig.LAST_BUS_DAY_MONTH),

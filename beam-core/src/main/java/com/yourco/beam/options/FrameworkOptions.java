@@ -77,11 +77,11 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getDatasourceName();
     void setDatasourceName(String value);
 
-    @Description("Period identifier for this run as an integer. OPTIONAL for any data source or "
-                 + "report that has a run schedule (run_details): its period id is then calculated "
-                 + "from the Business Date (--runDate, or today) + frequency + dayLag, and a value "
-                 + "passed here is ignored. Still required for an item with NO run schedule (no "
-                 + "frequency to calculate from) and for STATUS_CHECK. "
+    @Description("Period identifier as an integer. NOT used to run a data source or report: every "
+                 + "item must have a run schedule (run_details) and a calendar, and its period id is "
+                 + "calculated from the Business Date (--runDate, or today) + frequency + dayLag — a "
+                 + "value passed here is ignored. An item without a schedule/calendar is not "
+                 + "processed. Only STATUS_CHECK still reads it, to name the period to look up. "
                  + "Encoding — DAILY: YYYYMMDD (e.g. 20240115), MONTHLY: YYYYMM (e.g. 202401), "
                  + "QUARTERLY: YYYYMMDDQQ = first date of the quarter + quarter number "
                  + "(e.g. 2024010101 for Q1 2024), ANNUALLY: YYYY. "
@@ -117,7 +117,7 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
                  + "this same bypass-and-supersede treatment (PipelineSequenceFactory passes this same "
                  + "options object straight into DataSourcePipelineFactory, unchanged). The terminal REPORT "
                  + "step: a report that has a run schedule and is already COMPLETED for its calculated "
-                 + "period is skipped unless this flag is set; an unscheduled report always re-runs. "
+                 + "period is skipped unless this flag is set; every report has a run schedule. "
                  + "This flag is ONLY about storage and overwriting: it never changes whether an item is "
                  + "eligible to run or which dates are calculated (run window, DAILY business-day gate, "
                  + "period) — to force a re-run, also pass the --runDate that is eligible under the item's "

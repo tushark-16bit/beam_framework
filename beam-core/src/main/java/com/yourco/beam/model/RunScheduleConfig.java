@@ -83,8 +83,8 @@ public final class RunScheduleConfig implements Serializable {
 
     /**
      * True when any scheduling attribute is configured — the item is then governed by the BAU
-     * rules in {@code RunDateCalculator}. False (no run details at all) keeps the pre-scheduling
-     * behaviour: dates straight from the CLI flags, always eligible.
+     * rules in {@code RunDateCalculator}. False (no run details at all) means the item is not
+     * processed — every item needs a run schedule and a calendar.
      */
     public boolean hasSchedule() {
         return frequency != null || freqRunDay != null || maxFreqRunDay != null

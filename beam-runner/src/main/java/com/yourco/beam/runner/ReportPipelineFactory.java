@@ -144,8 +144,8 @@ public final class ReportPipelineFactory {
         // Reports are scheduled independently of their data sources (BAU): the report's own
         // freqDtl/maxFreqRunDay window decides WHEN, its own frequency + dayLag decides WHICH
         // period. Every date the report uses afterwards (RptRefer per_id, DaRefer lookups, query
-        // tokens, output file names, email tokens) comes from decision.dates. Without a
-        // run_details schedule the dates are exactly the CLI flags and the report always runs.
+        // tokens, output file names, email tokens) comes from decision.dates. A report with no
+        // run_details schedule or calendar is NOT_EVALUABLE and is not processed (owner decision D5).
         RunDateCalculator.ScheduleDecision decision;
         try {
             decision = RunDateCalculator.evaluateReport(config.runScheduleConfig, options);
@@ -185,17 +185,13 @@ public final class ReportPipelineFactory {
      * {@code --manualOverrun} — which is only about re-running/overwriting; it does not make an
      * ineligible report eligible (that was decided by the schedule before this is called).
      *
-     * <p>Applied only to a report that has a run schedule: unscheduled reports keep their
-     * previous behaviour of always re-running, so existing CLI-driven runs don't change.
-     * Shared with {@code PipelineSequenceFactory}, which makes the same check at submission.
+     * <p>Every report reaching this check has a run schedule (an unscheduled report is not
+     * processed at all — owner decision D5). Shared with {@code PipelineSequenceFactory}, which makes the same check at submission.
      *
      * @return true if the report should be skipped (and has been logged as such)
      */
     static boolean isAlreadyCompleted(FrameworkOptions options,
                                       RunDateCalculator.ScheduleDecision decision, String reportName) {
-        if (!decision.scheduled) {
-            return false;
-        }
         if (options.getManualOverrun()) {
             LOG.info("--manualOverrun: report '{}' runs for period {} even if already COMPLETED",
                      reportName, decision.dates.periodId);
