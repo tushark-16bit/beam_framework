@@ -38,11 +38,17 @@ List<SourceConfig> configs = repo.fetchSourceConfigs(
 
 ## Unit tests
 
-`src/test/java` — `RunDateCalculatorTest.java`: BAU parity tests with a fake calendar — one per BAU
-example (WD+3..WD+5 window inclusive, expired, ManualForceRun bypass rules, WD+0/WD-1, DAILY
-business-day gate, DAILY WD/CAL lag incl. the 2026-09-08 holiday example, non-DAILY prefix rule,
-quarterly/annual periods, lastBusDayMonth vs lastDayMonth, report ignoring dateType, not-evaluable
-configs). `QueryParameterResolverTest.java`: standard-token resolution, step-level
+`src/test/java` — `RunDateCalculatorTest.java` (65 tests): the BAU examples plus ~50 further
+scenarios with a fake calendar (weekends + holidays, incl. a month-end holiday): every day of a month
+against a WD+3..WD+5 window, window rollover, WD-n month-end windows, WD+0, empty and single-day
+windows, quarterly/annual windows, DAILY gate and lag across holidays / year end / leap day, the
+non-DAILY prefix rule, previous/current periods across year boundaries, all four quarterly period
+ids, every kind of month end for `lastBusDayMonth`, `dateType` ignored for non-monthly and reports,
+independent report/data-source windows, every not-evaluable cause, the optional `--periodId`,
+`--manualOverrun` not changing anything, and a sweep of 11 schedules × a year of days × both item
+types asserting that every evaluable decision (skipped ones included) carries a consistent period.
+`DateUtilsTest.java`: Business Date from `--runDate` / `--businessTimeZone`.
+`QueryParameterResolverTest.java`: standard-token resolution, step-level
 `query_params_json` resolution, `--customParamsJson` resolution and its override of a
 same-named step-level key, standard-token references inside a custom value, and malformed/
 non-object `--customParamsJson` rejection. Run with `mvn -pl beam-utils -am test`.
@@ -231,12 +237,16 @@ combines `--runDate`, `--businessDayOffset`, and `--calendarName` into a single 
 
 ## RunDateCalculator — Finance Automation scheduling (BAU port)
 
-Every flow gets its dates from here and nothing else. The rules are a port of the existing BAU
-framework, kept **as is** — including its quirks (marked `BAU PARITY` in the code). Points the
-BAU description didn't pin down are marked `OPEN QUESTION` in the code and listed at the end of
-this section.
+> **The contract is [`DATE_SCHEDULING_RULES.md`](../DATE_SCHEDULING_RULES.md)** (repo root): the BAU
+> description verbatim (Part 1), the owner's decisions for this framework (Part 2), and the
+> assumptions still awaiting confirmation (Part 3). **Read it before changing anything here; never
+> change behaviour away from it without the owner's approval; if a change or test contradicts it,
+> ask the owner.** This README only describes how the code is organised.
 
-### Two dates, three questions
+Every flow gets its dates from here and nothing else. The rules are a port of the existing BAU
+framework, kept **as is** — including its quirks (marked `BAU PARITY` in the code).
+
+### What it answers
 
 | Concept | Answers | From | In `RunDates` |
 |---|---|---|---|
@@ -246,34 +256,54 @@ this section.
 
 | Attribute | WHEN? | WHICH? | Rule |
 |---|:-:|:-:|---|
-| `frequency` | ✓ | ✓ | `DAILY` (business-day gate, `yyyyMMdd`), `MONTHLY` (window, `yyyyMM`), `QUARTERLY` (window, `yyyy*10+q`), `ANNUALLY` (window, `yyyy`). Anything else, incl. `WEEKLY` → not evaluable |
+| `frequency` | ✓ | ✓ | `DAILY` (business-day gate, id `yyyyMMdd`), `MONTHLY` (window, `yyyyMM`), `QUARTERLY` (window, `yyyyMMddqq`), `ANNUALLY` (window, `yyyy`). Anything else, incl. `WEEKLY` → not evaluable |
 | `freqRunDay` (source) / `freqDtl` (report) | ✓ | – | Window start. `WD+n` n-th business day, `WD-n` n-th-last, `WD+0` last calendar day of previous month. Ignored for DAILY |
 | `maxFreqRunDay` | ✓ | – | Window end, inclusive, same `WD±n` syntax. Blank → no upper bound (eligible until the period rolls over). Ignored for DAILY |
-| `dayLag` | – | ✓ | DAILY: `WD+n` n business days back, `CAL+n` n calendar days back. Non-DAILY: starts with `WD-`/`CAL-` → current period; anything else (blank, `WD+5`, …) → previous period — the number is ignored |
+| `dayLag` | – | ✓ | DAILY: `WD+n` n business days back, `CAL+n` n calendar days back (a negative DAILY lag is not evaluable). Non-DAILY: starts with `WD-`/`CAL-` → current period; anything else (blank, `WD+5`, …) → previous period — the number is ignored |
 | `calendarKey` | ✓ | ✓ | Required for every scheduled item. Missing/unknown → not evaluable |
 | `dateType` | – | ✓ | Data source MONTHLY only: `lastBusDayMonth` → last business day; anything else → last calendar day. Reports: not used |
+
+### Period id — calculated, not passed
+
+`--periodId` is **optional**: for an item with a run schedule, `RunDates.periodId` is calculated from
+the Business Date + `frequency` + `dayLag` and stored alongside the other dates; a `--periodId` passed
+as well is ignored (with a warning when it differs). An item with **no** run schedule has no frequency
+to calculate from, so it still needs `--periodId` (otherwise `NOT_EVALUABLE`). Encodings:
+
+| Frequency | Period id | Example |
+|---|---|---|
+| DAILY | `yyyyMMdd` | `20260904` |
+| MONTHLY | `yyyyMM` | `202608` |
+| QUARTERLY | `yyyyMMddqq` — first date of the quarter + zero-padded quarter number | Q1 2026 → `2026010101`, Q3 2026 → `2026070103` |
+| ANNUALLY | `yyyy` | `2025` |
 
 ### Decision flow (per item, every execution)
 
 ```
-no run schedule                         → ELIGIBLE, dates = CLI flags (unchanged behaviour)
+no run schedule                         → ELIGIBLE, dates = CLI flags (needs --periodId)
 bad frequency / calendar / WD / lag     → NOT_EVALUABLE   skip + FailureNotifier; others continue
 DAILY, Business Date not a business day → NON_BUSINESS_DAY skip; never caught up
 non-DAILY, before freqRunDay date       → NOT_YET_ELIGIBLE skip; picked up by a later run
-non-DAILY, after maxFreqRunDay date     → EXPIRED          skip — unless --manualOverrun
-otherwise                               → ELIGIBLE → RunDates
+non-DAILY, after maxFreqRunDay date     → EXPIRED          skip
+otherwise                               → ELIGIBLE
    then (callers): item + period already COMPLETED? → skip, unless --manualOverrun
 ```
 
-Nothing is persisted for a skip: every run re-evaluates from scratch, so a not-yet-eligible or
-failed item is simply retried by a later run while its window is open (no retry limit).
-`--manualOverrun` (BAU `ManualForceRun`) bypasses the max-window and COMPLETED checks only — never
-the `freqRunDay` check or the DAILY business-day check. Non-DAILY items do **not** need the Business
-Date itself to be a business day (a MONTHLY window covering a Saturday runs on Saturday).
+The period is calculated **first** and attached to every decision (`ScheduleDecision.dates`) — a
+skipped item still shows the period it would have processed. Only a `NOT_EVALUABLE` decision may have
+`dates == null`. Callers use the dates only when `shouldRun()`.
 
-Data sources and reports are scheduled **independently**: a skipped data source never skips its
-report; the report checks its required data sources are COMPLETED when it runs, fails if not, and
-is retried on a later eligible run.
+**`--manualOverrun` never changes eligibility or dates** (contract decision D1). It only bypasses the
+COMPLETED check and makes the new run overwrite stored data. To force a re-run, pass the `--runDate` that
+is eligible for the item; with `--manualOverrun` set, a date before `freqRunDay`, after `maxFreqRunDay`,
+or a DAILY non-business day is still skipped.
+
+Nothing is persisted for a skip: every run re-evaluates from scratch, so a not-yet-eligible or failed
+item is simply retried by a later run while its window is open (no retry limit). Non-DAILY items do
+**not** need the Business Date itself to be a business day (a MONTHLY window covering a Saturday runs
+on Saturday). Data sources and reports are scheduled **independently**: a skipped data source never
+skips its report; the report checks its required data sources are COMPLETED when it runs, fails if not,
+and is retried on a later eligible run.
 
 | Call site | Flow |
 |---|---|
@@ -298,24 +328,12 @@ public final class CalendarDbProvider implements BusinessCalendarProvider {
 Without a registered provider, every **scheduled** item is `NOT_EVALUABLE` (skipped, reported);
 unscheduled items don't touch the calendar.
 
-### OPEN QUESTIONS — confirm against BAU
+### Open items
 
-1. **QUARTERLY/ANNUALLY window month** — BAU "quarter/annual month lookup" wasn't described.
-   Assumed: WD days counted in the first month of the Business Date's quarter / January.
-2. **QUARTERLY periodId** — assumed `yyyy*10+q` (Q1 2026 → `20261`).
-3. **`WD+n` beyond the month's business days** — assumed the count carries into the next month
-   (and `WD-n` into the previous) rather than failing.
-4. **DAILY blank `dayLag`** — assumed lag 0 (period = Business Date).
-5. **DAILY `WD-n`/`CAL-n`** — BAU only describes `+n`; assumed the magnitude is counted back.
-6. **Blank `freqRunDay`/`freqDtl` on a non-DAILY item** — assumed no lower bound.
-7. **Case/whitespace** — `WD±n`, `WD-`/`CAL-` prefixes, `lastBusDayMonth` and frequencies are
-   matched exactly (case-sensitive). `CD+n` (used in earlier docs here) is not a BAU form.
-8. **Report `paramReplace[].dateType`** (`periodId` / `RunDate` / period end + `periodOffset`) —
-   not implemented; its config shape and `periodOffset` unit weren't described.
-9. **Report ↔ datasource period resolution** — a report looks its datasources up by its own
-   `periodId`; a report whose datasources have a different frequency isn't handled.
-10. **`--overrideDownload`** still bypasses only the COMPLETED check; only `--manualOverrun` maps
-    to `ManualForceRun`.
+The assumptions where the BAU description is silent (quarter/annual window month, `WD+n` beyond the
+month's business days, blank DAILY lag, case sensitivity, report `paramReplace[].dateType`, …) and the
+two pending confirmations (quarterly example, negative DAILY lag) are tracked in **Part 3 of
+`DATE_SCHEDULING_RULES.md`** — the single list. Code comments labelled `OPEN QUESTION` point at them.
 
 ---
 

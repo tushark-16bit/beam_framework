@@ -5,6 +5,23 @@ Read it fully before making any changes. Written for any capable language model 
 
 ---
 
+> ## ⛔ DATE / SCHEDULING LOGIC — OWNER-APPROVED CONTRACT
+>
+> Anything that calculates a run date, reporting period, period id, run window or run eligibility
+> (`RunDateCalculator`, `RunScheduleConfig`, `RunDates`, `DateUtils`, the `run_details` parsing, and
+> every caller) is governed by **[`DATE_SCHEDULING_RULES.md`](DATE_SCHEDULING_RULES.md)**.
+>
+> 1. **Read that whole file before changing any date calculation.**
+> 2. **Never alter Parts 1–2 of it, or make the code behave differently from them, without the owner's
+>    explicit approval in the conversation.**
+> 3. **If a request, a test, or existing code contradicts it — stop and ask the owner.** Do not resolve
+>    it yourself and do not edit the file to match the code.
+> 4. Where the contract is silent, do not guess silently: fail loudly (`NOT_EVALUABLE`) or record the
+>    assumption in its Part 3.
+> 5. Every behaviour in it needs a test in `RunDateCalculatorTest`.
+
+---
+
 > ## ⚠️ SELF-ENFORCEMENT — READ BEFORE TOUCHING ANY FILE
 >
 > **Documentation is part of every task. Update it in the same response as the code change.
@@ -96,6 +113,7 @@ If a README becomes wrong → fix it. Do not leave it stale.
 Read in this order for a complete mental model:
 
 ```
+0.  DATE_SCHEDULING_RULES.md                          — date/scheduling contract (read FIRST for anything touching dates)
 1.  WALKTHROUGH.md                                    — UML diagrams + execution flows (read this first)
 2.  EXAMPLE.md                                        — end-to-end BQ param store example with DDL + run command
 3.  beam-core/.../options/FrameworkOptions.java       — all CLI flags; the config contract
@@ -189,8 +207,9 @@ model/RunDates.java                   The dates one eligible source/report run o
                                        Formats: runDateIso()/periodStartIso()/periodEndIso() yyyy-MM-dd (empty string when null) for
                                        {runDate}/{periodStart}/{periodEnd} and %…% tokens, email tokens, FILE {date}, report GCS file
                                        names; runDateCompact() yyyyMMdd for FILE {dateCompact}; FILE {fileDate} uses the source's
-                                       file_date_pattern; periodId int (DAILY yyyyMMdd, MONTHLY yyyyMM, QUARTERLY yyyy*10+q,
-                                       ANNUALLY yyyy) — DaRefer/RptRefer per_id.
+                                       file_date_pattern; periodId int (DAILY yyyyMMdd, MONTHLY yyyyMM, QUARTERLY yyyyMMddqq =
+                                       first date of the quarter + 2-digit quarter, Q1 2026 → 2026010101, ANNUALLY yyyy) —
+                                       calculated, never required on the CLI for a scheduled item — DaRefer/RptRefer per_id.
 
 -- REPORT_PROCESSING models --
 model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int (the
@@ -319,26 +338,36 @@ SecretManagerUtils.java     fetchSecret(secretId). Never log result. Never store
 RowValidationUtils.java     requireFields(), matchesPattern(), inRange(), oneOf(). Thread-safe.
 MetricsUtils.java           transformCounter(), pipelineDlqTotal(). Consistent naming for Dataflow UI.
 CalendarUtils.java          STUBS — isBusinessDay(), nextBusinessDay(), applyOffset(). Must be implemented.
-DateUtils.java              resolveRunDate(), partitionedPath(), shardedTable(), toDisplayString().
-RunDateCalculator.java      Finance Automation scheduling rules (port of BAU, quirks preserved — "BAU PARITY" comments;
-                             undescribed points marked "OPEN QUESTION"). evaluateDataSource()/evaluateReport(schedule, options)
-                             → ScheduleDecision {status, dates, businessDate, freqRunDate, maxFreqRunDate, detail}:
-                               no schedule → ELIGIBLE with fromOptions() (CLI flags, pre-scheduling behaviour);
+DateUtils.java              resolveRunDate() — the Business Date: --runDate, else today in --businessTimeZone (default UTC;
+                             invalid zone → IllegalArgumentException); partitionedPath(), shardedTable(), toDisplayString().
+RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DATE_SCHEDULING_RULES.md (read first; never change
+                             behaviour away from it without the owner's approval; contradiction → ask). Port of BAU, quirks
+                             preserved ("BAU PARITY" comments); guesses marked "OPEN QUESTION" = contract Part 3 assumptions.
+                             evaluateDataSource()/evaluateReport(schedule, options) → ScheduleDecision {status, dates,
+                             businessDate, freqRunDate, maxFreqRunDate, scheduled, detail}:
+                               no schedule → ELIGIBLE with fromOptions() (CLI flags; needs --periodId else NOT_EVALUABLE);
                                bad/unsupported frequency, missing/unknown calendarKey, no calendar provider, unparseable
-                                 WD/lag → NOT_EVALUABLE;
+                                 WD/lag, negative DAILY lag → NOT_EVALUABLE;
                                WHEN — DAILY: Business Date must be a business day (else NON_BUSINESS_DAY; no catch-up);
                                  non-DAILY: freqRunDate <= Business Date <= maxFreqRunDate, inclusive (NOT_YET_ELIGIBLE /
                                  EXPIRED); non-DAILY does NOT require the Business Date itself to be a business day;
-                                 --manualOverrun (BAU ManualForceRun) bypasses only the max check;
                                WHICH — DAILY: dayLag WD+n / CAL+n days back; non-DAILY: dayLag prefix WD-/CAL- → current
                                  period, anything else (blank, WD+5, ...) → previous period (numeric amount ignored);
                                WHAT — data source MONTHLY + dateType lastBusDayMonth → last business day, else calendar
-                                 end; reports never apply dateType (calculateLastPeriod()).
+                                 end; reports never apply dateType.
+                             The period (RunDates incl. periodId) is calculated FIRST and stored on every decision, skipped
+                             ones too (ScheduleDecision.dates); only some NOT_EVALUABLE decisions have dates == null. Callers
+                             use the dates only when shouldRun().
+                             --manualOverrun NEVER affects eligibility or dates (owner decision D1) — it only bypasses the
+                             COMPLETED check and overwrites storage, in the callers. To force a re-run pass the eligible --runDate.
+                             --periodId is optional for scheduled items (calculated, a CLI value is ignored with a warning);
+                             period id encodings: DAILY yyyyMMdd, MONTHLY yyyyMM, QUARTERLY yyyyMMddqq (first date of the
+                             quarter + 2-digit quarter, Q1 2026 → 2026010101; quarterPeriodId()), ANNUALLY yyyy.
                              Run days: WD+n n-th business day of the window month, WD-n n-th-last, WD+0 last calendar
                              day of the previous month; window month = Business Date's month (MONTHLY), first month of
-                             its quarter (QUARTERLY, OPEN QUESTION), January (ANNUALLY, OPEN QUESTION).
-                             Pure evaluate(schedule, businessDate, manualForceRun, itemType, calendarProvider) overload is
-                             what RunDateCalculatorTest exercises. All call sites run in the driver JVM:
+                             its quarter (QUARTERLY, assumption), January (ANNUALLY, assumption).
+                             Pure evaluate(schedule, businessDate, itemType, calendarProvider) overload is what
+                             RunDateCalculatorTest (65 tests) exercises. All call sites run in the driver JVM:
                              DataSourcePipelineFactory (per source), ReportPipelineFactory.execute(options),
                              PipelineSequenceFactory (report half, carried to the worker).
 BusinessCalendar.java       @FunctionalInterface isBusinessDay(LocalDate) — one calendar (weekends + holidays). All WD
@@ -515,8 +544,10 @@ PipelineSequenceFactory.java    PIPELINE: takes the SAME --reportName/--reportSu
                                 worker reconstructs an equivalent view of it via PipelineOptions injection before
                                 calling ReportPipelineFactory.execute() — every declared datasource gets the same
                                 bypass-COMPLETED-guard-and-supersede treatment DataSourcePipelineFactory already
-                                gives it standalone. The REPORT step needs nothing extra — it has no COMPLETED
-                                guard of its own and always re-runs, manualOverrun or not.
+                                gives it standalone. The report step is the same: a SCHEDULED report already COMPLETED for
+                                its calculated period is skipped (ReportPipelineFactory.isAlreadyCompleted()) unless
+                                --manualOverrun; an unscheduled report has no such guard and always re-runs. In neither case
+                                does --manualOverrun change eligibility or dates (contract D1).
 
 example/ExampleWorkflow.java    Self-contained end-to-end example. Shows: BigQueryParameterAdapter
                                 → fetchRequiredParameters → resolve tokens → BigQueryJobService
@@ -670,8 +701,10 @@ Main.runDataSourceDownload(options)
 │   │   ├─ NOT_EVALUABLE (config/calendar)     → skip + FailureNotifier; other sources continue
 │   │   ├─ DAILY on weekend/holiday            → skip (NON_BUSINESS_DAY; no catch-up)
 │   │   ├─ before freqRunDay date              → skip (NOT_YET_ELIGIBLE; recheck next run)
-│   │   ├─ after maxFreqRunDay date            → skip (EXPIRED) unless --manualOverrun
+│   │   ├─ after maxFreqRunDay date            → skip (EXPIRED) — --manualOverrun does NOT change any of this
+│   │   │                                            (contract D1); it only bypasses the COMPLETED check below
 │   │   └─ ELIGIBLE → RunDates (Business Date + Reporting Period); SourceConfig.periodId := periodId
+│   │      (--periodId not required: calculated from the Business Date; the period is also stored on skipped decisions)
 │   ├─ nothing eligible and pending → Main submits NO job
 │   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources (bypassed under
 │   │                                                          --manualOverrun / --overrideDownload)
@@ -1041,6 +1074,11 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 | Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
 | Call `result.waitUntilFinish()` for streaming | Check source type first |
 | Leave READMEs stale after a code change | Update in the same commit |
+| Change date / period / eligibility logic without reading `DATE_SCHEDULING_RULES.md` | Read it first; if the change contradicts it, ask the owner |
+| Edit Parts 1–2 of `DATE_SCHEDULING_RULES.md`, or "fix" it to match the code | Ask the owner; only they change the contract |
+| Let `--manualOverrun` influence eligibility or date calculation | It only bypasses the COMPLETED check / overwrites storage |
+| Require `--periodId` for an item that has a run schedule | Calculate it in `RunDateCalculator` from the Business Date |
+| Silently guess a BAU behaviour the contract doesn't define | `NOT_EVALUABLE`, or record it in contract Part 3 |
 | Add `query_params_json` custom tokens that shadow alias names | Use distinct token names |
 | Put SMTP credentials in pipeline options | Use `--smtpPasswordSecretId` + Secret Manager |
 
@@ -1227,8 +1265,14 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --checkpointBqProject=my-gcp-project \
   --checkpointBqDataset=pipeline_metadata
 
-# Force re-run when DaRefer already shows COMPLETED (explicit operator override; BAU ManualForceRun —
-# also bypasses a scheduled item's maxFreqRunDay, but NOT its freqRunDay or the DAILY business-day check)
+# --periodId / --periodStart / --periodEnd above are only needed for an item with NO run schedule.
+# For an item with run_details they are calculated from the Business Date (--runDate, or today in
+# --businessTimeZone) + frequency + dayLag — leave them out (a --periodId passed anyway is ignored).
+# Only STATUS_CHECK always needs --periodId. See DATE_SCHEDULING_RULES.md.
+
+# Force re-run when DaRefer already shows COMPLETED (explicit operator override). ONLY about storage and
+# overwriting: it never changes eligibility or dates (owner decision D1) — also pass the --runDate that is
+# eligible for the item; a date outside its run window / on a DAILY non-business day is still skipped.
 # --manualOverrun=true
 
 # Business Date = --runDate if set (BAU ManualRunDateId), else today in this zone (default UTC):
@@ -1327,6 +1371,7 @@ Requires an `EmailSendUtility` discoverable via SPI; if none is on the classpath
 12. No separate source_config table. All source connector config is stored in `parameter_store` as JSON in `parameters_val_json`.
 8. Query token resolution order is always: alias tokens → standard tokens → custom tokens.
 9. Every code change is accompanied by a README update in the same commit.
+15. Date, period and eligibility logic conforms to `DATE_SCHEDULING_RULES.md` (Parts 1–2). The calculation lives only in `RunDateCalculator`; `--manualOverrun` never influences it; the period id is calculated (never required) for a scheduled item and is carried on every decision.
 10. A `data_source_checkpoints` LOADING row is created before every source download or report run, and updated to COMPLETED / FAILED_BNC / FAILED after. All data rows go to `data_source_records` as JSON blobs.
 13. A failure from one process type's own factory is classified into that type's exception (`DataSourceDownloadException` / `ReportProcessingException` / `PipelineException`) before it leaves the factory — never left as a raw `RuntimeException` for `Main` to guess at. `PipelineException` is the only one of the three allowed to wrap another of the three; the other two never wrap each other or themselves.
 14. Neither `PipelineResult.waitUntilFinish()` nor any driver-JVM poll loop is ever called anywhere in this framework's `DATA_SOURCE_DOWNLOAD`/`PIPELINE` paths. This deployment launches via a Dataflow Flex Template, whose launch contract requires `main()` to build the pipeline, call `pipeline.run()`, and exit promptly — the launch operation is considered complete once the launcher process exits, not once the submitted job finishes, so *any* blocking call in `main()` after `pipeline.run()` (a poll loop exactly as much as `waitUntilFinish()`) breaks the launch itself. Both process types therefore submit and return immediately; everything that used to block the driver JVM — waiting for a datasource, running the report, sending completion/failure email — now happens worker-side: `PostDownloadFinalizeTransform` for datasource finalization, `ReportFinalizeTransform` for `PIPELINE`'s report step, gated on a `Wait.on()` data-dependency barrier (not a sleep loop) against the datasource branches' finalize signals. See §8/§9/§17. `--processType=STATUS_CHECK` still exists as an optional, non-blocking, single-check diagnostic (`DataSourceStatusChecker.checkSingle()`/`checkPipeline()`) for anyone who wants to peek at readiness from outside the pipeline. The one exception is the legacy, `--reportName`-blank `PipelineFactory` batch path in `Main.runReportProcessing()`, which still calls `waitUntilFinish()` directly — a known gap left as-is because that path has no checkpoint table to gate on and is not launched via the Flex Template path this invariant otherwise covers.

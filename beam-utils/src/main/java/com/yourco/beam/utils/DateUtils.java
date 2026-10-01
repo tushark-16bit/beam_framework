@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
+import java.time.DateTimeException;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -60,13 +61,20 @@ public final class DateUtils {
      *
      * @param options pipeline options containing the optional {@code runDate} flag
      * @return the resolved run date
-     * @throws IllegalArgumentException if {@code runDate} is set but not valid ISO-8601
+     * @throws IllegalArgumentException if {@code runDate} is set but not valid ISO-8601, or
+     *         {@code --businessTimeZone} is not a valid IANA zone
      */
     public static LocalDate resolveRunDate(FrameworkOptions options) {
         String runDateStr = options.getRunDate();
         if (runDateStr == null || runDateStr.isBlank()) {
             String zone = options.getBusinessTimeZone();
-            ZoneId zoneId = (zone == null || zone.isBlank()) ? ZoneOffset.UTC : ZoneId.of(zone.trim());
+            ZoneId zoneId;
+            try {
+                zoneId = (zone == null || zone.isBlank()) ? ZoneOffset.UTC : ZoneId.of(zone.trim());
+            } catch (DateTimeException e) {
+                throw new IllegalArgumentException(
+                    "--businessTimeZone '" + zone + "' is not a valid IANA time zone (e.g. UTC, America/New_York)", e);
+            }
             LocalDate today = LocalDate.now(zoneId);
             LOG.info("--runDate not set; defaulting to today in {}: {}", zoneId, today);
             return today;

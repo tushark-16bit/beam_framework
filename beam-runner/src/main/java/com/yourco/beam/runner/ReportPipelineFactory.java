@@ -182,7 +182,8 @@ public final class ReportPipelineFactory {
     /**
      * BAU "does it still need to run?" check for a report: if this report is already
      * {@code COMPLETED} in RptRefer for the calculated period, skip it. Bypassed by
-     * {@code --manualOverrun} (BAU {@code ManualForceRun}).
+     * {@code --manualOverrun} — which is only about re-running/overwriting; it does not make an
+     * ineligible report eligible (that was decided by the schedule before this is called).
      *
      * <p>Applied only to a report that has a run schedule: unscheduled reports keep their
      * previous behaviour of always re-running, so existing CLI-driven runs don't change.
@@ -196,8 +197,8 @@ public final class ReportPipelineFactory {
             return false;
         }
         if (options.getManualOverrun()) {
-            LOG.info("--manualOverrun (ManualForceRun): report '{}' runs for period {} even if "
-                     + "already COMPLETED", reportName, decision.dates.periodId);
+            LOG.info("--manualOverrun: report '{}' runs for period {} even if already COMPLETED",
+                     reportName, decision.dates.periodId);
             return false;
         }
         boolean completed = new BigQueryReportCheckpointAdapter(options)

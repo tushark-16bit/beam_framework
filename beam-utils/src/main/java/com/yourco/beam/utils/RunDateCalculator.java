@@ -28,10 +28,18 @@ import java.util.regex.Pattern;
  * {@code COMPLETED}) — is answered by the callers against DaRefer/RptRefer, after this class says
  * the item is eligible and which period it is for.
  *
+ * <p><b>THE CONTRACT IS {@code DATE_SCHEDULING_RULES.md} (repo root). Read it before changing
+ * anything in this class, never change behaviour away from it without the owner's explicit
+ * approval, and if a change or a test contradicts it, stop and ask the owner.</b> Part 1 of that
+ * file is the BAU description verbatim; Part 2 holds the owner's decisions for this framework
+ * (manual overrun, optional period id, quarterly id format); Part 3 lists assumptions and pending
+ * confirmations.
+ *
  * <p>This is a port of existing BAU behaviour and is meant to stay <b>exactly</b> as BAU behaves,
  * including its quirks (each one is labelled {@code BAU PARITY} below). Points where the BAU
  * description didn't pin the behaviour down are labelled {@code OPEN QUESTION} with the choice
- * made here — confirm or correct them before relying on those paths.
+ * made here — they are the "Assumptions" in Part 3 of the contract; confirm or correct them
+ * before relying on those paths.
  *
  * <h2>Business Date vs Reporting Period</h2>
  * <ul>
@@ -47,23 +55,38 @@ import java.util.regex.Pattern;
  * <h2>Decision flow ({@link #evaluate})</h2>
  * <pre>
  *   no run schedule configured ─────────────────────────────► ELIGIBLE, dates = CLI flags
- *                                                              (pre-scheduling behaviour)
+ *                                                              (pre-scheduling behaviour; needs
+ *                                                              --periodId, else NOT_EVALUABLE)
  *   frequency missing/unsupported, calendarKey missing,
  *   calendar lookup fails, unparseable WD/lag expression ───► NOT_EVALUABLE  (skip + report;
  *                                                              re-evaluated next execution)
  *   DAILY and Business Date not a business day ─────────────► NON_BUSINESS_DAY (skip; no catch-up)
  *   non-DAILY and Business Date &lt; freqRunDay date ─────────► NOT_YET_ELIGIBLE (skip; recheck)
- *   non-DAILY and Business Date &gt; maxFreqRunDay date ───────► EXPIRED  (skip) — unless
- *                                                              --manualOverrun (BAU ManualForceRun)
- *   otherwise ──────────────────────────────────────────────► ELIGIBLE, dates = calculated period
+ *   non-DAILY and Business Date &gt; maxFreqRunDay date ───────► EXPIRED  (skip)
+ *   otherwise ──────────────────────────────────────────────► ELIGIBLE
  * </pre>
- * Nothing is persisted for a skip — BAU re-evaluates every item from scratch on every scheduler
+ * The reporting period is calculated <b>first</b> and stored on the decision
+ * ({@link ScheduleDecision#dates}) whatever the status — a skipped item still shows which period it
+ * would have processed. Only {@code NOT_EVALUABLE} may have no dates. Callers must still use the
+ * dates only when {@link ScheduleDecision#shouldRun()}.
+ *
+ * <p>Nothing is persisted for a skip — BAU re-evaluates every item from scratch on every scheduler
  * execution, so a skipped or failed item is simply considered again next time while its window is
  * open.
  *
- * <h2>{@code --manualOverrun} (BAU {@code ManualForceRun})</h2>
- * Bypasses the {@code maxFreqRunDay} check (here) and the {@code COMPLETED} check (callers). It
- * does <b>not</b> bypass the {@code freqRunDay} check or the DAILY business-day check.
+ * <h2>{@code --manualOverrun} does NOT affect any of this (owner decision D1)</h2>
+ * It is only about storage and overwriting — callers bypass the {@code COMPLETED} check and
+ * supersede the stored data. Eligibility and date calculation here never look at it: to force a
+ * re-run the caller passes the {@code --runDate} that is eligible under the normal rules. (This
+ * deliberately differs from BAU's {@code ManualForceRun}, which also bypassed the max window.)
+ *
+ * <h2>Period id is calculated, not required (owner decisions D2, D3)</h2>
+ * For a scheduled item {@link RunDates#periodId} comes from Business Date + {@code frequency} +
+ * {@code dayLag}; a {@code --periodId} passed as well is ignored (with a warning if it differs).
+ * Encodings: DAILY {@code yyyyMMdd}, MONTHLY {@code yyyyMM}, QUARTERLY {@code yyyyMMddqq}
+ * (first date of the quarter + zero-padded quarter number, Q1 2026 → {@code 2026010101}),
+ * ANNUALLY {@code yyyy}. An item with no run schedule has no frequency to calculate from, so it
+ * still needs {@code --periodId}.
  *
  * <h2>Calendar</h2>
  * Every business-day question goes to the {@link BusinessCalendar} for the item's
@@ -90,8 +113,13 @@ public final class RunDateCalculator {
      */
     private static final Pattern RUN_DAY = Pattern.compile("WD([+-])(\\d+)");
 
-    /** DAILY lag expression: {@code WD+n} = n business days back, {@code CAL+n} = n calendar days back. */
-    private static final Pattern DAILY_LAG = Pattern.compile("(WD|CAL)([+-])(\\d+)");
+    /**
+     * DAILY lag expression: {@code WD+n} = n business days back, {@code CAL+n} = n calendar days
+     * back. Only the {@code +} form is defined for DAILY (contract Part 1 §5); a {@code -} form is
+     * rejected, not guessed (contract Part 3, P2).
+     */
+    private static final Pattern DAILY_LAG = Pattern.compile("(WD|CAL)\\+(\\d+)");
+    private static final Pattern DAILY_LAG_NEGATIVE = Pattern.compile("(WD|CAL)-(\\d+)");
 
     /** Guard against a calendar with no business days sending the day-by-day walks into an endless loop. */
     private static final int MAX_DAYS_SCANNED = 400;
@@ -125,24 +153,36 @@ public final class RunDateCalculator {
     public static ScheduleDecision evaluate(RunScheduleConfig schedule, FrameworkOptions options,
                                             ItemType itemType, BusinessCalendarProvider calendars) {
         if (!schedule.hasSchedule()) {
-            // No run details at all → pre-scheduling behaviour: CLI dates, always eligible.
-            return ScheduleDecision.unscheduled(fromOptions(options));
+            // No run details at all → pre-scheduling behaviour: CLI dates, always eligible. There
+            // is no frequency to calculate a period id from, so --periodId must have been passed.
+            RunDates dates = fromOptions(options);
+            if (dates.periodId <= 0) {
+                return ScheduleDecision.notEvaluable(dates.runDate, dates,
+                    "no run schedule is configured for this item, so its period id cannot be "
+                    + "calculated — pass --periodId, or configure run_details");
+            }
+            return ScheduleDecision.unscheduled(dates);
         }
-        return evaluate(schedule, DateUtils.resolveRunDate(options), options.getManualOverrun(),
-                        itemType, calendars);
+        // Scheduled: Business Date = --runDate or today; the period id is calculated from it.
+        // --manualOverrun is deliberately not passed down — it never affects eligibility or dates.
+        ScheduleDecision decision = evaluate(schedule, DateUtils.resolveRunDate(options),
+                                             itemType, calendars);
+        if (decision.dates != null && options.getPeriodId() > 0
+                && options.getPeriodId() != decision.dates.periodId) {
+            LOG.warn("--periodId={} ignored: the calculated period id for business date {} is {}",
+                     options.getPeriodId(), decision.businessDate, decision.dates.periodId);
+        }
+        return decision;
     }
 
     /**
      * The full BAU decision for one item on one Business Date. Pure function of its inputs —
      * this is the method the parity tests exercise.
      *
-     * @param businessDate   BAU Business Date ({@code --runDate}, or today in the framework zone)
-     * @param manualForceRun BAU {@code ManualForceRun} ({@code --manualOverrun}): bypasses only
-     *                       the {@code maxFreqRunDay} check here
+     * @param businessDate BAU Business Date ({@code --runDate}, or today in the framework zone)
      */
     public static ScheduleDecision evaluate(RunScheduleConfig schedule, LocalDate businessDate,
-                                            boolean manualForceRun, ItemType itemType,
-                                            BusinessCalendarProvider calendars) {
+                                            ItemType itemType, BusinessCalendarProvider calendars) {
         // ── Step 1: frequency — selects DAILY (business-day gate) vs window logic, and the
         //    period grain. Missing/unsupported → no task is created; re-evaluated next execution.
         String frequency = schedule.frequency;
@@ -166,16 +206,27 @@ public final class RunDateCalculator {
                 "calendarKey '" + schedule.calendarKey + "' could not be resolved: " + e.getMessage());
         }
 
+        // ── Step 3: WHICH period (and, for a data source, WHAT date ends it). Calculated before the
+        //    eligibility checks so the period is stored on every decision, skipped ones included.
+        RunDates dates;
         try {
-            // ── Step 3: WHEN — eligibility on the Business Date.
-            LocalDate freqRunDate    = null;
-            LocalDate maxFreqRunDate = null;
+            dates = itemType == ItemType.REPORT
+                ? calculateLastPeriod(schedule, businessDate, calendar)
+                : calculateDataSourcePeriod(schedule, businessDate, calendar);
+        } catch (RuntimeException e) {
+            // Unparseable dayLag, or the calendar failing during the calculation.
+            return ScheduleDecision.notEvaluable(businessDate, null, e.getMessage());
+        }
+
+        // ── Step 4: WHEN — eligibility on the Business Date.
+        LocalDate freqRunDate    = null;
+        LocalDate maxFreqRunDate = null;
+        try {
             if (RunScheduleConfig.DAILY.equals(frequency)) {
                 // DAILY: no run window at all (freqRunDay/maxFreqRunDay ignored). The Business Date
                 // itself must be a business day. A skipped weekend/holiday is never caught up (BAU).
-                // ManualForceRun does NOT bypass this.
                 if (!calendar.isBusinessDay(businessDate)) {
-                    return ScheduleDecision.skip(ScheduleDecision.Status.NON_BUSINESS_DAY,
+                    return ScheduleDecision.skip(ScheduleDecision.Status.NON_BUSINESS_DAY, dates,
                         businessDate, null, null,
                         businessDate + " is not a business day in calendar '" + schedule.calendarKey + "'");
                 }
@@ -191,38 +242,27 @@ public final class RunDateCalculator {
                 }
                 if (freqRunDate != null && businessDate.isBefore(freqRunDate)) {
                     // Before the window opens → NOT YET ELIGIBLE; checked again next execution.
-                    // ManualForceRun does NOT bypass this.
-                    return ScheduleDecision.skip(ScheduleDecision.Status.NOT_YET_ELIGIBLE,
+                    return ScheduleDecision.skip(ScheduleDecision.Status.NOT_YET_ELIGIBLE, dates,
                         businessDate, freqRunDate, maxFreqRunDate,
                         "business date " + businessDate + " is before freqRunDay "
                         + schedule.freqRunDay + " (" + freqRunDate + ")");
                 }
                 if (maxFreqRunDate != null && businessDate.isAfter(maxFreqRunDate)) {
-                    if (!manualForceRun) {
-                        // After the window closes → EXPIRED; this period is no longer
-                        // processed automatically.
-                        return ScheduleDecision.skip(ScheduleDecision.Status.EXPIRED,
-                            businessDate, freqRunDate, maxFreqRunDate,
-                            "business date " + businessDate + " is after maxFreqRunDay "
-                            + schedule.maxFreqRunDay + " (" + maxFreqRunDate + ")");
-                    }
-                    LOG.info("--manualOverrun (ManualForceRun): bypassing expired window — business "
-                             + "date {} is after maxFreqRunDay {} ({})",
-                             businessDate, schedule.maxFreqRunDay, maxFreqRunDate);
+                    // After the window closes → EXPIRED; this period is no longer processed
+                    // automatically. (--manualOverrun does not change this — owner decision D1.)
+                    return ScheduleDecision.skip(ScheduleDecision.Status.EXPIRED, dates,
+                        businessDate, freqRunDate, maxFreqRunDate,
+                        "business date " + businessDate + " is after maxFreqRunDay "
+                        + schedule.maxFreqRunDay + " (" + maxFreqRunDate + ")");
                 }
                 // No maxFreqRunDay → no explicit upper bound: eligible until the period calculation
-                // below rolls over to the next reporting cycle (BAU).
+                // above rolls over to the next reporting cycle (BAU).
             }
-
-            // ── Step 4: WHICH period (and, for a data source, WHAT date ends it).
-            RunDates dates = itemType == ItemType.REPORT
-                ? calculateLastPeriod(schedule, businessDate, calendar)
-                : calculateDataSourcePeriod(schedule, businessDate, calendar);
             return ScheduleDecision.eligible(dates, freqRunDate, maxFreqRunDate);
 
         } catch (RuntimeException e) {
-            // Unparseable run-day/lag expression, or the calendar failing mid-calculation.
-            return ScheduleDecision.notEvaluable(businessDate, e.getMessage());
+            // Unparseable run-day expression, or the calendar failing while locating the window.
+            return ScheduleDecision.notEvaluable(businessDate, dates, e.getMessage());
         }
     }
 
@@ -360,9 +400,10 @@ public final class RunDateCalculator {
      *   <li>{@code CAL+n} → n calendar days back, no business-day adjustment (Monday with
      *       {@code CAL+1} → Sunday).</li>
      *   <li>OPEN QUESTION: blank {@code dayLag} — assumed lag 0 (period = Business Date).</li>
-     *   <li>OPEN QUESTION: {@code WD-n}/{@code CAL-n} on a DAILY item — BAU only describes the
-     *       {@code +} form. Assumed: same as {@code +n} (magnitude counted back).</li>
-     *   <li>Anything else (e.g. {@code CD+1}) → not evaluable.</li>
+     *   <li>{@code WD-n}/{@code CAL-n} on a DAILY item — the contract defines only the {@code +}
+     *       form, so a negative lag is <b>not evaluable</b> rather than guessed (contract Part 3,
+     *       P2: owner to confirm what BAU does).</li>
+     *   <li>Anything else (e.g. {@code CD+1}, {@code wd+1}) → not evaluable.</li>
      * </ul>
      * periodId {@code yyyyMMdd}; period start = end = that day.
      *
@@ -374,8 +415,8 @@ public final class RunDateCalculator {
      * configuration looks like a numeric lag. Case-sensitive prefix match.
      * <ul>
      *   <li>MONTHLY → periodId {@code yyyyMM}.</li>
-     *   <li>QUARTERLY → OPEN QUESTION: BAU "quarter period ID" format not described. Assumed
-     *       {@code yyyy * 10 + quarter} (Q1 2026 → 20261).</li>
+     *   <li>QUARTERLY → {@code yyyyMMddqq}: first date of the quarter + zero-padded quarter number
+     *       (owner decision D3): Q1 2026 → {@code 2026010101}, Q3 2026 → {@code 2026070103}.</li>
      *   <li>ANNUALLY → periodId {@code yyyy}.</li>
      * </ul>
      */
@@ -403,7 +444,7 @@ public final class RunDateCalculator {
                 if (!currentPeriod) quarterStart = quarterStart.minusMonths(3);
                 LocalDate quarterEnd = YearMonth.from(quarterStart.plusMonths(2)).atEndOfMonth();
                 int quarter = (quarterStart.getMonthValue() - 1) / 3 + 1;
-                return new Period(quarterStart, quarterEnd, quarterStart.getYear() * 10 + quarter);
+                return new Period(quarterStart, quarterEnd, quarterPeriodId(quarterStart, quarter));
             }
             case RunScheduleConfig.ANNUALLY -> {
                 int year = currentPeriod ? businessDate.getYear() : businessDate.getYear() - 1;
@@ -414,16 +455,28 @@ public final class RunDateCalculator {
         }
     }
 
+    /** QUARTERLY period id {@code yyyyMMddqq} — fits an int until the year 2147. */
+    static int quarterPeriodId(LocalDate quarterStart, int quarter) {
+        long yyyymmdd = quarterStart.getYear() * 10000L + quarterStart.getMonthValue() * 100L
+                      + quarterStart.getDayOfMonth();
+        return Math.toIntExact(yyyymmdd * 100 + quarter);
+    }
+
     private static LocalDate applyDailyLag(String dayLag, LocalDate businessDate, BusinessCalendar calendar) {
         if (dayLag == null) {
             return businessDate;
         }
+        if (DAILY_LAG_NEGATIVE.matcher(dayLag).matches()) {
+            throw new IllegalArgumentException(
+                "DAILY dayLag '" + dayLag + "' is negative; only WD+n / CAL+n are defined for DAILY "
+                + "(DATE_SCHEDULING_RULES.md Part 3, P2 — owner to confirm)");
+        }
         Matcher m = DAILY_LAG.matcher(dayLag);
         if (!m.matches()) {
             throw new IllegalArgumentException(
-                "DAILY dayLag '" + dayLag + "' is not WD±n or CAL±n");
+                "DAILY dayLag '" + dayLag + "' is not WD+n or CAL+n");
         }
-        int n = Integer.parseInt(m.group(3));
+        int n = Integer.parseInt(m.group(2));
         return "WD".equals(m.group(1))
             ? minusBusinessDays(businessDate, n, calendar)
             : businessDate.minusDays(n);
@@ -516,7 +569,7 @@ public final class RunDateCalculator {
     public static final class ScheduleDecision {
 
         public enum Status {
-            /** Run it (subject to the caller's COMPLETED check). {@link #dates} is set. */
+            /** Run it (subject to the caller's COMPLETED check). */
             ELIGIBLE,
             /** Non-DAILY, before the freqRunDay date. Skip; recheck next execution. */
             NOT_YET_ELIGIBLE,
@@ -529,7 +582,12 @@ public final class RunDateCalculator {
         }
 
         public final Status    status;
-        /** Set only when {@link #status} is {@link Status#ELIGIBLE}. */
+        /**
+         * The calculated Business Date + Reporting Period (including the period id). Set for every
+         * status whenever the period could be calculated — skipped statuses carry the period they
+         * would have processed. Null only for some {@link Status#NOT_EVALUABLE} decisions. Use
+         * it to run only when {@link #shouldRun()}.
+         */
         public final RunDates  dates;
         public final LocalDate businessDate;
         /** Null when not configured or not reached (DAILY, or evaluation stopped earlier). */
@@ -563,15 +621,20 @@ public final class RunDateCalculator {
                 maxFreqRunDate, true, "eligible");
         }
 
-        static ScheduleDecision skip(Status status, LocalDate businessDate, LocalDate freqRunDate,
-                                     LocalDate maxFreqRunDate, String detail) {
-            return new ScheduleDecision(status, null, businessDate, freqRunDate, maxFreqRunDate,
+        static ScheduleDecision skip(Status status, RunDates dates, LocalDate businessDate,
+                                     LocalDate freqRunDate, LocalDate maxFreqRunDate, String detail) {
+            return new ScheduleDecision(status, dates, businessDate, freqRunDate, maxFreqRunDate,
+                true, detail);
+        }
+
+        /** {@code dates} may be null when the period itself could not be calculated. */
+        static ScheduleDecision notEvaluable(LocalDate businessDate, RunDates dates, String detail) {
+            return new ScheduleDecision(Status.NOT_EVALUABLE, dates, businessDate, null, null,
                 true, detail);
         }
 
         static ScheduleDecision notEvaluable(LocalDate businessDate, String detail) {
-            return new ScheduleDecision(Status.NOT_EVALUABLE, null, businessDate, null, null,
-                true, detail);
+            return notEvaluable(businessDate, null, detail);
         }
 
         public boolean shouldRun() { return status == Status.ELIGIBLE; }

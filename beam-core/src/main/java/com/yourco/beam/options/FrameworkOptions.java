@@ -77,11 +77,14 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getDatasourceName();
     void setDatasourceName(String value);
 
-    @Description("Period identifier for this run as an integer. Must exist in the MSTR_Per table. "
-                 + "Encoding — MONTHLY: YYYYMM (e.g. 202401), "
-                 + "DAILY: YYYYMMDD (e.g. 20240115), "
-                 + "QUARTERLY: YYYYMMDDQQ (e.g. 2024011501). "
-                 + "Required for both DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING. "
+    @Description("Period identifier for this run as an integer. OPTIONAL for any data source or "
+                 + "report that has a run schedule (run_details): its period id is then calculated "
+                 + "from the Business Date (--runDate, or today) + frequency + dayLag, and a value "
+                 + "passed here is ignored. Still required for an item with NO run schedule (no "
+                 + "frequency to calculate from) and for STATUS_CHECK. "
+                 + "Encoding — DAILY: YYYYMMDD (e.g. 20240115), MONTHLY: YYYYMM (e.g. 202401), "
+                 + "QUARTERLY: YYYYMMDDQQ = first date of the quarter + quarter number "
+                 + "(e.g. 2024010101 for Q1 2024), ANNUALLY: YYYY. "
                  + "Stored as INT64 in DaRefer.per_id and RptRefer.per_id.")
     @Default.Integer(0)
     int getPeriodId();
@@ -113,7 +116,12 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
                  + "Also applies under --processType=PIPELINE: every DATA_SOURCE step in the sequence gets "
                  + "this same bypass-and-supersede treatment (PipelineSequenceFactory passes this same "
                  + "options object straight into DataSourcePipelineFactory, unchanged). The terminal REPORT "
-                 + "step needs no equivalent flag — it has no COMPLETED guard of its own and always re-runs.")
+                 + "step: a report that has a run schedule and is already COMPLETED for its calculated "
+                 + "period is skipped unless this flag is set; an unscheduled report always re-runs. "
+                 + "This flag is ONLY about storage and overwriting: it never changes whether an item is "
+                 + "eligible to run or which dates are calculated (run window, DAILY business-day gate, "
+                 + "period) — to force a re-run, also pass the --runDate that is eligible under the item's "
+                 + "run schedule (see DATE_SCHEDULING_RULES.md, decision D1).")
     @Default.Boolean(false)
     boolean getManualOverrun();
     void setManualOverrun(boolean value);

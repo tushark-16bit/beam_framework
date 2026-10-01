@@ -16,7 +16,7 @@ Every other module depends on this one — it defines the language the whole fra
 | `model` | `DataSourceCheckpoint`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint model, per-source transform and validation config. `DataSourceCheckpoint` status codes: `LOADING`, `COMPLETED`, `FAILED_BNC`, `FAILED_TRANSFORM`, `FAILED`. (`DaRec` record rows have no dedicated model class — `DataSourceRecordSinkTransform` builds each paginated JSON row directly.) |
 | `model` | `DataTransformConfig` | Optional post-storage SQL transform for one source's rows, run within the same `DATA_SOURCE_DOWNLOAD` run; carried on `SourceConfig.dataTransformConfig` |
 | `model` | `RunScheduleConfig` | Optional Finance Automation run schedule for a data source (`run_details_json`) or report (`run_details`): `frequency` (`DAILY`/`MONTHLY`/`QUARTERLY`/`ANNUALLY`), `freqRunDay` (read from `freqDtl` for reports), `maxFreqRunDay` (`WD±n` string), `dayLag`, `dateType` (`lastBusDayMonth`/`lastDayMonth`), `calendarKey` — raw strings, interpreted only by `RunDateCalculator` (beam-utils) |
-| `model` | `RunDates` | The dates one eligible source/report run operates on — `runDate` = BAU Business Date, `periodStart`/`periodEnd`/`periodId` = BAU Reporting Period (`periodEnd` per data-source `dateType`). Produced only by `RunDateCalculator.evaluateDataSource()`/`evaluateReport()`; every flow reads its dates from it rather than the CLI flags. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`), email tokens, FILE `{date}` and report GCS file names (empty when null); `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for FILE `{fileDate}`; `periodId` int — DAILY `yyyyMMdd`, MONTHLY `yyyyMM`, QUARTERLY `yyyy*10+q`, ANNUALLY `yyyy` |
+| `model` | `RunDates` | The dates one eligible source/report run operates on — `runDate` = BAU Business Date, `periodStart`/`periodEnd`/`periodId` = BAU Reporting Period (`periodEnd` per data-source `dateType`). Produced only by `RunDateCalculator.evaluateDataSource()`/`evaluateReport()`; every flow reads its dates from it rather than the CLI flags. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`), email tokens, FILE `{date}` and report GCS file names (empty when null); `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for FILE `{fileDate}`; `periodId` int — DAILY `yyyyMMdd`, MONTHLY `yyyyMM`, QUARTERLY `yyyyMMddqq` (first date of the quarter + 2-digit quarter number, Q1 2026 → `2026010101`), ANNUALLY `yyyy` |
 | `model` | `SourceFailureEmailConfig` | Optional failure-notification email config carried on `SourceConfig`; populated from `failure_email_*` keys in `parameters_val_json` |
 | `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables. `ReportConfig.runScheduleConfig` is the report's own optional run schedule (`run_details`). `ReportEmailConfig` now also carries `fromAddress`/`encrypted` (from `email.from_address`/`email.encrypted`) |
 | `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
@@ -74,10 +74,12 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 ### Data source selection (DATA_SOURCE_DOWNLOAD only)
 ```
 --datasourceName=trades
---periodId=2024-01-15
+--periodId=20240115          # OPTIONAL when the source has run_details — then calculated from the Business
+                             # Date (--runDate / today in --businessTimeZone); required for an unscheduled source
 --subprocessName=eod
 --overrideDownload=false    # legacy re-run bypass; prefer --manualOverrun
---manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer.
+--manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer and overwrites storage.
+                             # NEVER changes eligibility or calculated dates (pass the eligible --runDate).
                             # DaRefer always gets a fresh row (never overwritten); once the new
                             # run reaches COMPLETED, the superseded run's DaRec rows are deleted.
 ```

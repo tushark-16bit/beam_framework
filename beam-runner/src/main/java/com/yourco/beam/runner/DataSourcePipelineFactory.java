@@ -198,7 +198,8 @@ public final class DataSourcePipelineFactory {
 
     /**
      * Logs a source skipped by its schedule. The ordinary BAU outcomes — not yet eligible,
-     * expired window, DAILY on a non-business day — are expected and only logged. NOT_EVALUABLE
+     * expired window, DAILY on a non-business day — are expected and only logged (even under
+     * {@code --manualOverrun}, which never overrides eligibility). NOT_EVALUABLE
      * (bad frequency, missing/unknown calendarKey, no calendar provider, unparseable WD/lag) is a
      * configuration problem: it is also sent through {@link FailureNotifier} as a
      * {@code DataSourceDownloadException(INVALID_INPUT)} so it isn't lost in the logs — without
@@ -373,11 +374,9 @@ public final class DataSourcePipelineFactory {
                 options.getDatasourceName(), options.getSubprocessName(), options.getPeriodId(),
                 "--datasourceName is required for DATA_SOURCE_DOWNLOAD", null);
         }
-        if (options.getPeriodId() <= 0) {
-            throw new DataSourceDownloadException(DataSourceDownloadException.Reason.INVALID_INPUT,
-                options.getDatasourceName(), options.getSubprocessName(), options.getPeriodId(),
-                "--periodId is required for DATA_SOURCE_DOWNLOAD", null);
-        }
+        // --periodId is NOT required here: a source with a run schedule gets its period id
+        // calculated from the Business Date (RunDateCalculator). A source without one is reported
+        // as not evaluable per item, with a message asking for --periodId.
     }
 
     private static List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs,

@@ -215,6 +215,10 @@ combines `--runDate`, `--businessDayOffset`, and `--calendarName` automatically.
 
 ### Finance Automation scheduling — `RunDateCalculator`
 
+> The rules live in **[`DATE_SCHEDULING_RULES.md`](DATE_SCHEDULING_RULES.md)** — the BAU description
+> verbatim plus the owner's decisions. Read it before changing anything date-related; it is not to be
+> altered, nor the code to deviate from it, without the owner's approval.
+
 Every data source (`run_details_json` in its params) and every report (`run_details` in its
 config) can carry its own run schedule. All flows — `DATA_SOURCE_DOWNLOAD`, `REPORT_PROCESSING`
 and both halves of `PIPELINE` — are governed by one set of rules, a port of the existing BAU
@@ -222,12 +226,16 @@ Finance Automation framework: `frequency + freqRunDay (freqDtl for reports) + ma
 calendarKey` decide **whether it runs today** (DAILY: business day only; others: inside the
 inclusive run window), `frequency + dayLag` decide **which period** it processes, and
 `dateType + calendarKey` the **period-end date** (data sources). Items outside their window are
-skipped, not failed, and re-evaluated on every run; `--manualOverrun` bypasses the max-window and
-COMPLETED checks. With no schedule configured an item uses exactly
-`--runDate`/`--periodStart`/`--periodEnd`/`--periodId`, so existing runs are unchanged. The only
-piece to implement is the calendar DB lookup (`BusinessCalendarProvider`, SPI). Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
+skipped, not failed, and re-evaluated on every run. **`--periodId` is optional**: for an item with a
+schedule the period id is calculated from the Business Date (`--runDate`, or today in
+`--businessTimeZone`) and stored with the dates. **`--manualOverrun` never changes eligibility or
+dates** — it only bypasses the COMPLETED check and overwrites stored data, so when forcing a re-run
+also pass the `--runDate` that is eligible. With no schedule configured an item uses exactly
+`--runDate`/`--periodStart`/`--periodEnd`/`--periodId` (and needs `--periodId`), so existing runs are
+unchanged. The only piece to implement is the calendar DB lookup (`BusinessCalendarProvider`, SPI). Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
 email tokens and report file names; `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for
-FILE `{fileDate}`; `periodId` as an int in the `--periodId` encoding. See `beam-utils/README.md`.
+FILE `{fileDate}`; `periodId` as an int — DAILY `yyyyMMdd`, MONTHLY `yyyyMM`, QUARTERLY `yyyyMMddqq` (first date of the
+quarter + quarter number, Q1 2026 → `2026010101`), ANNUALLY `yyyy`. See `beam-utils/README.md`.
 
 ---
 
@@ -530,7 +538,8 @@ options={
     "--parentId":             "TRADING",          # → parameter_group_name in parameter_store
     "--reportName":           "daily_trades_summary",
     "--reportSubprocess":     "eod",
-    "--periodId":             "202401",           # integer, e.g. YYYYMM or YYYYMMDD
+    "--periodId":             "202401",           # integer, e.g. YYYYMM or YYYYMMDD — only needed for an
+                                                  # item with no run schedule; calculated otherwise
     "--periodStart":          "2024-01-01",
     "--periodEnd":            "2024-01-31",
     "--runDate":              "{{ ds }}",

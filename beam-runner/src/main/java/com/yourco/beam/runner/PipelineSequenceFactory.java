@@ -102,8 +102,8 @@ public final class PipelineSequenceFactory {
         if (options.getManualOverrun()) {
             LOG.info("--manualOverrun=true: every datasource this report declares will bypass "
                      + "its COMPLETED guard and re-download, superseding its previous run once "
-                     + "complete — same as standalone DATA_SOURCE_DOWNLOAD. The terminal REPORT "
-                     + "step always re-runs regardless (it has no COMPLETED guard of its own).");
+                     + "complete — same as standalone DATA_SOURCE_DOWNLOAD. A scheduled report already "
+                     + "COMPLETED for its period also re-runs. Eligibility and dates are NOT affected.");
         }
 
         ReportConfig reportConfig;
@@ -276,10 +276,8 @@ public final class PipelineSequenceFactory {
                 options.getReportName(), options.getReportSubprocess(), options.getPeriodId(),
                 "--reportName is required for PIPELINE");
         }
-        if (options.getPeriodId() <= 0) {
-            throw new PipelineException(PipelineException.Reason.CONFIGURATION_ERROR,
-                options.getReportName(), options.getReportSubprocess(), options.getPeriodId(),
-                "--periodId is required for PIPELINE");
-        }
+        // --periodId is NOT required: the report's and every datasource's period id is calculated
+        // from the Business Date by RunDateCalculator. An item without a run schedule is reported
+        // as not evaluable, with a message asking for --periodId.
     }
 }
