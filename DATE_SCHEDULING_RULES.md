@@ -613,8 +613,7 @@ owner the same day — see D3 and D4.)
 5. **Exact, case-sensitive matching** of `WD`/`CAL` prefixes, `lastBusDayMonth` and frequency names (`monthly` ≠ `MONTHLY`).
 6. **Report `paramReplace[].dateType`** (`periodId` / `RunDate` / period end + `periodOffset`, Part 1 §7B) — not implemented; its config shape and `periodOffset` unit are not described.
 7. **A report whose data sources have a different frequency** — a report looks its data sources up by its own `periodId`; mapping between differing frequencies is not implemented.
-8. **`--overrideDownload`** still bypasses only the COMPLETED check for data sources (it is not `--manualOverrun`).
-9. **`maxFreqRunDay`** is read as a `WD±n` string like `freqRunDay`; a bare number (`5`) is NOT_EVALUABLE.
+8. **`maxFreqRunDay`** is read as a `WD±n` string like `freqRunDay`; a bare number (`5`) is NOT_EVALUABLE.
 
 ### How the contract maps to code
 

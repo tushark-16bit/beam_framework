@@ -382,10 +382,8 @@ public final class DataSourcePipelineFactory {
     private static List<SourceConfig> filterByCheckpoint(List<SourceConfig> configs,
                                                           BigQueryDataSourceCheckpointAdapter adapter,
                                                           FrameworkOptions options) {
-        boolean forceRerun = options.getManualOverrun() || options.getOverrideDownload();
-        if (forceRerun) {
-            String flag = options.getManualOverrun() ? "--manualOverrun" : "--overrideDownload";
-            LOG.info("{} = true: skipping COMPLETED checkpoint guard, re-downloading all sources", flag);
+        if (options.getManualOverrun()) {
+            LOG.info("--manualOverrun=true: skipping COMPLETED checkpoint guard, re-downloading all sources");
             return configs;
         }
         return configs.stream()

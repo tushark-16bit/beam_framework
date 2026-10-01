@@ -110,7 +110,7 @@ sequenceDiagram
     loop for each SourceConfig
         DSF->>Checkpoint: isCompleted(srce_nm, per_id)
         Checkpoint-->>DSF: true / false
-        alt already COMPLETED and not overrideDownload
+        alt already COMPLETED and not manualOverrun
             DSF->>DSF: skip this source
         else
             DSF->>Checkpoint: createCheckpoint(srce_nm, per_id, fl_nm)

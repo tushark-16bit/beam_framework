@@ -61,7 +61,7 @@ DataSourcePipelineFactory.assemble(options)
     │        is calculated — --periodId not required for a scheduled source; --manualOverrun has no effect here)
     │
     ├─ 2. BigQueryDataSourceCheckpointAdapter.isCompleted()  skip COMPLETED sources
-    │       (bypassed entirely when --manualOverrun=true or --overrideDownload=true)
+    │       (bypassed entirely when --manualOverrun=true)
     │
     ├─ 2b. Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE the new
     │        checkpoint is created — captured so PostDownloadFinalizeTransform can delete this

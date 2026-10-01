@@ -77,7 +77,6 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 --periodId=20240115          # IGNORED — the source needs run_details + a calendar, and its period id is
                              # calculated from the Business Date (--runDate / today in --businessTimeZone)
 --subprocessName=eod
---overrideDownload=false    # legacy re-run bypass; prefer --manualOverrun
 --manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer and overwrites storage.
                              # NEVER changes eligibility or calculated dates (pass the eligible --runDate).
                             # DaRefer always gets a fresh row (never overwritten); once the new

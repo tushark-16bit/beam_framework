@@ -20,7 +20,7 @@ import java.util.Map;
  * <h2>extraParams</h2>
  * A freeform string→string map persisted to {@code extra_params_json} in the task table
  * and included in the manifest. Use it for any pipeline flag that doesn't have a
- * dedicated field here (e.g. {@code overrideDownload=true}, {@code runner=DataflowRunner}).
+ * dedicated field here (e.g. {@code manualOverrun=true}, {@code runner=DataflowRunner}).
  */
 public final class RunSpec {
 

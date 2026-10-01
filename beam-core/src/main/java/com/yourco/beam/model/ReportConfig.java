@@ -43,7 +43,7 @@ public final class ReportConfig implements Serializable {
     public final int    periodId;
     /**
      * When true, run even if a {@code COMPLETED} status row already exists for this
-     * report + period. Acts like {@code --overrideDownload} but for reports.
+     * report + period. Acts like {@code --manualOverrun} but for reports.
      */
     public final boolean overrideKey;
 

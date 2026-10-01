@@ -467,7 +467,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 | 1 | Fetch source configs from `parameter_store` for (TRADING, trades, eod) | — |
 | 2 | Fetch `parameter_store` row for (TRADING, trades, eod) | — |
 | 3 | Validate required parameters present in BQ | — |
-| 4 | Check DaRefer — skip if `sta_cd=COMPLETED` already exists (unless `--overrideDownload`) | — |
+| 4 | Check DaRefer — skip if `sta_cd=COMPLETED` already exists (unless `--manualOverrun`) | — |
 | 5 | `createCheckpoint('trades', '202401', '<bq-table-ref>')` → DaRefer row | → **LOADING** |
 | 6 | Dataflow: read source → apply transforms → paginate at ≤250 rows/page → write each page as one DaRec row (`row_da_json_tx` = JSON array) | — |
 | 7 | `waitUntilFinish()` | — |
@@ -561,7 +561,7 @@ VALUES (
 |--------|---------|---------|
 | `--datasourceName` | required | Source name — `parameter_name` key in `parameter_store` |
 | `--subprocessName` | `default` | Subprocess variant e.g. EOD, INTRADAY |
-| `--overrideDownload` | `false` | Re-download even if DaRefer shows COMPLETED |
+| `--manualOverrun` | `false` | Re-download even if DaRefer shows COMPLETED (supersedes the previous run's rows) |
 
 ### REPORT_PROCESSING flags
 

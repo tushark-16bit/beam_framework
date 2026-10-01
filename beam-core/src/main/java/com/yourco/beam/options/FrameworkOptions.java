@@ -28,7 +28,7 @@ import org.apache.beam.sdk.options.Validation;
  * <h2>Option groups</h2>
  * <ul>
  *   <li><b>Process control</b> — processType, jobRunId</li>
- *   <li><b>Data source selection</b> — datasourceName, periodId, subprocessName, overrideDownload</li>
+ *   <li><b>Data source selection</b> — datasourceName, periodId, subprocessName, manualOverrun</li>
  *   <li><b>Parameter BQ store</b> — BQ project/dataset/table names for parameter_store</li>
  *   <li><b>Checkpoint</b> — BigQuery project/dataset/table for run state tracking</li>
  *   <li><b>Run date</b> — business date for report pipelines (calendarName is in parameter_store)</li>
@@ -97,19 +97,10 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     String getSubprocessName();
     void setSubprocessName(String value);
 
-    @Description("When true, re-downloads data even if a COMPLETED DaRefer row exists for "
-                 + "this (datasourceName, periodId). Use for forced reprocessing. "
-                 + "Default is false: sources with sta_cd=COMPLETED for the current period are skipped. "
-                 + "Prefer --manualOverrun for explicit operator-initiated re-runs.")
-    @Default.Boolean(false)
-    boolean getOverrideDownload();
-    void setOverrideDownload(boolean value);
-
     @Description("Explicit operator override key. When true, re-runs a DATA_SOURCE_DOWNLOAD even if "
                  + "DaRefer already has a COMPLETED row for this (datasourceName, parentId, periodId) combo. "
                  + "Guards against accidental re-runs: the default (false) hard-blocks execution when "
                  + "a completed run is found. Must be set deliberately in the Airflow DAG or CLI invocation. "
-                 + "Takes effect alongside --overrideDownload (either flag enables the re-run). "
                  + "The superseded run always gets a fresh DaRefer row (never overwritten) — once the new "
                  + "run reaches COMPLETED, only the previous run's DaRec rows are deleted, reclaiming the "
                  + "superseded bulk data while the full DaRefer run history is preserved. "

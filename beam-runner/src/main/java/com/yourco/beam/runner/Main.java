@@ -54,7 +54,7 @@ import org.slf4j.LoggerFactory;
  *   1. DataSourcePipelineFactory.assemble()
  *        ├─ Validate params in BQ (parameter_store row present)
  *        ├─ Fetch source configs (transforms, validationConfig)
- *        ├─ Skip sources already COMPLETED in DaRefer (unless --overrideDownload)
+ *        ├─ Skip sources already COMPLETED in DaRefer (unless --manualOverrun)
  *        ├─ Insert DaRefer row sta_cd=LOADING → returns da_id per source
  *        └─ Assemble per-source Beam branches:
  *               source read → transform chain → DataSourceRecordSinkTransform (streaming inserts)

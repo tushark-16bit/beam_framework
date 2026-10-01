@@ -424,8 +424,7 @@ ul.plain li{margin-bottom:6px;}
           <div class="step-body"><code>BigQuerySourceConfigRepository.fetchSourceConfigs()</code> loads the
           source's flat JSON (throws immediately if the row is missing). Then
           <code>isCompleted(srceNm, perId)</code> checks <code>DaRefer</code> — if the latest run already shows
-          <code>COMPLETED</code>, the source is skipped entirely, unless <code>--manualOverrun</code> or the
-          legacy <code>--overrideDownload</code> bypasses the guard.</div>
+          <code>COMPLETED</code>, the source is skipped entirely, unless <code>--manualOverrun</code> bypasses the guard.</div>
         </div>
         <div class="step driver" data-n="3">
           <div class="step-title">Capture what's being superseded <em>(manualOverrun only)</em></div>

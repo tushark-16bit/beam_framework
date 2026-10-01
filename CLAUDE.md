@@ -708,7 +708,7 @@ Main.runDataSourceDownload(options)
 │   │      (--periodId not required: calculated from the Business Date; the period is also stored on skipped decisions)
 │   ├─ nothing eligible and pending → Main submits NO job
 │   ├─ BigQueryDataSourceCheckpointAdapter.isCompleted()      skip COMPLETED sources (bypassed under
-│   │                                                          --manualOverrun / --overrideDownload)
+│   │                                                          --manualOverrun)
 │   ├─ Under --manualOverrun only: fetchLatestCompletedDaId() per source, BEFORE createCheckpoint()
 │   │   → captured as previousDaId for PostDownloadFinalizeTransform's later cleanup
 │   ├─ BigQueryDataSourceCheckpointAdapter.createCheckpoint() → da_id per source (LOADING row)
@@ -1109,7 +1109,7 @@ adapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED, null)
 
 // Skip-logic check (DATA_SOURCE_DOWNLOAD):
 adapter.isCompleted(srceNm, perId) — true if latest sta_cd == 'COMPLETED'
-// Bypassed entirely under --manualOverrun / --overrideDownload.
+// Bypassed entirely under --manualOverrun.
 
 // --manualOverrun: fetchLatestCompletedDaId(srceNm, perId) is called BEFORE createCheckpoint()
 // to capture the run being superseded. createCheckpoint() always INSERTs a fresh DaRefer row
