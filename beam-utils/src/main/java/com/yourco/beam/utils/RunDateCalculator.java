@@ -59,7 +59,8 @@ import java.util.regex.Pattern;
  *   WD/lag expression, positive DAILY lag ──────────────────► NOT_EVALUABLE  (not processed + failure
  *                                                              notification; re-evaluated next
  *                                                              execution — owner decisions D4, D5)
- *   DAILY and Business Date not a business day ─────────────► NON_BUSINESS_DAY (skip; no catch-up)
+ *   Business Date not a business day (ANY frequency, D6) ───► NON_BUSINESS_DAY (skip; DAILY: no catch-up,
+ *                                                              non-DAILY: next business day in window runs)
  *   non-DAILY and Business Date &lt; freqRunDay date ─────────► NOT_YET_ELIGIBLE (skip; recheck)
  *   non-DAILY and Business Date &gt; maxFreqRunDay date ───────► EXPIRED  (skip)
  *   otherwise ──────────────────────────────────────────────► ELIGIBLE
@@ -187,7 +188,7 @@ public final class RunDateCalculator {
                 + "and a calendar is not processed");
         }
 
-        // ── Step 1: frequency — selects DAILY (business-day gate) vs window logic, and the
+        // ── Step 1: frequency — selects DAILY (no window) vs window logic, and the
         //    period grain. Missing/unsupported → no task is created; re-evaluated next execution.
         String frequency = schedule.frequency;
         if (frequency == null || !SUPPORTED_FREQUENCIES.contains(frequency)) {
@@ -226,24 +227,31 @@ public final class RunDateCalculator {
         LocalDate freqRunDate    = null;
         LocalDate maxFreqRunDate = null;
         try {
-            if (RunScheduleConfig.DAILY.equals(frequency)) {
-                // DAILY: no run window at all (freqRunDay/maxFreqRunDay ignored). The Business Date
-                // itself must be a business day. A skipped weekend/holiday is never caught up (BAU).
-                if (!calendar.isBusinessDay(businessDate)) {
-                    return ScheduleDecision.skip(ScheduleDecision.Status.NON_BUSINESS_DAY, dates,
-                        businessDate, null, null,
-                        businessDate + " is not a business day in calendar '" + schedule.calendarKey + "'");
-                }
-            } else {
-                // Non-DAILY: freqRunDay <= Business Date <= maxFreqRunDay, inclusive both ends.
-                // BAU PARITY: the Business Date itself does NOT need to be a business day here —
-                // a MONTHLY item whose window covers a Saturday runs on that Saturday.
+            boolean daily = RunScheduleConfig.DAILY.equals(frequency);
+            if (!daily) {
+                // Non-DAILY: locate the run window first, so a malformed freqRunDay/maxFreqRunDay is
+                // reported (NOT_EVALUABLE) on any day, including a weekend.
                 if (schedule.hasFreqRunDay()) {
                     freqRunDate = calculateFreqRunDate(schedule, businessDate, calendar);
                 }
                 if (schedule.hasMaxFreqRunDay()) {
                     maxFreqRunDate = calculateMaxFreqRunDate(schedule, businessDate, calendar);
                 }
+            }
+
+            // Business-day gate — EVERY frequency (owner decision D6; for DAILY this is BAU Part 1 §6,
+            // for non-DAILY it deliberately overrides Part 1 §6). The Business Date itself must be a
+            // business day in the item's calendar. A skipped day is not "caught up" separately: a
+            // non-DAILY item is simply picked up on the next business day that is still inside its
+            // window; a DAILY item's missed day is never processed (BAU).
+            if (!calendar.isBusinessDay(businessDate)) {
+                return ScheduleDecision.skip(ScheduleDecision.Status.NON_BUSINESS_DAY, dates,
+                    businessDate, freqRunDate, maxFreqRunDate,
+                    businessDate + " is not a business day in calendar '" + schedule.calendarKey + "'");
+            }
+
+            if (!daily) {
+                // Non-DAILY: freqRunDay <= Business Date <= maxFreqRunDay, inclusive both ends.
                 if (freqRunDate != null && businessDate.isBefore(freqRunDate)) {
                     // Before the window opens → NOT YET ELIGIBLE; checked again next execution.
                     return ScheduleDecision.skip(ScheduleDecision.Status.NOT_YET_ELIGIBLE, dates,
@@ -582,7 +590,7 @@ public final class RunDateCalculator {
             NOT_YET_ELIGIBLE,
             /** Non-DAILY, after the maxFreqRunDay date. Skip; period no longer processed automatically. */
             EXPIRED,
-            /** DAILY on a weekend/holiday. Skip; that date is never caught up. */
+            /** Business Date is a weekend/holiday in the item's calendar (any frequency). Skip. */
             NON_BUSINESS_DAY,
             /** Configuration or calendar problem. Skip this item and report it; re-evaluated next execution. */
             NOT_EVALUABLE

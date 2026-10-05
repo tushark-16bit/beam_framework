@@ -592,6 +592,20 @@ fallback to dates passed on the command line. Consequently `--periodId`, `--peri
 `--periodEnd` are never used to run a data source or report; the period and its dates are always
 calculated.
 
+### D6 — Every frequency needs the Business Date to be a business day (2026-10-05)
+
+*Overrides Part 1 §6 ("non-DAILY items do not require the Business Date itself to be a business
+day", incl. its MONTHLY-on-a-Saturday example), and Migration-Critical #2 ("DAILY items use a
+business-day gate; non-DAILY items do not").*
+
+The business-day gate applies to **every** frequency: if the Business Date is a weekend day or a
+holiday in the item's calendar, the item is skipped (`NON_BUSINESS_DAY`) — a MONTHLY, QUARTERLY or
+ANNUALLY item is **not** run on a Saturday even if that date lies inside its `freqRunDay`..`maxFreqRunDay`
+window. Everything else is unchanged: the window is still compared on calendar dates; nothing is
+persisted for a skip, so the item runs on the next business day that is still inside the window (a
+DAILY item's missed day is still not caught up, Part 1 §9). Weekends and holidays are not business
+days in every `WD±n` calculation (run days, DAILY lag, `lastBusDayMonth`) — as Part 1 already states.
+
 ---
 
 # PART 3 — Implementation notes and OPEN items (not part of the contract)

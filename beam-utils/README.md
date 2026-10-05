@@ -256,7 +256,7 @@ framework, kept **as is** — including its quirks (marked `BAU PARITY` in the c
 
 | Attribute | WHEN? | WHICH? | Rule |
 |---|:-:|:-:|---|
-| `frequency` | ✓ | ✓ | `DAILY` (business-day gate, id `yyyyMMdd`), `MONTHLY` (window, `yyyyMM`), `QUARTERLY` (window, `yyyyMMddqq`), `ANNUALLY` (window, `yyyy`). Anything else, incl. `WEEKLY` → not evaluable |
+| `frequency` | ✓ | ✓ | `DAILY` (no window, id `yyyyMMdd`), `MONTHLY` (window, `yyyyMM`), `QUARTERLY` (window, `yyyyMMddqq`), `ANNUALLY` (window, `yyyy`). **All** frequencies also need the Business Date to be a business day (D6). Anything else, incl. `WEEKLY` → not evaluable |
 | `freqRunDay` (source) / `freqDtl` (report) | ✓ | – | Window start. `WD+n` n-th business day, `WD-n` n-th-last, `WD+0` last calendar day of previous month. Ignored for DAILY |
 | `maxFreqRunDay` | ✓ | – | Window end, inclusive, same `WD±n` syntax. Blank → no upper bound (eligible until the period rolls over). Ignored for DAILY |
 | `dayLag` | – | ✓ | DAILY: `WD-n` n business days back, `CAL-n` n calendar days back (owner decision D4 — a positive DAILY lag is an error). Non-DAILY: starts with `WD-`/`CAL-` → current period; anything else (blank, `WD+5`, …) → previous period — the number is ignored |
@@ -282,7 +282,9 @@ without them it is `NOT_EVALUABLE`, not processed. Encodings:
 ```
 no schedule / no calendar / bad config
   / positive DAILY lag                  → NOT_EVALUABLE   not processed + FailureNotifier; others continue
-DAILY, Business Date not a business day → NON_BUSINESS_DAY skip; never caught up
+Business Date not a business day (ALL
+  frequencies, D6)                      → NON_BUSINESS_DAY skip; DAILY never caught up, non-DAILY runs
+                                                           on the next business day inside its window
 non-DAILY, before freqRunDay date       → NOT_YET_ELIGIBLE skip; picked up by a later run
 non-DAILY, after maxFreqRunDay date     → EXPIRED          skip
 otherwise                               → ELIGIBLE
@@ -296,12 +298,12 @@ skipped item still shows the period it would have processed. Only a `NOT_EVALUAB
 **`--manualOverrun` never changes eligibility or dates** (contract decision D1). It only bypasses the
 COMPLETED check and makes the new run overwrite stored data. To force a re-run, pass the `--runDate` that
 is eligible for the item; with `--manualOverrun` set, a date before `freqRunDay`, after `maxFreqRunDay`,
-or a DAILY non-business day is still skipped.
+or a weekend/holiday is still skipped.
 
 Nothing is persisted for a skip: every run re-evaluates from scratch, so a not-yet-eligible or failed
-item is simply retried by a later run while its window is open (no retry limit). Non-DAILY items do
-**not** need the Business Date itself to be a business day (a MONTHLY window covering a Saturday runs
-on Saturday). Data sources and reports are scheduled **independently**: a skipped data source never
+item is simply retried by a later run while its window is open (no retry limit). Every frequency needs the Business Date
+to be a business day (owner decision D6, overriding Part 1 §6): a MONTHLY window covering a Saturday
+does **not** run on the Saturday — it runs on the next business day still inside the window. Data sources and reports are scheduled **independently**: a skipped data source never
 skips its report; the report checks its required data sources are COMPLETED when it runs, fails if not,
 and is retried on a later eligible run.
 

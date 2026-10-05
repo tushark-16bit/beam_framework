@@ -110,7 +110,7 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
                  + "step: a report that has a run schedule and is already COMPLETED for its calculated "
                  + "period is skipped unless this flag is set; every report has a run schedule. "
                  + "This flag is ONLY about storage and overwriting: it never changes whether an item is "
-                 + "eligible to run or which dates are calculated (run window, DAILY business-day gate, "
+                 + "eligible to run or which dates are calculated (run window, business-day gate, "
                  + "period) — to force a re-run, also pass the --runDate that is eligible under the item's "
                  + "run schedule (see DATE_SCHEDULING_RULES.md, decision D1).")
     @Default.Boolean(false)

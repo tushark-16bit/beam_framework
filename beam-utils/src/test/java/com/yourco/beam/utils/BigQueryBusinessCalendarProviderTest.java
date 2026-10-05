@@ -106,10 +106,13 @@ class BigQueryBusinessCalendarProviderTest {
     void feedsRunDateCalculator() {
         BusinessCalendarProvider provider = new BigQueryBusinessCalendarProvider(key -> SAMPLE);
         var schedule = new com.yourco.beam.model.RunScheduleConfig("MONTHLY", "WD+1", null, null, null, "CAL_US");
-        // Jan 1 2026 is a holiday, so WD+1 of January is Fri Jan 2.
-        var decision = RunDateCalculator.evaluate(schedule, d(2026, 1, 1),
+        // Jan 1 2026 is a holiday: skipped as a non-business day, and WD+1 of January is Fri Jan 2.
+        var holiday = RunDateCalculator.evaluate(schedule, d(2026, 1, 1),
             RunDateCalculator.ItemType.DATA_SOURCE, provider);
-        assertEquals(RunDateCalculator.ScheduleDecision.Status.NOT_YET_ELIGIBLE, decision.status);
-        assertEquals(d(2026, 1, 2), decision.freqRunDate);
+        assertEquals(RunDateCalculator.ScheduleDecision.Status.NON_BUSINESS_DAY, holiday.status);
+        assertEquals(d(2026, 1, 2), holiday.freqRunDate);
+        var firstWorkday = RunDateCalculator.evaluate(schedule, d(2026, 1, 2),
+            RunDateCalculator.ItemType.DATA_SOURCE, provider);
+        assertEquals(RunDateCalculator.ScheduleDecision.Status.ELIGIBLE, firstWorkday.status);
     }
 }

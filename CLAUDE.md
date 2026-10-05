@@ -348,9 +348,9 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                                NO schedule, or no calendar (calendarKey missing/unknown, no provider) → NOT_EVALUABLE: the item
                                  is not processed, no fallback to CLI dates (D5); also bad/unsupported frequency, unparseable
                                  WD/lag, POSITIVE DAILY lag (D4) → NOT_EVALUABLE (not processed + failure notification);
-                               WHEN — DAILY: Business Date must be a business day (else NON_BUSINESS_DAY; no catch-up);
+                               WHEN — ALL frequencies (D6): Business Date must be a business day (else NON_BUSINESS_DAY; DAILY: no catch-up);
                                  non-DAILY: freqRunDate <= Business Date <= maxFreqRunDate, inclusive (NOT_YET_ELIGIBLE /
-                                 EXPIRED); non-DAILY does NOT require the Business Date itself to be a business day;
+                                 EXPIRED), compared on calendar dates, after the business-day gate; weekends/holidays never count in WD±n;
                                WHICH — DAILY: dayLag WD-n / CAL-n = n business / calendar days back (D4); non-DAILY: dayLag prefix WD-/CAL- → current
                                  period, anything else (blank, WD+5, ...) → previous period (numeric amount ignored);
                                WHAT — data source MONTHLY + dateType lastBusDayMonth → last business day, else calendar
@@ -677,7 +677,7 @@ Main.runDataSourceDownload(options)
 │   │   ├─ no schedule / no calendar / bad config / positive DAILY lag
 │   │   │                                      → NOT_EVALUABLE: not processed + FailureNotifier (D4, D5);
 │   │   │                                        other sources continue
-│   │   ├─ DAILY on weekend/holiday            → skip (NON_BUSINESS_DAY; no catch-up)
+│   │   ├─ weekend/holiday (ANY frequency, D6) → skip (NON_BUSINESS_DAY; non-DAILY runs on the next business day in its window)
 │   │   ├─ before freqRunDay date              → skip (NOT_YET_ELIGIBLE; recheck next run)
 │   │   ├─ after maxFreqRunDay date            → skip (EXPIRED) — --manualOverrun does NOT change any of this
 │   │   │                                            (contract D1); it only bypasses the COMPLETED check below
@@ -1254,7 +1254,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
 
 # Force re-run when DaRefer already shows COMPLETED (explicit operator override). ONLY about storage and
 # overwriting: it never changes eligibility or dates (owner decision D1) — also pass the --runDate that is
-# eligible for the item; a date outside its run window / on a DAILY non-business day is still skipped.
+# eligible for the item; a date outside its run window / on a weekend or holiday is still skipped.
 # --manualOverrun=true
 
 # Business Date = --runDate if set (BAU ManualRunDateId), else today in this zone (default UTC):

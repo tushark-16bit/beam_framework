@@ -139,21 +139,71 @@ class RunDateCalculatorTest {
         assertEquals(Status.EXPIRED, source(MONTHLY_WD3_TO_WD5, d(2026, 9, 9)).status);
     }
 
-    /** WD+3..WD+5 across every day of September: not-yet → eligible (incl. weekend + holiday) → expired. */
+    /**
+     * WD+3..WD+5 (Sep 3 .. Sep 8) across every day of September: weekends and the Sep 7 holiday are
+     * NON_BUSINESS_DAY (D6); business days are not-yet → eligible → expired.
+     */
     @Test
     void everyDayOfSeptemberAgainstAWd3ToWd5Window() {
         for (int day = 1; day <= 30; day++) {
-            ScheduleDecision dec = source(MONTHLY_WD3_TO_WD5, d(2026, 9, day));
-            Status expected = day < 3 ? Status.NOT_YET_ELIGIBLE : day <= 8 ? Status.ELIGIBLE : Status.EXPIRED;
+            LocalDate bd = d(2026, 9, day);
+            ScheduleDecision dec = source(MONTHLY_WD3_TO_WD5, bd);
+            Status expected = !CALENDAR.isBusinessDay(bd) ? Status.NON_BUSINESS_DAY
+                : day < 3 ? Status.NOT_YET_ELIGIBLE : day <= 8 ? Status.ELIGIBLE : Status.EXPIRED;
             assertEquals(expected, dec.status, "Sep " + day);
             assertEquals(202608, dec.dates.periodId, "Sep " + day + " always processes August");
         }
     }
 
+    /** CONTRACT D6: every frequency needs the Business Date to be a business day, even inside the window. */
     @Test
-    void nonDailyRunsOnAWeekendAndOnAHolidayInsideItsWindow() {
-        assertEquals(Status.ELIGIBLE, source(MONTHLY_WD3_TO_WD5, d(2026, 9, 5)).status);   // Saturday
-        assertEquals(Status.ELIGIBLE, source(MONTHLY_WD3_TO_WD5, d(2026, 9, 7)).status);   // the holiday
+    void nonDailyIsSkippedOnAWeekendAndOnAHolidayEvenInsideItsWindow() {
+        for (LocalDate nonBusinessDay : new LocalDate[] {d(2026, 9, 5), d(2026, 9, 6), d(2026, 9, 7)}) {
+            ScheduleDecision dec = source(MONTHLY_WD3_TO_WD5, nonBusinessDay);   // Sat, Sun, the holiday
+            assertEquals(Status.NON_BUSINESS_DAY, dec.status, nonBusinessDay.toString());
+            assertFalse(dec.shouldRun());
+            // the window and the period are still worked out and carried on the skipped decision
+            assertEquals(d(2026, 9, 3), dec.freqRunDate);
+            assertEquals(d(2026, 9, 8), dec.maxFreqRunDate);
+            assertPeriod(dec, d(2026, 8, 1), d(2026, 8, 31), 202608);
+        }
+        // the surrounding business days, still inside the window, run
+        assertEquals(Status.ELIGIBLE, source(MONTHLY_WD3_TO_WD5, d(2026, 9, 4)).status);   // Friday
+        assertEquals(Status.ELIGIBLE, source(MONTHLY_WD3_TO_WD5, d(2026, 9, 8)).status);   // Tuesday
+    }
+
+    /** A skipped weekend loses nothing: the next business day in the window picks the item up. */
+    @Test
+    void anItemSkippedOnTheWeekendRunsOnTheNextBusinessDayInsideItsWindow() {
+        RunScheduleConfig s = schedule(RunScheduleConfig.MONTHLY, "WD+3", "WD+5", null, null);
+        // the Friday run didn't happen (say it failed); Saturday and Sunday skip, Tuesday (WD+5) runs
+        assertEquals(Status.NON_BUSINESS_DAY, source(s, d(2026, 9, 5)).status);
+        assertEquals(Status.NON_BUSINESS_DAY, source(s, d(2026, 9, 6)).status);
+        assertEquals(Status.ELIGIBLE, source(s, d(2026, 9, 8)).status);
+    }
+
+    @Test
+    void aMalformedRunDayIsStillReportedOnAWeekend() {
+        ScheduleDecision dec = source(schedule(RunScheduleConfig.MONTHLY, "WD+x", null, null, null), d(2026, 9, 5));
+        assertEquals(Status.NOT_EVALUABLE, dec.status);
+    }
+
+    /** "Weekends are not business days in WD calculations": WD+n counts neither weekend days nor holidays. */
+    @Test
+    void wdCalculationsNeverCountWeekendsOrHolidays() {
+        // September: Sep 5/6 weekend, Sep 7 holiday → WD+5 is Tue Sep 8 (not Sat/Sun/Mon), WD+4 is Fri Sep 4
+        assertEquals(d(2026, 9, 4), RunDateCalculator.calculateFreqRunDate(
+            schedule(RunScheduleConfig.MONTHLY, "WD+4", null, null, null), d(2026, 9, 15), CALENDAR));
+        assertEquals(d(2026, 9, 8), RunDateCalculator.calculateFreqRunDate(
+            schedule(RunScheduleConfig.MONTHLY, "WD+5", null, null, null), d(2026, 9, 15), CALENDAR));
+        // Counting backwards from month end (Wed Sep 30): WD-1..WD-3 = Sep 30, 29, 28
+        assertEquals(d(2026, 9, 28), RunDateCalculator.calculateFreqRunDate(
+            schedule(RunScheduleConfig.MONTHLY, "WD-3", null, null, null), d(2026, 9, 15), CALENDAR));
+        // Month end falling on a weekend: Jan 31 2026 is a Saturday → WD-1 is Fri Jan 30
+        assertEquals(d(2026, 1, 30), RunDateCalculator.calculateFreqRunDate(
+            schedule(RunScheduleConfig.MONTHLY, "WD-1", null, null, null), d(2026, 1, 15), CALENDAR));
+        // DAILY business-day lag skips the weekend too (Monday - 1 business day = Friday)
+        assertPeriod(daily("WD-1", d(2026, 9, 14)), d(2026, 9, 11), d(2026, 9, 11), 20260911);
     }
 
     @Test
@@ -186,7 +236,8 @@ class RunDateCalculatorTest {
     @Test
     void monthEndWindowUsingNegativeWorkdays() {
         RunScheduleConfig s = schedule(RunScheduleConfig.MONTHLY, "WD-3", "WD-1", "WD-1", null);
-        assertEquals(Status.NOT_YET_ELIGIBLE, source(s, d(2026, 9, 27)).status);          // Sunday
+        assertEquals(Status.NOT_YET_ELIGIBLE, source(s, d(2026, 9, 25)).status);          // Friday, before WD-3
+        assertEquals(Status.NON_BUSINESS_DAY, source(s, d(2026, 9, 27)).status);          // Sunday
         ScheduleDecision first = source(s, d(2026, 9, 28));                                // WD-3
         assertEquals(Status.ELIGIBLE, first.status);
         assertEquals(d(2026, 9, 28), first.freqRunDate);
@@ -259,14 +310,15 @@ class RunDateCalculatorTest {
     @Test
     void runDaysCountOnlyBusinessDays_goodFridayAndNewYear() {
         RunScheduleConfig april = schedule(RunScheduleConfig.MONTHLY, "WD+3", null, null, null);
+        assertEquals(Status.NOT_YET_ELIGIBLE, source(april, d(2026, 4, 2)).status);
         ScheduleDecision goodFriday = source(april, d(2026, 4, 3));
-        assertEquals(Status.NOT_YET_ELIGIBLE, goodFriday.status);        // Apr 1, Apr 2, [Apr 3 holiday], Apr 6
+        assertEquals(Status.NON_BUSINESS_DAY, goodFriday.status);        // Apr 1, Apr 2, [Apr 3 holiday], Apr 6
         assertEquals(d(2026, 4, 6), goodFriday.freqRunDate);
         assertEquals(Status.ELIGIBLE, source(april, d(2026, 4, 6)).status);
 
         RunScheduleConfig january = schedule(RunScheduleConfig.MONTHLY, "WD+1", null, null, null);
         ScheduleDecision newYear = source(january, d(2026, 1, 1));
-        assertEquals(Status.NOT_YET_ELIGIBLE, newYear.status);           // Jan 1 is a holiday → WD+1 = Jan 2
+        assertEquals(Status.NON_BUSINESS_DAY, newYear.status);           // Jan 1 is a holiday → WD+1 = Jan 2
         assertEquals(d(2026, 1, 2), newYear.freqRunDate);
         assertEquals(Status.ELIGIBLE, source(january, d(2026, 1, 2)).status);
         assertPeriod(source(january, d(2026, 1, 2)), d(2025, 12, 1), d(2025, 12, 31), 202512);
@@ -277,8 +329,9 @@ class RunDateCalculatorTest {
     @Test
     void quarterlyWindowInTheFirstMonthOfTheQuarter() {
         RunScheduleConfig s = schedule(RunScheduleConfig.QUARTERLY, "WD+3", "WD+5", null, null);
+        assertEquals(Status.NOT_YET_ELIGIBLE, source(s, d(2026, 4, 2)).status);
         ScheduleDecision goodFriday = source(s, d(2026, 4, 3));
-        assertEquals(Status.NOT_YET_ELIGIBLE, goodFriday.status);
+        assertEquals(Status.NON_BUSINESS_DAY, goodFriday.status);
         assertPeriod(goodFriday, d(2026, 1, 1), d(2026, 3, 31), 2026010101);
         assertEquals(Status.ELIGIBLE, source(s, d(2026, 4, 6)).status);                  // WD+3
         assertEquals(Status.ELIGIBLE, source(s, d(2026, 4, 8)).status);                  // WD+5
@@ -591,9 +644,9 @@ class RunDateCalculatorTest {
         RunScheduleConfig src = schedule(RunScheduleConfig.MONTHLY, "WD+3", "WD+5", null, null);
         RunScheduleConfig rpt = schedule(RunScheduleConfig.MONTHLY, "WD+6", "WD+8", null, null);
 
-        // Sat Sep 5: the source is inside its window, the report's (opens Sep 9) is not.
-        assertEquals(Status.ELIGIBLE, source(src, d(2026, 9, 5)).status);
-        assertEquals(Status.NOT_YET_ELIGIBLE, report(rpt, d(2026, 9, 5)).status);
+        // Fri Sep 4: the source is inside its window, the report's (opens Sep 9) is not.
+        assertEquals(Status.ELIGIBLE, source(src, d(2026, 9, 4)).status);
+        assertEquals(Status.NOT_YET_ELIGIBLE, report(rpt, d(2026, 9, 4)).status);
         // Wed Sep 9: the source window has closed, the report has opened.
         assertEquals(Status.EXPIRED, source(src, d(2026, 9, 9)).status);
         assertEquals(Status.ELIGIBLE, report(rpt, d(2026, 9, 9)).status);
@@ -822,16 +875,20 @@ class RunDateCalculatorTest {
                     assertNotNull(dates.periodEnd, ctx);
                     assertFalse(dates.periodStart.isAfter(dates.periodEnd), ctx);
 
-                    boolean eligible;
+                    // D6: every frequency needs a business day; non-DAILY also needs to be inside its window
+                    boolean eligible = CALENDAR.isBusinessDay(bd);
                     if (RunScheduleConfig.DAILY.equals(cfg.frequency)) {
-                        eligible = CALENDAR.isBusinessDay(bd);
                         assertNull(dec.freqRunDate, ctx);
                         assertNull(dec.maxFreqRunDate, ctx);
                     } else {
-                        eligible = (dec.freqRunDate == null || !bd.isBefore(dec.freqRunDate))
+                        eligible = eligible
+                                && (dec.freqRunDate == null || !bd.isBefore(dec.freqRunDate))
                                 && (dec.maxFreqRunDate == null || !bd.isAfter(dec.maxFreqRunDate));
                     }
                     assertEquals(eligible, dec.shouldRun(), ctx);
+                    if (!CALENDAR.isBusinessDay(bd)) {
+                        assertEquals(Status.NON_BUSINESS_DAY, dec.status, ctx);
+                    }
                 }
             }
         }

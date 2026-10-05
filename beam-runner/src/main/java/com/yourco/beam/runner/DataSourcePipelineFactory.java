@@ -198,7 +198,7 @@ public final class DataSourcePipelineFactory {
 
     /**
      * Logs a source skipped by its schedule. The ordinary BAU outcomes — not yet eligible,
-     * expired window, DAILY on a non-business day — are expected and only logged (even under
+     * expired window, a non-business day — are expected and only logged (even under
      * {@code --manualOverrun}, which never overrides eligibility). NOT_EVALUABLE
      * (bad frequency, missing/unknown calendarKey, no calendar provider, unparseable WD/lag) is a
      * configuration problem: it is also sent through {@link FailureNotifier} as a
