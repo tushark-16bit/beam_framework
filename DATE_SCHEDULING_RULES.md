@@ -621,7 +621,7 @@ owner the same day — see D3 and D4.)
 |---|---|
 | Business Date | `DateUtils.resolveRunDate(options)` → `RunDates.runDate` (`--runDate`, else today in `--businessTimeZone`, default UTC) |
 | WHEN / WHICH / WHAT | `RunDateCalculator.evaluate*()` → `ScheduleDecision` (`ELIGIBLE`, `NOT_YET_ELIGIBLE`, `EXPIRED`, `NON_BUSINESS_DAY`, `NOT_EVALUABLE`) |
-| Calendar | `BusinessCalendarProvider.forKey(calendarKey)` (SPI, no implementation shipped) |
+| Calendar | `BusinessCalendarProvider.forKey(calendarKey)` → default `BigQueryBusinessCalendarProvider` (parameter table, group `FINACOE_Calendars`; SPI can override) |
 | Status check ("Completed?") | callers: `DataSourcePipelineFactory.filterByCheckpoint`, `ReportPipelineFactory.isAlreadyCompleted` |
 | Skips not persisted | a skipped item writes nothing; the next run re-evaluates |
 | Period carried on every decision | `ScheduleDecision.dates` is set whenever the period could be calculated — **including skipped** statuses — so the period is visible next to the reason it was skipped. Only `NOT_EVALUABLE` may have `dates == null`. Callers must still only *use* the dates when `shouldRun()` |

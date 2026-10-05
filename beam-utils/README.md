@@ -17,7 +17,7 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 | `CalendarUtils` | Business calendar stubs: `isBusinessDay`, `nextBusinessDay`, `applyOffset`, etc. |
 | `DateUtils` | Run date resolution, formatting (ISO/compact/display), partitioned paths, sharded BQ tables |
 | `RunDateCalculator` | Finance Automation scheduling rules (port of BAU): WHEN may a source/report run on the Business Date, WHICH period does it process, WHAT date ends that period. `evaluateDataSource()`/`evaluateReport()` → `ScheduleDecision` (`ELIGIBLE` + `RunDates`, or `NOT_YET_ELIGIBLE`/`EXPIRED`/`NON_BUSINESS_DAY`/`NOT_EVALUABLE`). See its section below |
-| `BusinessCalendar` / `BusinessCalendarProvider` | Calendar contract for `RunDateCalculator`: `forKey(calendarKey).isBusinessDay(date)`. **No implementation ships** — register yours via `META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider` |
+| `BusinessCalendar` / `BusinessCalendarProvider` / `BigQueryBusinessCalendarProvider` | Calendar contract for `RunDateCalculator` (`forKey(calendarKey).isBusinessDay(date)`) and its default implementation, which reads the calendars from the parameter table (`FINACOE_Calendars`) — see "Calendar" below |
 | `QueryParameterResolver` | Resolves `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}` standard tokens (also available as `%periodStart%`/`%periodEnd%`/`%periodId%`/`%runDate%` — a fixed percent-delimited alternative, same underlying values, for SQL dialects where curly braces collide with something else), then custom tokens merged from a step's `query_params_json` and `--customParamsJson` (CLI flag, wins on collision) in query templates for both `DATA_SOURCE_DOWNLOAD` and `REPORT_PROCESSING` |
 
 There is no JDBC / relational-DB adapter in this module — the framework has no JDBC dependency
@@ -47,7 +47,7 @@ ids, every kind of month end for `lastBusDayMonth`, `dateType` ignored for non-m
 independent report/data-source windows, every not-evaluable cause (incl. no schedule, no calendar, positive DAILY lag), `--periodId` ignored,
 `--manualOverrun` not changing anything, and a sweep of 11 schedules × a year of days × both item
 types asserting that every evaluable decision (skipped ones included) carries a consistent period.
-`DateUtilsTest.java`: Business Date from `--runDate` / `--businessTimeZone`.
+`BigQueryBusinessCalendarProviderTest.java`: calendar JSON parsing (weekend/holiday forms, loud failures, caching, end-to-end through `RunDateCalculator`) without BigQuery. `DateUtilsTest.java`: Business Date from `--runDate` / `--businessTimeZone`.
 `QueryParameterResolverTest.java`: standard-token resolution, step-level
 `query_params_json` resolution, `--customParamsJson` resolution and its override of a
 same-named step-level key, standard-token references inside a custom value, and malformed/
@@ -311,22 +311,29 @@ and is retried on a later eligible run.
 | `ReportPipelineFactory.execute(options)` → `evaluateReport()` | `REPORT_PROCESSING` |
 | `PipelineSequenceFactory.decideReportRun()` → `evaluateReport()` | report half of `PIPELINE` (dates carried to the worker) |
 
-### Calendar — the one thing you implement
+### Calendar — read from the parameter table
 
-```java
-public final class CalendarDbProvider implements BusinessCalendarProvider {
-    @Override public BusinessCalendar forKey(String calendarKey) {
-        Set<LocalDate> holidays = /* load from calendar DB, cache per key */;
-        return date -> date.getDayOfWeek() != SATURDAY && date.getDayOfWeek() != SUNDAY
-                       && !holidays.contains(date);        // weekend rules are the calendar's call
-    }
-}
-// META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider:
-//   com.yourorg.CalendarDbProvider
-```
+`BigQueryBusinessCalendarProvider` (the default) fetches each calendar from the same table as the
+source/report configs (`--paramBqProject` / `--paramBqDataset` / `--paramStoreTable`):
 
-A calendar must exist (D5): without a registered provider, or when `forKey` fails, every item is
-`NOT_EVALUABLE` (not processed, reported). There is no unscheduled/calendar-less mode.
+| Column | Value |
+|---|---|
+| `parameter_group_name` | `FINACOE_Calendars` (marks the row as a calendar) |
+| `parameter_name` | the item's `calendarKey` |
+| `parameters_val_json` | `[{"Calendar":{"holiday":"20260101,20270901","weekend":"saturday,sunday"}}]` |
+
+- `holiday` — comma-separated `yyyyMMdd` dates (optional; blank = none). A malformed date fails the
+  whole calendar rather than being dropped (a lost holiday would become a business day).
+- `weekend` — comma-separated weekday names (`saturday,sunday`; case-insensitive, `sat`/`sun` accepted).
+  **Required** — never assumed; may be blank for a calendar with no weekend.
+- A date is a business day when it is not a weekend day and not a holiday.
+- One query per distinct `calendarKey` per run, cached in memory; driver JVM only.
+- No row, more than one row, bad JSON or a bad value → `forKey` throws → the item is `NOT_EVALUABLE`
+  (not processed + failure notification), as a calendar must exist (D5).
+- The three column names are constants at the top of the class (`COL_GROUP`, `COL_NAME`,
+  `COL_VALUE`) — they match the columns the other repositories read from this table.
+- To use a different source (external calendar service), register your own `BusinessCalendarProvider`
+  via `META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider`; it takes precedence.
 
 ### Open items
 

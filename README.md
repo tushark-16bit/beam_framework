@@ -232,7 +232,7 @@ to command-line dates. **`--periodId` is not needed**: the period id is calculat
 Date (`--runDate`, or today in `--businessTimeZone`) and stored with the dates. A DAILY `dayLag` is
 `WD-n`/`CAL-n`; a positive one is an error. **`--manualOverrun` never changes eligibility or
 dates** — it only bypasses the COMPLETED check and overwrites stored data, so when forcing a re-run
-also pass the `--runDate` that is eligible. The only piece to implement is the calendar DB lookup (`BusinessCalendarProvider`, SPI). Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
+also pass the `--runDate` that is eligible. Calendars are read from the parameter table (`parameter_group_name = FINACOE_Calendars`, `parameter_name` = `calendarKey`) as `[{"Calendar":{"holiday":"20260101,20270901","weekend":"saturday,sunday"}}]`. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`),
 email tokens and report file names; `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for
 FILE `{fileDate}`; `periodId` as an int — DAILY `yyyyMMdd`, MONTHLY `yyyyMM`, QUARTERLY `yyyyMMddqq` (first date of the
 quarter + quarter number, Q1 2026 → `2026010101`), ANNUALLY `yyyy`. See `beam-utils/README.md`.

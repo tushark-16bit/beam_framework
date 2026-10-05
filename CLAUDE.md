@@ -372,10 +372,16 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                              PipelineSequenceFactory (report half, carried to the worker).
 BusinessCalendar.java       @FunctionalInterface isBusinessDay(LocalDate) — one calendar (weekends + holidays). All WD
                              arithmetic is built on this single answer, in RunDateCalculator.
-BusinessCalendarProvider.java forKey(calendarKey) → BusinessCalendar, from the external calendar DB. NO implementation ships
-                             here: register one via META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider
-                             (discover() uses ServiceLoader, like EmailSendUtility). Without one, every SCHEDULED item is
-                             NOT_EVALUABLE (not processed + reported) — a calendar must exist (D5).
+BusinessCalendarProvider.java forKey(calendarKey) → BusinessCalendar. discover(options) returns a provider registered via
+                             META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider if any (override), else the
+                             BigQueryBusinessCalendarProvider. If the calendar can't be loaded the item is NOT_EVALUABLE
+                             (not processed + reported) — a calendar must exist (D5).
+BigQueryBusinessCalendarProvider.java Default provider. Reads the parameter table (--paramBqProject/--paramBqDataset/
+                             --paramStoreTable) row parameter_group_name='FINACOE_Calendars', parameter_name=calendarKey, and
+                             parses parameters_val_json = [{"Calendar":{"holiday":"yyyyMMdd,yyyyMMdd","weekend":"saturday,sunday"}}]
+                             into a BusinessCalendar (business day = not a weekend day and not a holiday). "weekend" is required
+                             (never assumed); a bad date/weekday name fails the whole calendar. One query per calendarKey per run,
+                             cached. No row / duplicate rows / bad data → throws → NOT_EVALUABLE. Driver JVM only.
 QueryParameterResolver.java resolve(template, paramMappings, options[, RunDates]). Two-pass: standard then custom tokens.
                              Standard tokens come from the RunDates passed in (the source's/report's own); the 3-arg
                              overload uses RunDateCalculator.fromOptions(options).
@@ -890,7 +896,9 @@ being mistaken for an absent one — an absent schedule means the item is not pr
 (`frequency + freqRunDay + maxFreqRunDay + calendarKey`), WHICH period (`frequency + dayLag`),
 WHAT period-end date (`dateType + calendarKey`) — are `RunDateCalculator` (beam-utils; see §4 and
 `beam-utils/README.md`). `maxFreqRunDay` is a `WD±n` string like `freqRunDay`; a bare number is
-not evaluable. Business-day lookups need a registered `BusinessCalendarProvider`.
+not evaluable. Business-day lookups read the calendar rows of the same parameter table
+(`parameter_group_name = FINACOE_Calendars`, `parameter_name = calendarKey`) via `BigQueryBusinessCalendarProvider`:
+`[{"Calendar":{"holiday":"20260101,20270901","weekend":"saturday,sunday"}}]`.
 
 A `FILE` source's `file_date_pattern` (e.g. `"yyyyMM"`) is a separate, simpler mechanism — it
 just enables a `{fileDate}` placeholder in `file_prefix`/`file_suffix`, formatted with that

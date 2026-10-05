@@ -773,13 +773,18 @@ class RunDateCalculatorTest {
     }
 
     @Test
-    void withoutARegisteredCalendarProviderNothingIsProcessed() {
-        // No META-INF/services provider exists on the test classpath.
-        ScheduleDecision scheduled = RunDateCalculator.evaluateDataSource(MONTHLY_WD3_TO_WD5, options("2026-09-03", 0));
+    void whenTheCalendarCannotBeLoadedNothingIsProcessed() {
+        // e.g. the calendar row is missing from the parameter table, or BigQuery is unavailable.
+        BusinessCalendarProvider unavailable = key -> {
+            throw new IllegalArgumentException("no calendar '" + key + "' in the parameter table");
+        };
+        ScheduleDecision scheduled = RunDateCalculator.evaluate(
+            MONTHLY_WD3_TO_WD5, options("2026-09-03", 0), ItemType.DATA_SOURCE, unavailable);
         assertEquals(Status.NOT_EVALUABLE, scheduled.status);
-        assertTrue(scheduled.detail.contains("BusinessCalendarProvider"), scheduled.detail);
+        assertTrue(scheduled.detail.contains("CAL_US"), scheduled.detail);
 
-        ScheduleDecision unscheduled = RunDateCalculator.evaluateReport(RunScheduleConfig.none(), options("2026-09-03", 202609));
+        ScheduleDecision unscheduled = RunDateCalculator.evaluate(
+            RunScheduleConfig.none(), options("2026-09-03", 202609), ItemType.REPORT, unavailable);
         assertEquals(Status.NOT_EVALUABLE, unscheduled.status);
     }
 
