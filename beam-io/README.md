@@ -137,7 +137,7 @@ io/config/
                                      mistaken for an absent schedule (an absent one means the item is not processed). Retrieval only; the scheduling rules are
                                      RunDateCalculator (beam-utils). Also parses file_date_pattern into
                                      FileSourceConfig.fileDatePattern for FILE sources.
-    BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING
+    BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING; each datasources[] entry may carry lookback_from/lookback_to (ints, 0 or negative; both or neither — invalid combinations fail the config load; tests: ReportDatasourceLookbackTest)
                                      AND PIPELINE (same lookup, same ReportConfig — PIPELINE has no config of its
                                      own; see beam-runner/README.md's PipelineSequenceFactory section).
                                      Key: (parameter_group_name=parentId, parameter_data_source=reportSubprocess,

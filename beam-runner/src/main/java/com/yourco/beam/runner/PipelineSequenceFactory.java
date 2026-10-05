@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -171,8 +172,20 @@ public final class PipelineSequenceFactory {
             LOG.info("Report declares no datasources — report step will run with nothing to wait for");
         }
 
+        // Lookback periods (driver JVM — needs each data source's schedule). If they can't be
+        // resolved the report step is skipped and reported, like a not-evaluable report schedule;
+        // the data sources still load.
+        Map<String, List<Integer>> lookbackPeriods = Map.of();
         if (reportDates != null) {
             warnOnPeriodMismatch(options, sourceConfigs, reportDates);
+            try {
+                lookbackPeriods = ReportPipelineFactory.resolveLookbackPeriods(options, reportConfig, reportDates);
+            } catch (Exception e) {
+                LOG.error("Report '{}' skipped — lookback periods could not be resolved: {}",
+                          reportConfig.reportName, e.getMessage());
+                FailureNotifier.notify(options, e);
+                reportDates = null;
+            }
         }
 
         // assembleForConfigs() already throws DataSourceDownloadException itself on failure —
@@ -191,7 +204,7 @@ public final class PipelineSequenceFactory {
             // Wire the report step onto the SAME pipeline, gated on every datasource branch's
             // finalize signal via Wait.on() — no driver-JVM poll loop.
             ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig,
-                reportDates, options);
+                reportDates, lookbackPeriods, options);
         }
 
         LOG.info("Submitting batched PIPELINE job ({} datasource branch(es){}) to runner: {}",

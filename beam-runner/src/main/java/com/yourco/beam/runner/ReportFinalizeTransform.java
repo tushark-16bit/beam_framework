@@ -17,7 +17,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Wires the REPORT_PROCESSING step of a {@code PIPELINE} run onto the SAME batched Dataflow job
@@ -70,7 +72,8 @@ final class ReportFinalizeTransform {
      * submission — the worker never re-resolves them.
      */
     static void wire(Pipeline pipeline, List<PCollection<?>> finalizeSignals,
-                     ReportConfig config, RunDates dates, FrameworkOptions options) {
+                     ReportConfig config, RunDates dates,
+                     Map<String, List<Integer>> lookbackPeriods, FrameworkOptions options) {
         String project = options.getCheckpointBqProject() != null
                         && !options.getCheckpointBqProject().isBlank()
                         ? options.getCheckpointBqProject() : options.getProject();
@@ -85,7 +88,7 @@ final class ReportFinalizeTransform {
             : trigger.apply("WaitForDatasources-" + config.reportName, Wait.on(finalizeSignals));
 
         gated.apply("RunReport-" + config.reportName,
-            ParDo.of(new ReportRunDoFn(config, dates, daReferTableRef)));
+            ParDo.of(new ReportRunDoFn(config, dates, lookbackPeriods, daReferTableRef)));
     }
 
     // ── Named DoFn — required for Beam serialization safety ──────────────────
@@ -96,11 +99,15 @@ final class ReportFinalizeTransform {
 
         private final ReportConfig config;
         private final RunDates     dates;
+        /** Resolved in the driver JVM — see ReportPipelineFactory.resolveLookbackPeriods(). */
+        private final HashMap<String, List<Integer>> lookbackPeriods;
         private final String       daReferTableRef;
 
-        ReportRunDoFn(ReportConfig config, RunDates dates, String daReferTableRef) {
+        ReportRunDoFn(ReportConfig config, RunDates dates, Map<String, List<Integer>> lookbackPeriods,
+                      String daReferTableRef) {
             this.config          = config;
             this.dates           = dates;
+            this.lookbackPeriods = new HashMap<>(lookbackPeriods);
             this.daReferTableRef = daReferTableRef;
         }
 
@@ -115,7 +122,7 @@ final class ReportFinalizeTransform {
                      config.reportName, config.reportSubprocess, dates.periodId);
             try {
                 verifyRequiredDatasources(options);
-                new ReportPipelineFactory().execute(options, config, dates);
+                new ReportPipelineFactory().execute(options, config, dates, lookbackPeriods);
                 LOG.info("Report '{}' completed", config.reportName);
             } catch (Exception e) {
                 LOG.error("Report '{}' failed: {}", config.reportName, e.getMessage(), e);

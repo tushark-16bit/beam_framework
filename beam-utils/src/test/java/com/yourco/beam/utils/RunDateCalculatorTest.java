@@ -909,6 +909,65 @@ class RunDateCalculatorTest {
         }
     }
 
+    // ── Report lookback (owner request 2026-10-05; contract Part 3 #9) ────────
+
+    private static List<Integer> lookback(RunScheduleConfig dataSource, RunScheduleConfig report,
+                                          LocalDate businessDate, int from, int to) {
+        RunDates dates = RunDateCalculator.calculateLastPeriod(report, businessDate, CALENDAR);
+        return RunDateCalculator.lookbackPeriodIds(dataSource, report, dates, from, to, CALENDAR);
+    }
+
+    @Test
+    void monthlyLookbackZeroToMinus11IsTwelveMonthsEndingAtTheReportPeriod() {
+        RunScheduleConfig m = schedule("MONTHLY", "WD+3", "WD+5", "", "Calendar_EPS");
+        // Business date Sep 2026, blank dayLag → report period Aug 2026
+        List<Integer> ids = lookback(m, m, d(2026, 9, 8), 0, -11);
+        assertEquals(12, ids.size());
+        assertEquals(202608, ids.get(0));      // offset 0 = report's own period
+        assertEquals(202607, ids.get(1));
+        assertEquals(202512, ids.get(8));      // crosses the year boundary
+        assertEquals(202509, ids.get(11));     // offset -11
+    }
+
+    @Test
+    void lookbackRangeNeedNotStartAtZero() {
+        RunScheduleConfig m = schedule("MONTHLY", "WD+3", "WD+5", "", "Calendar_EPS");
+        assertEquals(List.of(202607, 202606), lookback(m, m, d(2026, 9, 8), -1, -2));
+        assertEquals(List.of(202608), lookback(m, m, d(2026, 9, 8), 0, 0));
+    }
+
+    @Test
+    void quarterlyLookbackStepsWholeQuartersWithTheYyyyMMddqqId() {
+        RunScheduleConfig q = schedule("QUARTERLY", "WD+3", "WD+5", "", "Calendar_EPS");
+        // Business date Oct 2026 → previous quarter Q3 2026 = 2026070103
+        assertEquals(List.of(2026070103, 2026040102, 2026010101, 2025100104),
+            lookback(q, q, d(2026, 10, 8), 0, -3));
+    }
+
+    @Test
+    void annualLookbackStepsYears() {
+        RunScheduleConfig a = schedule("ANNUALLY", "WD+3", "WD+5", "", "Calendar_EPS");
+        assertEquals(List.of(2025, 2024, 2023), lookback(a, a, d(2026, 1, 8), 0, -2));
+    }
+
+    @Test
+    void dailyLookbackStepsBusinessDaysForWdAndCalendarDaysForCal() {
+        // Tue 2026-09-08, Mon 09-07 is a holiday. WD-0 → period = 09-08.
+        RunScheduleConfig wd = schedule("DAILY", null, null, "WD-0", "Calendar_EPS");
+        assertEquals(List.of(20260908, 20260904, 20260903), lookback(wd, wd, d(2026, 9, 8), 0, -2));
+        RunScheduleConfig cal = schedule("DAILY", null, null, "CAL-0", "Calendar_EPS");
+        assertEquals(List.of(20260908, 20260907, 20260906), lookback(cal, cal, d(2026, 9, 8), 0, -2));
+    }
+
+    @Test
+    void lookbackIsRefusedWhenDataSourceAndReportFrequenciesDiffer() {
+        RunScheduleConfig m = schedule("MONTHLY", "WD+3", "WD+5", "", "Calendar_EPS");
+        RunScheduleConfig q = schedule("QUARTERLY", "WD+3", "WD+5", "", "Calendar_EPS");
+        RunDates dates = RunDateCalculator.calculateLastPeriod(m, d(2026, 9, 8), CALENDAR);
+        assertThrows(IllegalArgumentException.class,
+            () -> RunDateCalculator.lookbackPeriodIds(q, m, dates, 0, -3, CALENDAR));
+    }
+
     private static void assertNotEquals(Object unexpected, Object actual, String message) {
         assertFalse(unexpected.equals(actual), message);
     }

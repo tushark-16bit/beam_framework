@@ -195,7 +195,9 @@ public final class BigQueryReportRepository {
                 ds.path("datasource_name").asText(null),
                 ds.path("datasource_subprocess").asText(null),
                 ds.path("transform_alias").asText(null),
-                ds.path("is_required").asBoolean(true)));
+                ds.path("is_required").asBoolean(true),
+                ds.hasNonNull("lookback_from") ? ds.get("lookback_from").asInt() : null,
+                ds.hasNonNull("lookback_to") ? ds.get("lookback_to").asInt() : null));
         }
         return result;
     }

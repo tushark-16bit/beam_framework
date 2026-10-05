@@ -628,6 +628,7 @@ owner the same day — see D3 and D4.)
 6. **Report `paramReplace[].dateType`** (`periodId` / `RunDate` / period end + `periodOffset`, Part 1 §7B) — not implemented; its config shape and `periodOffset` unit are not described.
 7. **A report whose data sources have a different frequency** — a report looks its data sources up by its own `periodId`; mapping between differing frequencies is not implemented.
 8. **`maxFreqRunDay`** is read as a `WD±n` string like `freqRunDay`; a bare number (`5`) is NOT_EVALUABLE.
+9. **Report lookback (`lookback_from` / `lookback_to`, owner request 2026-10-05)** — each entry of a report's `datasources[]` may carry both (0 or negative, `from >= to`; e.g. `0` and `-11`). Offset `0` = the report's own period, `-k` = k periods before it, stepped in the **data source's own frequency** (MONTHLY a month, QUARTERLY a quarter with the D3 id, ANNUALLY a year, DAILY a business day for `WD-n`/blank lag — the business-day step for a blank lag is an assumption — or a calendar day for `CAL-n`). Every period in the range must be `COMPLETED` in DaRefer, else the report fails (`DATASOURCE_UNAVAILABLE`) — enforced whether or not the data source is `is_required`. Needs the data source and report to have the **same frequency**, else the lookback cannot be resolved (never guessed; same gap as #7). Pure logic: `RunDateCalculator.lookbackPeriodIds()`.
 
 ### How the contract maps to code
 

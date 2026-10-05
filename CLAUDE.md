@@ -215,7 +215,7 @@ model/RunDates.java                   The dates one eligible source/report run o
 model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int (the
                                        --periodId it was fetched with; ReportPipelineFactory uses RunDates.periodId instead).
                                        runScheduleConfig from the optional "run_details" object (RunScheduleConfig.none() if absent).
-model/ReportDatasourceRef.java        Required DS for a report + transform alias.
+model/ReportDatasourceRef.java        Required DS for a report + transform alias. Optional lookbackFrom/lookbackTo (config keys lookback_from/lookback_to, 0 or negative, from >= to; both or neither): the report fails unless every period from the report's own period (0) back to lookbackTo is COMPLETED, stepped in the data source's own frequency. hasLookback().
 model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
 model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
 model/ReportOutputConfig.java         File output: CSV/JSON, GCS path, prefix, suffix.
@@ -366,6 +366,8 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                              Run days: WD+n n-th business day of the window month, WD-n n-th-last, WD+0 last calendar
                              day of the previous month; window month = Business Date's month (MONTHLY), first month of
                              its quarter (QUARTERLY, assumption), January (ANNUALLY, assumption).
+                             lookbackPeriodIds(dataSource, report, reportDates, from, to, calendar) → the period ids a report's lookback must
+                             find COMPLETED (contract Part 3 #9; same frequency required).
                              Pure evaluate(schedule, businessDate, itemType, calendarProvider) overload is what
                              RunDateCalculatorTest (65 tests) exercises. All call sites run in the driver JVM:
                              DataSourcePipelineFactory (per source), ReportPipelineFactory.execute(options),
@@ -802,6 +804,8 @@ Main.runReportProcessing(options)
     │       └─ BigQueryJobService.runQueryToTable(resolvedSQL, outputTable)
     │
     ├─ Phase 2: Datasource availability check
+    │   (lookback: for a datasource with lookback_from/lookback_to, EVERY period id in the range must be COMPLETED;
+    │    ids resolved in the driver JVM by resolveLookbackPeriods() → RunDateCalculator.lookbackPeriodIds())
     │   └─ for each required ReportDatasourceRef:
     │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srceNm, perId) → must be true
     │

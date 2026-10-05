@@ -9,6 +9,8 @@ import org.slf4j.LoggerFactory;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -532,6 +534,71 @@ public final class RunDateCalculator {
     private static IllegalArgumentException noBusinessDays(LocalDate around) {
         return new IllegalArgumentException(
             "calendar has no business days within " + MAX_DAYS_SCANNED + " days of " + around);
+    }
+
+    // ── Report lookback: period ids of earlier periods of a data source ───────
+
+    /**
+     * Period ids a report must find COMPLETED for one of its data sources — the report's own
+     * period (offset 0) back through {@code lookbackTo}. Offset {@code k <= 0} is {@code -k}
+     * periods before the report's period, stepping in the <b>data source's own frequency</b>:
+     * <ul>
+     *   <li>MONTHLY — one calendar month per step ({@code yyyyMM}); 0..-11 = 12 months.</li>
+     *   <li>QUARTERLY — one calendar quarter per step ({@code yyyyMMddqq}, D3).</li>
+     *   <li>ANNUALLY — one year per step ({@code yyyy}).</li>
+     *   <li>DAILY — one business day per step ({@code yyyyMMdd}) for a {@code WD-n} or blank
+     *       {@code dayLag}, one calendar day for {@code CAL-n}. OPEN QUESTION (contract Part 3
+     *       #9): the business-day step for a blank lag is an assumption.</li>
+     * </ul>
+     * Offset 0 is always {@code reportDates.periodId} itself. The data source must have the same
+     * frequency as the report (contract Part 3 #7: no mapping between differing frequencies), else
+     * {@link IllegalArgumentException} — a lookback is never computed on a guess.
+     *
+     * @param dataSource the data source's run schedule (its frequency/dayLag steps the periods)
+     * @param report     the report's schedule (only its frequency is compared)
+     * @param calendar   the data source's calendar — used only for DAILY business-day steps
+     * @return period ids ordered from {@code lookbackFrom} down to {@code lookbackTo}
+     */
+    public static List<Integer> lookbackPeriodIds(RunScheduleConfig dataSource, RunScheduleConfig report,
+                                                  RunDates reportDates, int lookbackFrom, int lookbackTo,
+                                                  BusinessCalendar calendar) {
+        if (dataSource.frequency == null || !dataSource.frequency.equals(report.frequency)) {
+            throw new IllegalArgumentException("lookback needs the data source and the report to have "
+                + "the same frequency (data source " + dataSource.frequency + ", report "
+                + report.frequency + ")");
+        }
+        List<Integer> ids = new ArrayList<>();
+        for (int offset = lookbackFrom; offset >= lookbackTo; offset--) {
+            ids.add(offset == 0 ? reportDates.periodId
+                                : periodIdBack(dataSource, reportDates.periodStart, -offset, calendar));
+        }
+        return ids;
+    }
+
+    /** Period id {@code steps} periods before the one starting at {@code anchor}. */
+    private static int periodIdBack(RunScheduleConfig schedule, LocalDate anchor, int steps,
+                                    BusinessCalendar calendar) {
+        switch (schedule.frequency) {
+            case RunScheduleConfig.DAILY -> {
+                boolean calendarDays = schedule.dayLag != null && schedule.dayLag.startsWith("CAL-");
+                LocalDate day = calendarDays ? anchor.minusDays(steps)
+                                             : minusBusinessDays(anchor, steps, calendar);
+                return day.getYear() * 10000 + day.getMonthValue() * 100 + day.getDayOfMonth();
+            }
+            case RunScheduleConfig.MONTHLY -> {
+                YearMonth month = YearMonth.from(anchor).minusMonths(steps);
+                return month.getYear() * 100 + month.getMonthValue();
+            }
+            case RunScheduleConfig.QUARTERLY -> {
+                LocalDate quarterStart = LocalDate.of(anchor.getYear(),
+                    quarterStartMonth(anchor.getMonthValue()), 1).minusMonths(3L * steps);
+                return quarterPeriodId(quarterStart, (quarterStart.getMonthValue() - 1) / 3 + 1);
+            }
+            case RunScheduleConfig.ANNUALLY -> {
+                return anchor.getYear() - steps;
+            }
+            default -> throw new IllegalArgumentException("unsupported frequency " + schedule.frequency);
+        }
     }
 
     private static int quarterStartMonth(int month) {

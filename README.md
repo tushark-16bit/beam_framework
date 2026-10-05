@@ -566,12 +566,14 @@ and whether each one is mandatory, in its own `datasources[]`:
 ```json
 {
   "datasources": [
-    {"datasource_name": "trades",   "datasource_subprocess": "eod", "is_required": true},
+    {"datasource_name": "trades",   "datasource_subprocess": "eod", "is_required": true, "lookback_from": 0, "lookback_to": -11},
     {"datasource_name": "fx_rates", "datasource_subprocess": "eod", "is_required": false}
   ],
   "...": "the rest of the report config, unchanged"
 }
 ```
+
+`lookback_from`/`lookback_to` (optional, both or neither; 0 or negative) make the report fail unless the data source is `COMPLETED` for every period from the report's own (0) back to `lookback_to`, stepping in the data source's own frequency (`0`/`-11` monthly = 12 months). The data source and report must share a frequency.
 
 `PIPELINE` reads that same `datasources[]`, batches whichever aren't already `COMPLETED` for the
 period into **one** Dataflow job (never one job per datasource — sources stay independent
