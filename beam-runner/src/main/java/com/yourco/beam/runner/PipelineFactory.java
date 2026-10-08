@@ -13,6 +13,9 @@ import com.yourco.beam.retry.FixedRetryPolicy;
 import com.yourco.beam.retry.RetryPolicy;
 import com.yourco.beam.transform.BeamTransform;
 import com.yourco.beam.transform.TransformRegistry;
+import com.yourco.beam.transforms.EnrichFromExternalApiTransform;
+import com.yourco.beam.transforms.FilterNullsTransform;
+import com.yourco.beam.transforms.MaskPiiTransform;
 import com.yourco.beam.utils.BigQuerySchemaUtils;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.schemas.Schema;
@@ -70,7 +73,10 @@ public final class PipelineFactory {
         // ── Step 2: Resolve transform chain ───────────────────────────────────
         String chainSpec = loadedRunConfig.getTransformChain();
         LOG.info("Resolving transform chain: '{}'", chainSpec);
-        TransformRegistry registry = TransformRegistry.load();
+        // The shipped transforms are declared and constructed here — no ServiceLoader. A new
+        // BeamTransform is added to this list.
+        TransformRegistry registry = TransformRegistry.of(
+            new FilterNullsTransform(), new MaskPiiTransform(), new EnrichFromExternalApiTransform());
         List<BeamTransform> chain  = registry.resolve(chainSpec);
 
         // Collect dead-letter outputs from every step in the chain

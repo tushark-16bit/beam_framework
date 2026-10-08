@@ -13,7 +13,7 @@ You should rarely need to edit this module.
 | `DataSourcePipelineFactory` | `DATA_SOURCE_DOWNLOAD`: validates params, fetches configs, creates LOADING checkpoints, assembles per-source Beam branches. `assemble(options)` (single `--datasourceName`) delegates to public `assembleForConfigs(options, List<SourceConfig>)`, which `PipelineSequenceFactory` also calls directly with several explicitly-fetched configs to batch them into one job. `assembleForConfigs()` returns a `DataSourceAssembly` (pipeline + one finalize-signal `PCollection<Long>` per source branch), not a bare `Pipeline`, so a report step can be wired onto the same pipeline before submission. Both classify their own (config/assembly-time) failures into `DataSourceDownloadException`; only builds+returns the assembly, never calls `run()` itself. Finance Automation scheduling: each source is evaluated with `RunDateCalculator.evaluateDataSource()`; only ELIGIBLE sources get a DaRefer row and a branch — others are logged and skipped (NOT_EVALUABLE also goes through `FailureNotifier`). `assemble()` now returns the `DataSourceAssembly` so `Main` can skip submitting an empty job. `--periodId` is no longer mandatory (calculated per scheduled source); `--manualOverrun` bypasses only the COMPLETED check, never eligibility or dates. A source with no run schedule or calendar is not processed (NOT_EVALUABLE + failure notification) — no fallback to CLI dates. |
 | `DataSourceAssembly` | Package-private holder: `{pipeline, finalizeSignals}` — lets the pipeline and its per-source finalize signals travel together from `DataSourcePipelineFactory` to `PipelineSequenceFactory` `isEmpty()` — no source branch; callers don't submit an empty job. |
 | `PostDownloadFinalizeTransform` | Final pipeline step for each `DATA_SOURCE_DOWNLOAD` source: row/BnC validation, optional `data_transform_query` (replaces stored rows once validated, via an atomic DELETE+INSERT transaction), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), `--manualOverrun` cleanup of the superseded previous run's DaRec rows, and failure email — all running in the Beam worker, entirely independent of the driver JVM (which has already returned by the time this runs). Its output is a `PCollection<Long>` signal element — this source's `da_id`, emitted in a `finally` block whether validation succeeded or failed — used by a downstream `Wait.on()` when this branch is part of a batched `PIPELINE` run |
-| `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted, so no waiting to do. `execute(options)` fetches `ReportConfig` then delegates to `execute(options, config, dates)` — the overload `ReportFinalizeTransform` calls from a worker with a pre-fetched config, skipping the `BigQueryReportRepository` call a DoFn may never make. Lookback: `resolveLookbackPeriods(options, config, dates)` (driver JVM — it needs each data source's `run_details_json` schedule and calendar) turns a datasource's `lookback_from`/`lookback_to` into period ids via `RunDateCalculator.lookbackPeriodIds()`; `execute(options, config, dates, lookbackPeriods)` then fails the report (`DATASOURCE_UNAVAILABLE`, naming each missing period) unless every id is `COMPLETED`, whether or not the datasource is `is_required`. `PipelineSequenceFactory` resolves it at submission and carries it to the worker in `ReportRunDoFn`; if it can't be resolved the report step is skipped and reported, data sources still load. Report-completion email uses `EmailSendUtility` (`beam-io`), discovered via `ServiceLoader` SPI or injected via constructor — see its own section below. Classifies its own failures into `ReportProcessingException`, one `Reason` per phase. Every date in the run — RptRefer/DaRefer `per_id`, query tokens, GCS output file names via `ReportOutputSinkRouter`, email tokens — comes from those `RunDates` Standalone runs evaluate the report's own schedule (`RunDateCalculator.evaluateReport()`): not eligible → return with no RptRefer row; not evaluable → `ReportProcessingException`; scheduled + already COMPLETED for the period → skip unless `--manualOverrun` (`isAlreadyCompleted()`, shared with `PipelineSequenceFactory`). A report with no run schedule or calendar is not processed (`ReportProcessingException`). |
+| `ReportPipelineFactory` | `REPORT_PROCESSING` (DB-configured): orchestrates BQ jobs + email in driver JVM; uses `ReportCheckpointAdapter` for RptRefer/RptDaMap/RptStageDa/RptOutput tracking; writes final result to per-report BQ table (`output_bq_table` from config) if set; no Beam pipeline submitted, so no waiting to do. `execute(options)` fetches `ReportConfig` then delegates to `execute(options, config, dates)` — the overload `ReportFinalizeTransform` calls from a worker with a pre-fetched config, skipping the `BigQueryReportRepository` call a DoFn may never make. Lookback: `resolveLookbackPeriods(options, config, dates)` (driver JVM — it needs each data source's `run_details_json` schedule and calendar) turns a datasource's `lookback_from`/`lookback_to` into period ids via `RunDateCalculator.lookbackPeriodIds()`; `execute(options, config, dates, lookbackPeriods)` then fails the report (`DATASOURCE_UNAVAILABLE`, naming each missing period) unless every id is `COMPLETED`, whether or not the datasource is `is_required`. `PipelineSequenceFactory` resolves it at submission and carries it to the worker in `ReportRunDoFn`; if it can't be resolved the report step is skipped and reported, data sources still load. Report-completion email uses `EmailSendUtility` (`beam-io`), taken from `EmailSendUtilities.create()` or injected via constructor — see its own section below. Classifies its own failures into `ReportProcessingException`, one `Reason` per phase. Every date in the run — RptRefer/DaRefer `per_id`, query tokens, GCS output file names via `ReportOutputSinkRouter`, email tokens — comes from those `RunDates` Standalone runs evaluate the report's own schedule (`RunDateCalculator.evaluateReport()`): not eligible → return with no RptRefer row; not evaluable → `ReportProcessingException`; scheduled + already COMPLETED for the period → skip unless `--manualOverrun` (`isAlreadyCompleted()`, shared with `PipelineSequenceFactory`). A report with no run schedule or calendar is not processed (`ReportProcessingException`). |
 | `SmtpReportEmailAdapter` | SMTP implementation of `ReportEmailAdapter`; used only by `PostDownloadFinalizeTransform`'s DATA_SOURCE_DOWNLOAD failure email now |
 | `PipelineFactory` | `REPORT_PROCESSING` (legacy): assembles generic source → transform chain → sink Beam pipeline. Its non-streaming path still calls `waitUntilFinish()` directly — a known gap, left as-is since it has no checkpoint table to gate on and isn't launched via the Flex Template path the rest of this section describes |
 | `PipelineSequenceFactory` | `PIPELINE`: same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING`, no separate config — assembles one batched Dataflow job for whichever not-yet-`COMPLETED` datasources the report's own `datasources[]` declares, wires the report step onto that SAME pipeline via `ReportFinalizeTransform.wire()` (gated on `Wait.on()`), submits ONCE, and returns immediately — see its own section below. A `DataSourceDownloadException` from assembly/submission passes through unchanged; anything else becomes `PipelineException`. Resolves the report's `RunDates` in the driver JVM at submission and passes them to `wire()`; warns when a datasource's own resolved `periodId` differs from the report's `decideReportRun()` applies the report's own schedule + COMPLETED check at submission; a skipped report doesn't stop its data sources (BAU: scheduled independently); nothing eligible → no job submitted. `--periodId` is no longer mandatory (each item's period id is calculated from the Business Date). |
@@ -176,7 +176,7 @@ PipelineFactory.assemble(options)
     │       null for query-only or failed fetch → BigQuerySourceTransform resolves
     │       column names itself via a preview query (see beam-io/README.md)
     ├─ 2. SourceRouter.route(schema)    reads --sourceType; typed if schema non-null
-    ├─ 3. TransformRegistry + chain loop
+    ├─ 3. TransformRegistry.of(new FilterNullsTransform(), …) + chain loop
     ├─ 4. SinkRouter.route()
     └─ 5. Flatten DLQ → DeadLetterSinkTransform
 ```
@@ -195,18 +195,13 @@ this repository defines but ships no implementation of — the real implementati
 an organization's own existing email-gateway client, kept outside this codebase.
 
 ```java
-private static EmailSendUtility discoverEmailUtility() {
-    Iterator<EmailSendUtility> found = ServiceLoader.load(EmailSendUtility.class).iterator();
-    return found.hasNext() ? found.next() : null;
-}
+// EmailSendUtilities.java — the one place the implementation is declared and constructed
+static EmailSendUtility create() { return null; }   // → return new MyGatewayEmailSendUtility();
 ```
 
-Two ways to supply a real implementation:
-1. **SPI (preferred)** — a JAR on the classpath with
-   `META-INF/services/com.yourco.beam.io.email.EmailSendUtility` naming the implementation class.
-   `ReportPipelineFactory`'s no-arg and 2-arg constructors call `discoverEmailUtility()`
-   automatically — same `ServiceLoader` mechanism `TransformRegistry` uses for `BeamTransform`,
-   merged into the fat jar the same way (`maven-shade-plugin`'s `ServicesResourceTransformer`).
+Two ways to supply a real implementation (no `ServiceLoader` — CLAUDE.md §12):
+1. **Declare it in `EmailSendUtilities.create()`** — `ReportPipelineFactory`'s no-arg and 2-arg
+   constructors and `FailureNotifier` both call it.
 2. **Constructor injection** — `new ReportPipelineFactory(bqJobService, sinkRouter, emailUtility)`.
 
 If neither yields an `EmailSendUtility`, `sendEmail()` logs a warning and returns without sending
@@ -364,7 +359,7 @@ try {
 one of the three (the legacy `PipelineFactory` REPORT_PROCESSING path never throws one of these,
 and a failure before any factory even runs, e.g. CLI arg parsing, has nothing to match). The
 notification is always logged; it's only emailed if `--opsFailureEmail` is set and an
-`EmailSendUtility` is discoverable via SPI (same mechanism as `ReportPipelineFactory`'s
+`EmailSendUtility` is configured in `EmailSendUtilities.create()` (same source as `ReportPipelineFactory`'s
 report-completion email) — see `beam-core/README.md`'s "Global failure notification" section for
 the two flags. Every step inside `sendBestEffort()` is wrapped so a notification failure can never
 mask the original exception `Main` is already in the middle of rethrowing.
@@ -383,8 +378,7 @@ mvn package -pl beam-runner -am -DskipTests
 
 The `maven-shade-plugin` in `beam-runner/pom.xml` does two critical things:
 1. Bundles all dependencies into one JAR for Dataflow to execute
-2. **`ServicesResourceTransformer`** merges all `META-INF/services/` files from all JARs
-   so the SPI registry sees transforms from every module
+2. **`ServicesResourceTransformer`** merges any `META-INF/services/` files from dependency JARs (the framework itself declares no `ServiceLoader` services)
 
 ---
 

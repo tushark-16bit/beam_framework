@@ -273,7 +273,7 @@ ul.plain li{margin-bottom:6px;}
         <div class="mod core"><div class="name">beam-core</div><div class="desc">Contracts only. Options, enums, SPI interfaces, model classes. Zero deps on siblings.</div></div>
         <div class="mod"><div class="name">beam-io</div><div class="desc">Source/sink connectors, BQ config repos, checkpoint adapters. → core only.</div></div>
         <div class="mod"><div class="name">beam-utils</div><div class="desc">Stateless helpers: schema fetch, GCS, secrets, calendars, token resolution. → core only.</div></div>
-        <div class="mod"><div class="name">beam-transforms</div><div class="desc">Pluggable BeamTransform SPI impls + per-source transforms. → core, utils.</div></div>
+        <div class="mod"><div class="name">beam-transforms</div><div class="desc">BeamTransform implementations + per-source transforms. → core, utils.</div></div>
         <div class="mod"><div class="name">beam-runner</div><div class="desc">Entry point &amp; orchestration factories. → everything else.</div></div>
       </div>
 
@@ -571,7 +571,7 @@ ul.plain li{margin-bottom:6px;}
           <div class="step-title">Email &amp; close out</div>
           <div class="step-body">Outputs are fetched (<code>EmailSendUtility.FetchFileFromGcs()</code>) and attached; the
           checkpoint is updated to <code>COMPLETED</code> — or <code>FAILED</code> if any phase above threw.
-          <code>EmailSendUtility</code> ships no implementation in this repo — it's discovered via SPI or injected, and
+          <code>EmailSendUtility</code> ships no implementation in this repo — it's declared in one place (<code>EmailSendUtilities.create()</code>) or injected, and
           email is skipped with a warning (not a failure) if none is available.</div>
         </div>
       </div>
@@ -953,7 +953,7 @@ ul.plain li{margin-bottom:6px;}
             <tr><td>A new data source type</td><td>Row in <code>source_config</code> + <code>SourceType</code> enum + adapter/transform pair in <code>beam-io/source/</code> + a case in <code>SourceRouter</code></td></tr>
             <tr><td>A new per-source transform</td><td>Class in <code>beam-transforms/source/</code> + a case in <code>SourceTransformChainAssembler</code></td></tr>
             <tr><td>A new report transform step</td><td>Nothing — it's raw SQL in <code>parameter_store</code>, no Java change needed</td></tr>
-            <tr><td>A new pluggable <code>BeamTransform</code></td><td>Implement the interface + register in <code>META-INF/services/...BeamTransform</code></td></tr>
+            <tr><td>A new pluggable <code>BeamTransform</code></td><td>Implement the interface + add <code>new MyTransform()</code> to the <code>TransformRegistry.of(...)</code> list in <code>PipelineFactory</code></td></tr>
             <tr><td>A new CLI flag</td><td><code>FrameworkOptions.java</code> + <code>beam-core/README.md</code> + root <code>README.md</code></td></tr>
           </tbody>
         </table>

@@ -334,8 +334,7 @@ source/report configs (`--paramBqProject` / `--paramBqDataset` / `--paramStoreTa
   (not processed + failure notification), as a calendar must exist (D5).
 - The three column names are constants at the top of the class (`COL_GROUP`, `COL_NAME`,
   `COL_VALUE`) — they match the columns the other repositories read from this table.
-- To use a different source (external calendar service), register your own `BusinessCalendarProvider`
-  via `META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider`; it takes precedence.
+- Callers construct `new BigQueryBusinessCalendarProvider(options)` directly (typed as `BusinessCalendarProvider` if wanted); nothing is discovered via `ServiceLoader`. To use a different source (external calendar service), add an implementation and change where it is constructed (`RunDateCalculator.evaluateDataSource()/evaluateReport()`, `ReportPipelineFactory.resolveLookbackPeriods()`).
 
 ### Open items
 

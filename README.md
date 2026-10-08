@@ -181,8 +181,8 @@ Change `dag_run.conf` JSON to change pipeline behaviour:
 ## How to add a new transform (without touching the framework)
 
 1. Create a class implementing `BeamTransform` in any Maven module or separate project
-2. Add one line to `META-INF/services/com.yourco.beam.transform.BeamTransform`
-3. Include the JAR in the fat JAR (Maven dependency) or pass via `--customTransformJarPath`
+2. Add `new MyTransform()` to the `TransformRegistry.of(...)` list in `beam-runner`'s `PipelineFactory`
+3. Include the module in the fat JAR (Maven dependency)
 4. Use the transform name in `--transformChain`
 
 See `beam-transforms/README.md` for a complete step-by-step example with code.

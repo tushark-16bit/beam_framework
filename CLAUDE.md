@@ -122,7 +122,7 @@ Read in this order for a complete mental model:
 6.  beam-runner/.../runner/ReportPipelineFactory      — REPORT_PROCESSING orchestration (BQ-based)
 7.  beam-io/.../io/params/BigQueryParameterAdapter    — key-value BQ param store interface + impl
 8.  beam-io/.../io/config/BigQueryReportRepository    — report config fetched from parameter_store nested JSON
-9.  beam-core/.../transform/BeamTransform.java        — SPI interface; the extension contract
+9.  beam-core/.../transform/BeamTransform.java        — transform interface; the extension contract
 10. beam-runner/.../runner/PipelineFactory.java       — legacy REPORT_PROCESSING (transform chain)
 11. beam-io/.../io/config/BigQuerySourceConfigRepository — source config rows fetched from BQ (DATA_SOURCE_DOWNLOAD)
 12. beam-io/.../io/source/SourceRouter.java            — source type → connector mapping
@@ -155,8 +155,8 @@ options/SinkType.java                 Enum: GCS | BQ | PUBSUB
 options/RetryPolicyType.java          Enum: NONE | FIXED | EXPONENTIAL
 options/WriteDispositionType.java     Enum: APPEND | TRUNCATE
 
-transform/BeamTransform.java          SPI interface. name() + toComposite(). SUCCESS_TAG + DEAD_LETTER_TAG.
-transform/TransformRegistry.java      ServiceLoader discovery. resolve(chainSpec) → List<BeamTransform>.
+transform/BeamTransform.java          Transform interface. name() + toComposite(). SUCCESS_TAG + DEAD_LETTER_TAG.
+transform/TransformRegistry.java      Name index over explicitly constructed transforms: of(BeamTransform...) (no ServiceLoader). resolve(chainSpec) → List<BeamTransform>.
 
 retry/RetryPolicy.java                Interface: shouldRetry(attempt, cause), delayMs(attempt).
 retry/ExponentialRetryPolicy.java     Exponential back-off, ThreadLocalRandom jitter, 200ms cap.
@@ -297,8 +297,8 @@ email/EmailSendUtility.java           Interface: SetEmailParams(fromAddress, sub
                                        CreateEmailRequest(EmailParams, bodyHtml, List<model.EmailAttachment>); default method
                                        FetchFileFromGcs(fileLocation) fetches a GCS object as an InputStream via the GCS client
                                        directly (beam-io can't depend on beam-utils' GcsUtils). No implementation ships in this
-                                       repo — ReportPipelineFactory discovers one via ServiceLoader SPI (same mechanism as
-                                       TransformRegistry for BeamTransform) or accepts one via constructor injection; if neither
+                                       repo — beam-runner's EmailSendUtilities.create() is the one place an implementation is declared and
+                                       constructed (or accepted via ReportPipelineFactory's constructor); if none
                                        is available, report-completion email is skipped with a warning, not a failure.
 
 report/BigQueryJobService.java        BQ jobs: runQueryToTable(), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
@@ -374,9 +374,8 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                              PipelineSequenceFactory (report half, carried to the worker).
 BusinessCalendar.java       @FunctionalInterface isBusinessDay(LocalDate) — one calendar (weekends + holidays). All WD
                              arithmetic is built on this single answer, in RunDateCalculator.
-BusinessCalendarProvider.java forKey(calendarKey) → BusinessCalendar. discover(options) returns a provider registered via
-                             META-INF/services/com.yourco.beam.utils.BusinessCalendarProvider if any (override), else the
-                             BigQueryBusinessCalendarProvider. If the calendar can't be loaded the item is NOT_EVALUABLE
+BusinessCalendarProvider.java forKey(calendarKey) → BusinessCalendar. Callers construct BigQueryBusinessCalendarProvider(options)
+                             directly (variable may be typed as this interface); no ServiceLoader. If the calendar can't be loaded the item is NOT_EVALUABLE
                              (not processed + reported) — a calendar must exist (D5).
 BigQueryBusinessCalendarProvider.java Default provider. Reads the parameter table (--paramBqProject/--paramBqDataset/
                              --paramStoreTable) row parameter_group_name='FINACOE_Calendars', parameter_name=calendarKey, and
@@ -409,7 +408,6 @@ source/LookupEnrichTransform.java   Left-join via PCollectionView<Map<String,Str
 
 side/SideEffectEmailTransform.java  Sends SMTP email per Row. No attachments. Best-effort (logs on fail).
 
-META-INF/services/...BeamTransform  SPI manifest. One class name per line.
 ```
 
 ### beam-runner — entry point and pipeline factories
@@ -460,6 +458,7 @@ DataSourceAssembly.java         Package-private holder: {pipeline, finalizeSigna
                                 submitting. isEmpty() (no source branch) → Main/PipelineSequenceFactory don't submit an
                                 empty job — the normal outcome on most days once run windows apply.
 PostDownloadFinalizeTransform.java  Final worker-side step for each source branch: always-on row count equality check (storedRowCount vs pipelineRowCount), optional min/max bounds, optional data_transform_query (post-storage SQL transform; a WITH data AS (...) UNNEST(DaRec) CTE is always prepended before it runs, unconditionally — the operator's SQL just references `data` as a plain table; validates output row count before replacing stored rows; original rows untouched on failure), optional BnC sum rules (against transformed rows if applied), checkpoint update (COMPLETED/FAILED_BNC/FAILED_TRANSFORM/FAILED), manualOverrun cleanup (deletes the superseded previous da_id's DaRec rows, only on COMPLETED), failure email. Runs inside Beam worker. expand() returns PCollection<Long> (not PDone): FinalizeDoFn emits this source's da_id as a signal element in a finally block — success or failure alike — so PipelineSequenceFactory/ReportFinalizeTransform can gate a downstream report step on it via Wait.on() without polling DaRefer.
+EmailSendUtilities.java         Package-private: create() is the single place the EmailSendUtility implementation is declared and constructed (returns null — email skipped with a warning — until an organization's implementation is plugged in). Used by ReportPipelineFactory and FailureNotifier. No ServiceLoader.
 ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ jobs + email.
                                 Uses BigQueryReportRepository (not JDBC) for all config loading.
                                 After transform chain, writes final result to per-report BQ table
@@ -467,8 +466,8 @@ ReportPipelineFactory.java      REPORT_PROCESSING (BQ-configured): driver-JVM BQ
                                 output_bq_input_alias → last transform alias → first datasource alias.
                                 Report-completion email uses EmailSendUtility (io/email/), not
                                 SmtpReportEmailAdapter: an EmailSendUtility is passed to the
-                                3-arg constructor, or discovered via ServiceLoader SPI in the
-                                no-arg/2-arg constructors (discoverEmailUtility()) — this repo
+                                3-arg constructor, or taken from EmailSendUtilities.create() in the
+                                no-arg/2-arg constructors — this repo
                                 ships no implementation, so it's null unless the deployment's
                                 classpath provides one; sendEmail() logs a warning and skips
                                 sending rather than failing the report when it's null.
@@ -589,7 +588,7 @@ the difference that decides where each one is allowed to live.
 All Beam transforms communicate via `PCollection<Row>` with a declared `Schema`.
 Call `.setRowSchema()` on every output. Do not use raw bytes, Strings, or Avro.
 
-### Output contract (BeamTransform SPI)
+### Output contract (BeamTransform)
 
 Every `BeamTransform.toComposite()` returns `PTransform<PCollection<Row>, PCollectionTuple>`.
 The tuple MUST include both:
@@ -643,12 +642,12 @@ Add a new object to the `transforms` array in the `parameter_store` `parameters_
 the report, with `query_template` referencing any alias in the registry. Custom tokens go in
 `query_params_json`.
 
-### Add a new BeamTransform (pluggable, SPI-registered)
+### Add a new BeamTransform
 
 1. Create class implementing `BeamTransform` in `beam-transforms/`
 2. Use named `static final` inner classes for composite and DoFn
 3. Output to both `SUCCESS_TAG` and `DEAD_LETTER_TAG`
-4. Add to `META-INF/services/com.yourco.beam.transform.BeamTransform`
+4. Add `new MyTransform()` to the `TransformRegistry.of(...)` list in `PipelineFactory` (no ServiceLoader / META-INF/services)
 5. Update `beam-transforms/README.md`
 
 ### Add a new CLI flag
@@ -1056,7 +1055,7 @@ Any number of custom tokens are supported. Unknown tokens are left unchanged.
 | Hard-code param key names in Java for REPORT_PROCESSING | Fetch required keys from schema_of_json in parameter_store |
 | Create a separate source_config table | Store source connector config in parameter_store (parameters_val_json) |
 | Create `TupleTag` inside `@ProcessElement` | `static final` field on the DoFn |
-| Hardcode a new transform in `PipelineFactory` | Register via SPI manifest |
+| Use `ServiceLoader.load(...)` anywhere (SPI discovery, `META-INF/services`) | Declare and construct the implementation explicitly in one place and use it from there; the variable may be typed as the interface. Examples: `new BigQueryBusinessCalendarProvider(options)`, `EmailSendUtilities.create()`, `TransformRegistry.of(new FilterNullsTransform(), …)` |
 | Call `result.waitUntilFinish()` for streaming | Check source type first |
 | Leave READMEs stale after a code change | Update in the same commit |
 | Change date / period / eligibility logic without reading `DATE_SCHEDULING_RULES.md` | Read it first; if the change contradicts it, ask the owner |
@@ -1186,11 +1185,10 @@ Used only by `ReportPipelineFactory`'s report-completion email. This repository 
 contract but ships no implementation — the real one is expected to be an organization's own
 existing email-gateway client, supplied at runtime rather than committed here. Two ways to plug
 one in:
-1. **Java SPI** (preferred, zero code change here) — a JAR on the classpath declaring
-   `META-INF/services/com.yourco.beam.io.email.EmailSendUtility` with the implementation's
-   fully-qualified class name. `ReportPipelineFactory.discoverEmailUtility()` finds it via
-   `ServiceLoader.load(EmailSendUtility.class)`, the same mechanism `TransformRegistry` uses for
-   `BeamTransform`.
+1. **Declare it in one place** — add the implementation class to the build and return
+   `new MyGatewayEmailSendUtility()` from `EmailSendUtilities.create()` (`beam-runner`). Both
+   `ReportPipelineFactory` and `FailureNotifier` get theirs from there; nothing is discovered via
+   `ServiceLoader` (§12).
 2. **Constructor injection** — pass an `EmailSendUtility` instance to
    `ReportPipelineFactory`'s 3-arg constructor directly (useful for tests).
 
@@ -1339,7 +1337,7 @@ Add these two flags to any of the above to get a best-effort email when the run 
 ```
 
 Both default to empty — leave unset to skip notification entirely (the failure is still logged).
-Requires an `EmailSendUtility` discoverable via SPI; if none is on the classpath, this is a no-op
+Requires an `EmailSendUtility` returned by `EmailSendUtilities.create()`; if none is configured, this is a no-op
 (logged, not an error).
 
 ---

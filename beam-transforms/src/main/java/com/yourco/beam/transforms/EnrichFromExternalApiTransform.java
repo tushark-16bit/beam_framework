@@ -64,7 +64,7 @@ import java.util.List;
  *   <li>Replace {@link HttpClient} with your actual client (JDBC, gRPC, Redis, etc.).</li>
  *   <li>Replace {@code callApi()} with your actual enrichment logic.</li>
  *   <li>Replace {@code mergeEnrichment()} with your field-mapping logic.</li>
- *   <li>Register in {@code META-INF/services} and add your CLI options.</li>
+ *   <li>Add it to {@code TransformRegistry.of(...)} in {@code PipelineFactory} and add your CLI options.</li>
  * </ol>
  *
  * <h2>Thread safety</h2>

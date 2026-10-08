@@ -239,7 +239,7 @@ sequenceDiagram
     participant DataBQ as BigQuery<br/>(data / report tables)
     participant DaRec as BigQuery<br/>(DaRec)
     participant GCS as Cloud Storage
-    participant EmailUtil as EmailSendUtility<br/>(SPI-discovered or injected)
+    participant EmailUtil as EmailSendUtility<br/>(from EmailSendUtilities.create() or injected)
 
     Main->>RPF: execute(options)
 
@@ -785,7 +785,7 @@ classDiagram
     EmailSendUtility ..> EmailParams : returns / consumes
     EmailSendUtility ..> ModelEmailAttachment : parameter
 
-    note for EmailSendUtility "No implementation ships in this repo.\nReportPipelineFactory discovers one via\nServiceLoader SPI, or accepts one via\nconstructor injection. Used only for\nREPORT_PROCESSING/PIPELINE\nreport-completion email — if none is\navailable, sending is skipped with a\nwarning, not a failure."
+    note for EmailSendUtility "No implementation ships in this repo.\nEmailSendUtilities.create() is the one\nplace it is declared, or it is\ninjected via constructor. Used only for\nREPORT_PROCESSING/PIPELINE\nreport-completion email — if none is\navailable, sending is skipped with a\nwarning, not a failure."
 ```
 
 `ReportEmailAdapter`/`SmtpReportEmailAdapter` and `EmailSendUtility` are unrelated interfaces for

@@ -146,7 +146,7 @@ public final class RunDateCalculator {
      * Called once per data source by {@code DataSourcePipelineFactory}.
      */
     public static ScheduleDecision evaluateDataSource(RunScheduleConfig schedule, FrameworkOptions options) {
-        return evaluate(schedule, options, ItemType.DATA_SOURCE, BusinessCalendarProvider.discover(options));
+        return evaluate(schedule, options, ItemType.DATA_SOURCE, new BigQueryBusinessCalendarProvider(options));
     }
 
     /**
@@ -156,7 +156,7 @@ public final class RunDateCalculator {
      * Called by {@code ReportPipelineFactory} and {@code PipelineSequenceFactory}.
      */
     public static ScheduleDecision evaluateReport(RunScheduleConfig schedule, FrameworkOptions options) {
-        return evaluate(schedule, options, ItemType.REPORT, BusinessCalendarProvider.discover(options));
+        return evaluate(schedule, options, ItemType.REPORT, new BigQueryBusinessCalendarProvider(options));
     }
 
     /** Same as the two entry points above, with an explicit calendar provider. */

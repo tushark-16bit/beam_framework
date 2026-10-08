@@ -22,6 +22,7 @@ import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.io.config.BigQueryReportRepository;
 import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
 import com.yourco.beam.utils.BusinessCalendar;
+import com.yourco.beam.utils.BigQueryBusinessCalendarProvider;
 import com.yourco.beam.utils.BusinessCalendarProvider;
 import com.yourco.beam.utils.QueryParameterResolver;
 import com.yourco.beam.utils.RunDateCalculator;
@@ -29,11 +30,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.ServiceLoader;
 
 /**
  * Orchestrates the full REPORT_PROCESSING lifecycle in the driver JVM.
@@ -81,18 +80,17 @@ public final class ReportPipelineFactory {
     }
 
     ReportPipelineFactory(BigQueryJobService bqJobService) {
-        this(bqJobService, new ReportOutputSinkRouter(bqJobService), discoverEmailUtility());
+        this(bqJobService, new ReportOutputSinkRouter(bqJobService), EmailSendUtilities.create());
     }
 
     ReportPipelineFactory(BigQueryJobService bqJobService, ReportOutputSinkRouter sinkRouter) {
-        this(bqJobService, sinkRouter, discoverEmailUtility());
+        this(bqJobService, sinkRouter, EmailSendUtilities.create());
     }
 
     /**
      * @param emailUtility the {@link EmailSendUtility} to send report-completion email with.
-     *                     Pass explicitly to inject an implementation that isn't discoverable via
-     *                     SPI (e.g. in a test, or a runtime not using the fat-jar's
-     *                     {@code META-INF/services} merge). May be {@code null} — {@link #execute}
+     *                     Pass explicitly to inject an implementation other than
+     *                     {@code EmailSendUtilities.create()}'s (e.g. in a test). May be {@code null} — {@link #execute}
      *                     then logs a warning and skips sending rather than failing the report.
      */
     public ReportPipelineFactory(BigQueryJobService bqJobService, ReportOutputSinkRouter sinkRouter,
@@ -100,19 +98,6 @@ public final class ReportPipelineFactory {
         this.bqJobService = bqJobService;
         this.sinkRouter   = sinkRouter;
         this.emailUtility = emailUtility;
-    }
-
-    /**
-     * Discovers an {@link EmailSendUtility} implementation via Java SPI — a JAR on the classpath
-     * declaring one in {@code META-INF/services/com.yourco.beam.io.email.EmailSendUtility}, the
-     * same mechanism {@code TransformRegistry} uses for {@code BeamTransform}. This repository
-     * ships no implementation of its own, so this returns {@code null} unless the deployment's
-     * classpath (e.g. an organization's own separately-built JAR, merged into the fat jar by
-     * {@code maven-shade-plugin}'s {@code ServicesResourceTransformer}) provides one.
-     */
-    private static EmailSendUtility discoverEmailUtility() {
-        Iterator<EmailSendUtility> found = ServiceLoader.load(EmailSendUtility.class).iterator();
-        return found.hasNext() ? found.next() : null;
     }
 
     // ── Entry point ───────────────────────────────────────────────────────────
@@ -209,7 +194,7 @@ public final class ReportPipelineFactory {
             try {
                 if (sourceRepo == null) {
                     sourceRepo = new BigQuerySourceConfigRepository(options);
-                    calendars  = BusinessCalendarProvider.discover(options);
+                    calendars  = new BigQueryBusinessCalendarProvider(options);
                 }
                 List<SourceConfig> found = sourceRepo.fetchSourceConfigs(options.getParentId(),
                     ref.datasourceName, ref.datasourceSubprocess, dates.periodId);
@@ -548,7 +533,7 @@ public final class ReportPipelineFactory {
     private void sendEmail(ReportConfig config, RunDates dates,
                            List<ExportedFile> exportedFiles) {
         if (emailUtility == null) {
-            LOG.warn("No EmailSendUtility available (none injected, none discovered via SPI) — "
+            LOG.warn("No EmailSendUtility available (none injected, none configured in EmailSendUtilities.create()) — "
                      + "skipping report-completion email for report={}", config.reportName);
             return;
         }

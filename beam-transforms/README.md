@@ -65,20 +65,14 @@ Use `asSingleton()`, `asList()`, or `asMap()` depending on the access pattern.
 
 ---
 
-## How transforms are discovered (SPI)
+## How transforms are registered
 
-The framework uses Java's `ServiceLoader` to discover transforms at startup.
-Every transform registered in this file is automatically available:
+Transforms are declared and constructed explicitly — there is no `ServiceLoader` discovery
+(CLAUDE.md §12). `PipelineFactory` (`beam-runner`) is the one place they are listed:
 
-```
-src/main/resources/META-INF/services/com.yourco.beam.transform.BeamTransform
-```
-
-Current contents:
-```
-com.yourco.beam.transforms.FilterNullsTransform
-com.yourco.beam.transforms.MaskPiiTransform
-com.yourco.beam.transforms.EnrichFromExternalApiTransform
+```java
+TransformRegistry.of(new FilterNullsTransform(), new MaskPiiTransform(),
+                     new EnrichFromExternalApiTransform());
 ```
 
 ---
@@ -140,10 +134,7 @@ public final class MyNewTransform implements BeamTransform {
 
 ### Step 2 — Register it
 
-Add one line to `META-INF/services/com.yourco.beam.transform.BeamTransform`:
-```
-com.yourco.beam.transforms.MyNewTransform
-```
+Add `new MyNewTransform()` to the `TransformRegistry.of(...)` list in `beam-runner`'s `PipelineFactory`.
 
 ### Step 3 — Use it
 
@@ -155,24 +146,11 @@ That's the entire change required. No framework code touched.
 
 ---
 
-## Adding a transform in a completely separate project
+## Adding a transform from a separate project
 
-You don't need to modify this module at all. Create your own Maven project:
-
-```
-my-custom-transforms/
-├── pom.xml   (depends on beam-core only)
-└── src/main/
-    ├── java/com/myco/MyTransform.java
-    └── resources/META-INF/services/com.yourco.beam.transform.BeamTransform
-```
-
-Then either:
-- **Include at build time**: Add your JAR as a dependency in `beam-runner/pom.xml`.
-  `maven-shade-plugin`'s `ServicesResourceTransformer` merges your `META-INF/services`
-  file automatically.
-- **Include at runtime**: Upload your JAR to GCS and pass
-  `--customTransformJarPath=gs://bucket/jars/my-transforms.jar`
+Create your own Maven project depending on `beam-core`, add it as a dependency of
+`beam-runner/pom.xml`, and add `new MyTransform()` to the `TransformRegistry.of(...)` list in
+`PipelineFactory`. Nothing is discovered automatically.
 
 ---
 

@@ -17,11 +17,9 @@ import java.util.List;
  * outside this codebase — e.g. an organization's existing internal email-gateway client — and be
  * supplied at runtime rather than committed here. Two ways to plug one in:
  * <ul>
- *   <li>Register it via Java SPI: a JAR on the classpath containing
- *       {@code META-INF/services/com.yourco.beam.io.email.EmailSendUtility} with the
- *       implementation's fully-qualified class name — {@code ReportPipelineFactory} discovers it
- *       automatically via {@link java.util.ServiceLoader}, the same mechanism
- *       {@code TransformRegistry} uses for {@code BeamTransform}. No code change needed here.</li>
+ *   <li>Return it from {@code EmailSendUtilities.create()} in {@code beam-runner} — the one place
+ *       the implementation is declared and constructed; {@code ReportPipelineFactory} and
+ *       {@code FailureNotifier} both use it. Nothing is discovered via {@code ServiceLoader}.</li>
  *   <li>Construct it directly and pass it into {@code ReportPipelineFactory}'s constructor.</li>
  * </ul>
  *

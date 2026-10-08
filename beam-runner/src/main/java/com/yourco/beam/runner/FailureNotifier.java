@@ -12,7 +12,6 @@ import org.slf4j.LoggerFactory;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
-import java.util.ServiceLoader;
 
 /**
  * {@code Main}'s single, last-resort failure handler. Builds a subject/body template specific to
@@ -92,10 +91,10 @@ final class FailureNotifier {
             return;
         }
         try {
-            EmailSendUtility emailUtility = discoverEmailUtility();
+            EmailSendUtility emailUtility = EmailSendUtilities.create();
             if (emailUtility == null) {
                 LOG.warn("--opsFailureEmail={} set, but no EmailSendUtility is available "
-                         + "(none discovered via SPI) — cannot send failure notification", opsEmail);
+                         + "(none configured in EmailSendUtilities.create()) — cannot send failure notification", opsEmail);
                 return;
             }
             List<String> toList = Arrays.stream(opsEmail.split(","))
@@ -109,8 +108,4 @@ final class FailureNotifier {
         }
     }
 
-    private static EmailSendUtility discoverEmailUtility() {
-        Iterator<EmailSendUtility> found = ServiceLoader.load(EmailSendUtility.class).iterator();
-        return found.hasNext() ? found.next() : null;
-    }
 }

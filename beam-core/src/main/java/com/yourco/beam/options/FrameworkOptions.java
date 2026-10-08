@@ -288,7 +288,7 @@ public interface FrameworkOptions extends DataflowPipelineOptions {
     // Last-resort recipient for Main's top-level catch, used when a run fails before (or
     // without) any report/source-specific email config being available — e.g. a
     // DataSourceDownloadException/ReportProcessingException/PipelineException whose own
-    // recipients can't be resolved. Sent via EmailSendUtility (SPI-discovered), same as
+    // recipients can't be resolved. Sent via EmailSendUtility (EmailSendUtilities.create()), same as
     // ReportPipelineFactory's report-completion email; skipped silently if unset or if no
     // EmailSendUtility is available.
     // =========================================================================

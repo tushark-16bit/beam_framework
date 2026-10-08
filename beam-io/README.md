@@ -159,10 +159,9 @@ io/email/
                                 default method FetchFileFromGcs(fileLocation) fetches a GCS object via the GCS client
                                 directly (same pattern as FileSourceTransform — beam-io can't depend on beam-utils'
                                 GcsUtils). Ships no implementation here — used only by ReportPipelineFactory's
-                                report-completion email, which discovers a real implementation via ServiceLoader SPI
-                                (a JAR declaring META-INF/services/com.yourco.beam.io.email.EmailSendUtility) or
-                                accepts one via constructor injection; skips sending with a warning if neither is
-                                present. EmailParams and (a differently-shaped) EmailAttachment live in beam-core's
+                                report-completion email; the implementation is declared in one place, beam-runner's
+                                EmailSendUtilities.create() (or passed to ReportPipelineFactory's constructor);
+                                sending is skipped with a warning if none is configured. EmailParams and (a differently-shaped) EmailAttachment live in beam-core's
                                 model/ package, not here.
 
 io/report/

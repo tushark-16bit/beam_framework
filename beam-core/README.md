@@ -10,7 +10,7 @@ Every other module depends on this one — it defines the language the whole fra
 | Package | Contents | Purpose |
 |---|---|---|
 | `options` | `FrameworkOptions`, `ProcessType`, `SourceType`, `SinkType`, `RetryPolicyType`, `WriteDispositionType` | Every CLI flag the framework understands |
-| `transform` | `BeamTransform` (SPI interface), `TransformRegistry` | The extension point for adding new transforms |
+| `transform` | `BeamTransform` (interface), `TransformRegistry` (name index over explicitly constructed transforms: `TransformRegistry.of(...)`) | The extension point for adding new transforms |
 | `retry` | `RetryPolicy`, `ExponentialRetryPolicy`, `FixedRetryPolicy`, `RetryingDoFn` | Retry logic and dead-letter routing |
 | `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig`, `SourceSchemaField` | Shared data types — DATA_SOURCE_DOWNLOAD. `SourceSchemaField` is one column of the optional explicit schema declared via `bq_schema_json`, carried on `BqFetchConfig.schema`. `FileSourceConfig.fileDatePattern` (optional, e.g. `"yyyyMM"`) enables a `{fileDate}` placeholder in `prefix`/`suffix`, formatted with that pattern |
 | `model` | `DataSourceCheckpoint`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint model, per-source transform and validation config. `DataSourceCheckpoint` status codes: `LOADING`, `COMPLETED`, `FAILED_BNC`, `FAILED_TRANSFORM`, `FAILED`. (`DaRec` record rows have no dedicated model class — `DataSourceRecordSinkTransform` builds each paginated JSON row directly.) |
@@ -147,7 +147,7 @@ Last-resort recipient for `FailureNotifier`, called either from `Main`'s top-lev
 that config is already loaded; `--opsFailureEmail` is the one address that works even when it
 isn't (e.g. a bad `parameter_store` row that never let config load in the first place). Both
 flags default to empty — leave unset to skip email entirely (the failure is still logged).
-Requires an `EmailSendUtility` discoverable via SPI; a no-op, not an error, if none is found.
+Requires an `EmailSendUtility` returned by `EmailSendUtilities.create()` (`beam-runner`); a no-op, not an error, if none is configured.
 
 ### Adding a new flag
 
@@ -157,7 +157,7 @@ Requires an `EmailSendUtility` discoverable via SPI; a no-op, not an error, if n
 
 ---
 
-## Key concept: BeamTransform SPI
+## Key concept: BeamTransform
 
 `BeamTransform` is the interface all transforms implement. The `name()` string is
 what you put in `--transformChain`. `toComposite()` returns the Beam `PTransform`
@@ -185,10 +185,7 @@ public final class MyTransform implements BeamTransform {
 }
 ```
 
-Register in `META-INF/services/com.yourco.beam.transform.BeamTransform`:
-```
-com.myco.transforms.MyTransform
-```
+Register it by adding `new MyTransform()` to the `TransformRegistry.of(...)` list in `beam-runner`'s `PipelineFactory` (no `ServiceLoader` / `META-INF/services`).
 
 Then use: `--transformChain=filter-nulls,my-transform,mask-pii`
 
