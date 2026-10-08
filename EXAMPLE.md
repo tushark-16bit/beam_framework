@@ -195,6 +195,7 @@ VALUES (
     "bq_query":       "SELECT trade_id, currency, amount, trade_date, desk FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\"",
     "min_row_count":  "1",
     "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":1170000,\"tolerancePct\":0.01}]",
+    "run_details_json": "{\"frequency\":\"MONTHLY\",\"freqRunDay\":\"WD+3\",\"maxFreqRunDay\":\"WD+5\",\"dayLag\":\"\",\"dateType\":\"lastDayMonth\",\"calendarKey\":\"Calendar_EPS\"}",
 
     "failure_email_to":      "ops-team@example.com,data-owner@example.com",
     "failure_email_cc":      "manager@example.com",
@@ -263,10 +264,42 @@ VALUES (
       "body_template":    "Please find the daily trades summary attached for period {periodId}.",
       "from_address":     "pipeline-alerts@example.com",
       "encrypted":        false
+    },
+    "run_details": {
+      "frequency":     "MONTHLY",
+      "freqDtl":       "WD+3",
+      "maxFreqRunDay": "WD+5",
+      "dayLag":        "",
+      "calendarKey":   "Calendar_EPS"
     }
   }',
   'TRADING', CURRENT_DATETIME(), 'setup_script'
 );
+
+-- Business calendar named by calendarKey "Calendar_EPS" (read by BigQueryBusinessCalendarProvider).
+-- parameter_group_name MUST be FINACOE_Calendars; parameter_name is the calendarKey.
+-- Every data source and report needs run_details AND an existing calendar, or it is not processed.
+INSERT INTO `my-gcp-project.dw.parameter_store`
+  (parameter_name, parameter_group_name, parameter_data_source,
+   schema_of_json, parameters_val_json, edit_grp_nm, last_updt_ts, lst_update_user_id)
+VALUES (
+  'Calendar_EPS', 'FINACOE_Calendars', 'calendar',
+  JSON '{}',
+  JSON '[{"Calendar": {"holiday": "20240101,20240115,20240219", "weekend": "saturday,sunday"}}]',
+  'TRADING', CURRENT_DATETIME(), 'setup_script'
+);
+
+-- Lookback history. The report's "trades" datasource has lookback_from 0 / lookback_to -11, so
+-- trades must be COMPLETED for 12 monthly periods: 202401 (loaded by the section 6 run) plus the
+-- 11 before it, 202312 … 202302. Mark those earlier periods loaded (sample data only — in real
+-- use they come from earlier DATA_SOURCE_DOWNLOAD runs). Without them the report fails with
+-- DATASOURCE_UNAVAILABLE listing the missing period ids.
+INSERT INTO `my-gcp-project.pipeline_metadata.DaRefer`
+  (da_id, srce_nm, vsn_no, per_id, fl_nm, bal_and_cntl_smry_tx, sta_cd, creat_ts, lst_updt_ts)
+SELECT 1000 + idx, 'trades', 1, per_id, 'seeded-history', NULL, 'COMPLETED',
+       CURRENT_DATETIME(), CURRENT_DATETIME()
+FROM UNNEST([202312, 202311, 202310, 202309, 202308, 202307,
+             202306, 202305, 202304, 202303, 202302]) AS per_id WITH OFFSET AS idx;
 ```
 
 ---
@@ -344,15 +377,19 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --parentId=TRADING \
   --reportName=daily_trades_summary \
   --reportSubprocess=eod \
-  --periodId=202401 \
-  --periodStart=2024-01-01 \
-  --periodEnd=2024-01-31 \
+  --runDate=2024-02-06 \
   --paramBqProject=my-gcp-project \
   --paramBqDataset=dw \
   --paramStoreTable=parameter_store \
   --checkpointBqProject=my-gcp-project \
   --checkpointBqDataset=pipeline_metadata
 ```
+
+`--runDate=2024-02-06` is the Business Date (the 4th business day of February 2024 in `Calendar_EPS`, inside
+the WD+3…WD+5 window). With a blank `dayLag` the MONTHLY period is the previous month, so the run
+processes **202401** (2024-01-01 … 2024-01-31) — the period id and dates are calculated, so
+`--periodId`/`--periodStart`/`--periodEnd` are not passed (see `DATE_SCHEDULING_RULES.md`). Run the
+section 6 `DATA_SOURCE_DOWNLOAD` first so `trades` is COMPLETED for 202401.
 
 All four runtime table names default to `DaRefer`, `DaRec`, `RptRefer`, `RptDaMap`, `RptStageDa`,
 and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTable`,
@@ -451,7 +488,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --parentId=TRADING \
   --datasourceName=trades \
   --subprocessName=eod \
-  --periodId=202401 \
+  --runDate=2024-02-06 \
   --paramBqProject=my-gcp-project \
   --paramBqDataset=dw \
   --checkpointBqProject=my-gcp-project \
@@ -614,9 +651,7 @@ java -jar beam-runner/target/beam-runner-1.0.0-SNAPSHOT-bundled.jar \
   --parentId=TRADING \
   --reportName=daily_trades_summary \
   --reportSubprocess=eod \
-  --periodId=202401 \
-  --periodStart=2024-01-01 \
-  --periodEnd=2024-01-31 \
+  --runDate=2024-02-06 \
   --customParamsJson='{"desk":"FX"}' \
   --paramBqProject=my-gcp-project \
   --paramBqDataset=dw \
