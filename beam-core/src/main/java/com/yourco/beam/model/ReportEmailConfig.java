@@ -31,13 +31,20 @@ public final class ReportEmailConfig implements Serializable {
     public final String subjectTemplate;
     /** Email body with optional template tokens. */
     public final String bodyTemplate;
+    /** Sender address, from {@code from_address} — same key convention as {@link SourceFailureEmailConfig}. */
+    public final String fromAddress;
+    /** Whether this email should be sent encrypted, from {@code encrypted} (default {@code false}). */
+    public final boolean encrypted;
 
     public ReportEmailConfig(List<String> toList, List<String> ccList,
-                             String subjectTemplate, String bodyTemplate) {
+                             String subjectTemplate, String bodyTemplate,
+                             String fromAddress, boolean encrypted) {
         this.toList          = Collections.unmodifiableList(toList);
         this.ccList          = ccList != null ? Collections.unmodifiableList(ccList)
                                               : Collections.emptyList();
         this.subjectTemplate = subjectTemplate != null ? subjectTemplate : "";
         this.bodyTemplate    = bodyTemplate    != null ? bodyTemplate    : "";
+        this.fromAddress     = fromAddress;
+        this.encrypted       = encrypted;
     }
 }

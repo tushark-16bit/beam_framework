@@ -1,6 +1,7 @@
 package com.yourco.beam.transform;
 
 import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PCollection;
@@ -11,7 +12,7 @@ import org.apache.beam.sdk.values.TupleTag;
 import java.io.Serializable;
 
 /**
- * SPI contract for all pluggable transforms in this framework.
+ * Contract for all pluggable transforms in this framework.
  *
  * <h2>Output contract</h2>
  * Every transform returns a {@link PCollectionTuple} with exactly two tags:
@@ -32,8 +33,8 @@ import java.io.Serializable;
  * </ul>
  *
  * <h2>Registration</h2>
- * Add the fully-qualified class name to:
- * {@code META-INF/services/com.yourco.beam.transform.BeamTransform}
+ * Add {@code new YourTransform()} to the {@code TransformRegistry.of(...)} list in
+ * {@code PipelineFactory} (beam-runner). Nothing is discovered via {@code ServiceLoader}.
  */
 public interface BeamTransform extends Serializable {
 
@@ -59,7 +60,8 @@ public interface BeamTransform extends Serializable {
      * Returns a Beam {@link PTransform} that outputs a {@link PCollectionTuple}
      * containing both successful and dead-letter outputs.
      *
-     * @param options pipeline options for reading transform-specific config
+     * @param options   pipeline options for reading framework-level config (process type, periods, etc.)
+     * @param runConfig per-datasource config loaded from the parameter_store BQ table
      */
-    PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options);
+    PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig);
 }

@@ -27,7 +27,7 @@ import java.io.IOException;
  * <pre>{@code
  * // In PipelineFactory or a transform's constructor (driver JVM only):
  * String smtpPassword = SecretManagerUtils.fetchSecret(
- *     options.getSmtpPasswordSecretId());
+ *     emailConfig.smtpPasswordSecretId); // e.g. SourceFailureEmailConfig
  * // smtpPassword is now in memory, never logged or stored
  * }</pre>
  *

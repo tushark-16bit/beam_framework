@@ -30,7 +30,7 @@ public final class SourceConfig implements Serializable {
 
     public final String parentId;        // top-level business group (parent_id in source_config)
     public final String datasourceName;
-    public final String periodId;
+    public final int    periodId;
     public final String subprocessName;
     public final SourceType sourceType;
 
@@ -60,39 +60,64 @@ public final class SourceConfig implements Serializable {
      */
     public final ValidationConfig validationConfig;
 
+    /**
+     * Optional failure-notification email config.
+     * Null when {@code failure_email_to} is absent from {@code parameters_val_json}.
+     */
+    public final SourceFailureEmailConfig failureEmailConfig;
+
+    /**
+     * Optional post-storage SQL transform applied to this source's rows, within the same run.
+     * Never null — defaults to {@link DataTransformConfig#none()} when
+     * {@code data_transform_query} is absent from {@code parameters_val_json}.
+     */
+    public final DataTransformConfig dataTransformConfig;
+
+    /**
+     * Optional per-source run-scheduling config (which calendar date this source's run should
+     * target). Never null — defaults to {@link RunScheduleConfig#none()} when
+     * {@code run_details_json} is absent from {@code parameters_val_json}. See
+     * {@link RunScheduleConfig} for the field meanings and {@code RunDateCalculator} (beam-utils)
+     * for how a date is actually computed from it.
+     */
+    public final RunScheduleConfig runScheduleConfig;
+
     private SourceConfig(Builder b) {
-        this.parentId         = b.parentId;
-        this.datasourceName   = b.datasourceName;
-        this.periodId         = b.periodId;
-        this.subprocessName   = b.subprocessName;
-        this.sourceType       = b.sourceType;
-        this.apiConfig        = b.apiConfig;
-        this.fileConfig       = b.fileConfig;
-        this.bqFetchConfig    = b.bqFetchConfig;
-        this.queryConfig      = b.queryConfig != null ? b.queryConfig : QueryConfig.empty();
-        this.sourceTransforms = b.sourceTransforms != null
-                                ? Collections.unmodifiableList(b.sourceTransforms)
-                                : Collections.emptyList();
-        this.validationConfig = b.validationConfig != null ? b.validationConfig : ValidationConfig.none();
+        this.parentId            = b.parentId;
+        this.datasourceName      = b.datasourceName;
+        this.periodId            = b.periodId;
+        this.subprocessName      = b.subprocessName;
+        this.sourceType          = b.sourceType;
+        this.apiConfig           = b.apiConfig;
+        this.fileConfig          = b.fileConfig;
+        this.bqFetchConfig       = b.bqFetchConfig;
+        this.queryConfig         = b.queryConfig != null ? b.queryConfig : QueryConfig.empty();
+        this.sourceTransforms    = b.sourceTransforms != null
+                                   ? Collections.unmodifiableList(b.sourceTransforms)
+                                   : Collections.emptyList();
+        this.validationConfig    = b.validationConfig != null ? b.validationConfig : ValidationConfig.none();
+        this.failureEmailConfig  = b.failureEmailConfig;
+        this.dataTransformConfig = b.dataTransformConfig != null ? b.dataTransformConfig : DataTransformConfig.none();
+        this.runScheduleConfig   = b.runScheduleConfig != null ? b.runScheduleConfig : RunScheduleConfig.none();
     }
 
     // ── Factory helpers (convenience wrappers around Builder) ─────────────────
 
-    public static SourceConfig forApi(String datasourceName, String periodId,
+    public static SourceConfig forApi(String datasourceName, int periodId,
                                       String subprocessName, ApiSourceConfig apiConfig) {
         return builder().datasourceName(datasourceName).periodId(periodId)
                         .subprocessName(subprocessName).sourceType(SourceType.API)
                         .apiConfig(apiConfig).build();
     }
 
-    public static SourceConfig forFile(String datasourceName, String periodId,
+    public static SourceConfig forFile(String datasourceName, int periodId,
                                        String subprocessName, FileSourceConfig fileConfig) {
         return builder().datasourceName(datasourceName).periodId(periodId)
                         .subprocessName(subprocessName).sourceType(SourceType.FILE)
                         .fileConfig(fileConfig).build();
     }
 
-    public static SourceConfig forBq(String datasourceName, String periodId,
+    public static SourceConfig forBq(String datasourceName, int periodId,
                                      String subprocessName, BqFetchConfig bqFetchConfig) {
         return builder().datasourceName(datasourceName).periodId(periodId)
                         .subprocessName(subprocessName).sourceType(SourceType.BQ)
@@ -101,10 +126,35 @@ public final class SourceConfig implements Serializable {
 
     public static Builder builder() { return new Builder(); }
 
+    /**
+     * A {@link Builder} pre-populated with every field of this instance — for rebuilding a
+     * {@link SourceConfig} with one or two fields changed (e.g. {@code DataSourcePipelineFactory
+     * .resolveQueryTokens()} swapping in a token-resolved {@link #bqFetchConfig}) without having
+     * to re-list every other field by hand, where a newly added field is easy to forget to copy.
+     */
+    public Builder toBuilder() {
+        return builder()
+            .parentId(parentId)
+            .datasourceName(datasourceName)
+            .periodId(periodId)
+            .subprocessName(subprocessName)
+            .sourceType(sourceType)
+            .apiConfig(apiConfig)
+            .fileConfig(fileConfig)
+            .bqFetchConfig(bqFetchConfig)
+            .queryConfig(queryConfig)
+            .sourceTransforms(new java.util.ArrayList<>(sourceTransforms))
+            .validationConfig(validationConfig)
+            .failureEmailConfig(failureEmailConfig)
+            .dataTransformConfig(dataTransformConfig)
+            .runScheduleConfig(runScheduleConfig);
+    }
+
     // ── Builder ───────────────────────────────────────────────────────────────
 
     public static final class Builder {
-        private String parentId, datasourceName, periodId, subprocessName;
+        private String parentId, datasourceName, subprocessName;
+        private int    periodId;
         private SourceType sourceType;
         private ApiSourceConfig apiConfig;
         private FileSourceConfig fileConfig;
@@ -112,18 +162,24 @@ public final class SourceConfig implements Serializable {
         private QueryConfig queryConfig;
         private List<SourceTransformConfig> sourceTransforms;
         private ValidationConfig validationConfig;
+        private SourceFailureEmailConfig failureEmailConfig;
+        private DataTransformConfig dataTransformConfig;
+        private RunScheduleConfig runScheduleConfig;
 
-        public Builder parentId(String v)                         { parentId = v;           return this; }
-        public Builder datasourceName(String v)                   { datasourceName = v;     return this; }
-        public Builder periodId(String v)                         { periodId = v;           return this; }
-        public Builder subprocessName(String v)                   { subprocessName = v;     return this; }
-        public Builder sourceType(SourceType v)                   { sourceType = v;         return this; }
-        public Builder apiConfig(ApiSourceConfig v)               { apiConfig = v;          return this; }
-        public Builder fileConfig(FileSourceConfig v)             { fileConfig = v;         return this; }
-        public Builder bqFetchConfig(BqFetchConfig v)             { bqFetchConfig = v;      return this; }
-        public Builder queryConfig(QueryConfig v)                 { queryConfig = v;        return this; }
-        public Builder sourceTransforms(List<SourceTransformConfig> v) { sourceTransforms = v; return this; }
-        public Builder validationConfig(ValidationConfig v)       { validationConfig = v;  return this; }
+        public Builder parentId(String v)                              { parentId = v;             return this; }
+        public Builder datasourceName(String v)                        { datasourceName = v;       return this; }
+        public Builder periodId(int v)                                 { periodId = v;             return this; }
+        public Builder subprocessName(String v)                        { subprocessName = v;       return this; }
+        public Builder sourceType(SourceType v)                        { sourceType = v;           return this; }
+        public Builder apiConfig(ApiSourceConfig v)                    { apiConfig = v;            return this; }
+        public Builder fileConfig(FileSourceConfig v)                  { fileConfig = v;           return this; }
+        public Builder bqFetchConfig(BqFetchConfig v)                  { bqFetchConfig = v;        return this; }
+        public Builder queryConfig(QueryConfig v)                      { queryConfig = v;          return this; }
+        public Builder sourceTransforms(List<SourceTransformConfig> v) { sourceTransforms = v;     return this; }
+        public Builder validationConfig(ValidationConfig v)            { validationConfig = v;     return this; }
+        public Builder failureEmailConfig(SourceFailureEmailConfig v)  { failureEmailConfig = v;   return this; }
+        public Builder dataTransformConfig(DataTransformConfig v)      { dataTransformConfig = v;  return this; }
+        public Builder runScheduleConfig(RunScheduleConfig v)          { runScheduleConfig = v;    return this; }
 
         public SourceConfig build() { return new SourceConfig(this); }
     }

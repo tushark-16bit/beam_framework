@@ -10,20 +10,33 @@ Every other module depends on this one — it defines the language the whole fra
 | Package | Contents | Purpose |
 |---|---|---|
 | `options` | `FrameworkOptions`, `ProcessType`, `SourceType`, `SinkType`, `RetryPolicyType`, `WriteDispositionType` | Every CLI flag the framework understands |
-| `transform` | `BeamTransform` (SPI interface), `TransformRegistry` | The extension point for adding new transforms |
+| `transform` | `BeamTransform` (interface), `TransformRegistry` (name index over explicitly constructed transforms: `TransformRegistry.of(...)`) | The extension point for adding new transforms |
 | `retry` | `RetryPolicy`, `ExponentialRetryPolicy`, `FixedRetryPolicy`, `RetryingDoFn` | Retry logic and dead-letter routing |
-| `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig` | Shared data types — DATA_SOURCE_DOWNLOAD |
-| `model` | `DataSourceCheckpoint`, `DataSourceRecord`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint/record models, per-source transform and validation config |
-| `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables |
+| `model` | `FailedRecord`, `Schemas`, `SourceConfig`, `ApiSourceConfig`, `FileSourceConfig`, `BqFetchConfig`, `SourceSchemaField` | Shared data types — DATA_SOURCE_DOWNLOAD. `SourceSchemaField` is one column of the optional explicit schema declared via `bq_schema_json`, carried on `BqFetchConfig.schema`. `FileSourceConfig.fileDatePattern` (optional, e.g. `"yyyyMM"`) enables a `{fileDate}` placeholder in `prefix`/`suffix`, formatted with that pattern |
+| `model` | `DataSourceCheckpoint`, `QueryConfig`, `SourceTransformConfig`, `AggregationConfig`, `LookupConfig`, `ValidationConfig`, `BncRule` | Checkpoint model, per-source transform and validation config. `DataSourceCheckpoint` status codes: `LOADING`, `COMPLETED`, `FAILED_BNC`, `FAILED_TRANSFORM`, `FAILED`. (`DaRec` record rows have no dedicated model class — `DataSourceRecordSinkTransform` builds each paginated JSON row directly.) |
+| `model` | `DataTransformConfig` | Optional post-storage SQL transform for one source's rows, run within the same `DATA_SOURCE_DOWNLOAD` run; carried on `SourceConfig.dataTransformConfig` |
+| `model` | `RunScheduleConfig` | Optional Finance Automation run schedule for a data source (`run_details_json`) or report (`run_details`): `frequency` (`DAILY`/`MONTHLY`/`QUARTERLY`/`ANNUALLY`), `freqRunDay` (read from `freqDtl` for reports), `maxFreqRunDay` (`WD±n` string), `dayLag`, `dateType` (`lastBusDayMonth`/`lastDayMonth`), `calendarKey` — raw strings, interpreted only by `RunDateCalculator` (beam-utils) |
+| `model` | `RunDates` | The dates one eligible source/report run operates on — `runDate` = BAU Business Date, `periodStart`/`periodEnd`/`periodId` = BAU Reporting Period (`periodEnd` per data-source `dateType`). Produced only by `RunDateCalculator.evaluateDataSource()`/`evaluateReport()`; every flow reads its dates from it rather than the CLI flags. Formats: `yyyy-MM-dd` for `{runDate}`/`{periodStart}`/`{periodEnd}` (and `%…%`), email tokens, FILE `{date}` and report GCS file names (empty when null); `yyyyMMdd` for FILE `{dateCompact}`; `file_date_pattern` for FILE `{fileDate}`; `periodId` int — DAILY `yyyyMMdd`, MONTHLY `yyyyMM`, QUARTERLY `yyyyMMddqq` (first date of the quarter + 2-digit quarter number, Q1 2026 → `2026010101`), ANNUALLY `yyyy` |
+| `model` | `SourceFailureEmailConfig` | Optional failure-notification email config carried on `SourceConfig`; populated from `failure_email_*` keys in `parameters_val_json` |
+| `model` | `ReportConfig`, `ReportDatasourceRef`, `ReportPreprocessingStep`, `ReportTransformStep`, `ReportOutputConfig`, `ReportEmailConfig` | Report configuration assembled from the report DB tables. `ReportConfig.runScheduleConfig` is the report's own optional run schedule (`run_details`). `ReportDatasourceRef` also carries an optional lookback — `lookback_from`/`lookback_to` (0 or negative, `from >= to`, both or neither; e.g. `0` and `-11`): the report fails unless every period from its own (offset 0) back to `lookbackTo` is `COMPLETED` for that data source, stepping in the data source's own frequency. `ReportEmailConfig` now also carries `fromAddress`/`encrypted` (from `email.from_address`/`email.encrypted`) |
+| `model` | `ReportCheckpoint`, `RptDaMap`, `RptStageDa`, `RptOutput` | REPORT_PROCESSING tracking rows: RptRefer checkpoint, datasource map, staged data, output record |
+| `model` | `EmailParams`, `EmailAttachment` | Contract types for `beam-io`'s `EmailSendUtility` (REPORT_PROCESSING/PIPELINE completion email). `EmailAttachment` here (fileName, content, type) is a different type from `beam-io`'s own `io.email.EmailAttachment` (used by the older, DATA_SOURCE_DOWNLOAD-only `ReportEmailAdapter`) — don't import both unqualified in the same file |
+| `model` | `PipelineRunConfig` | Per-datasource runtime config loaded from parameter_store. Replaces CLI flags for source, sink, transform chain, and retry/DLQ. Typed getters + generic `get(key)` for extensibility. Calendar and per-source failure email are configured elsewhere — see `--calendarName` and `SourceFailureEmailConfig`. |
+| `exception` | `DataSourceDownloadException`, `ReportProcessingException`, `PipelineException` | One typed, unchecked exception per process type, each with a `Reason` enum + identifying fields (`datasourceName`/`reportName` + `periodId`). Thrown by each process type's own factory, synchronously in the driver JVM (config/assembly/submission failures) — except `PipelineException(ABORTED_REQUIRED_DATASOURCE)`, thrown worker-side by `ReportFinalizeTransform`'s `ReportRunDoFn` after a `Wait.on()` gate confirms every batched datasource branch finished. Caught by `FailureNotifier`, called either from `Main`'s driver-JVM catch block or directly from `ReportFinalizeTransform`'s worker DoFn (whichever is running when the failure occurs). See `beam-runner/README.md` for exactly where each is thrown/caught, and `CLAUDE.md` §19 for the full picture. |
+There is no separate model for the `PIPELINE` process type — it reuses `ReportConfig.datasources`
+(`List<ReportDatasourceRef>`, row above) directly. See `beam-runner/README.md`'s
+`PipelineSequenceFactory` section.
 
 ---
 
-## ProcessType — two execution modes
+## ProcessType — execution modes
 
-| Value | CLI flag | Source config comes from | Use case |
-|---|---|---|---|
-| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Parameter DB (`source_config` table) | Fetch raw data from APIs/files/BQ |
-| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | `--sourceType` CLI flag | Transform downloaded data into reports |
+| Value | CLI flag | Use case |
+|---|---|---|
+| `DATA_SOURCE_DOWNLOAD` | `--processType=DATA_SOURCE_DOWNLOAD` | Fetch raw data from APIs/files/BQ; creates LOADING checkpoint, submits the job, and **returns immediately** — no poll loop, no `waitUntilFinish()` (required by this deployment's Dataflow Flex Template launch contract; see `beam-runner/README.md`). BnC/checkpoint-finalize runs inside the Beam worker (`PostDownloadFinalizeTransform`), entirely independent of the driver JVM, which has already returned. |
+| `REPORT_PROCESSING` | `--processType=REPORT_PROCESSING` | Transform downloaded data into reports. Runs entirely in the driver JVM (BQ jobs only) — no Beam pipeline involved. |
+| `PIPELINE` | `--processType=PIPELINE` | Same `--reportName`/`--reportSubprocess` as `REPORT_PROCESSING` — no separate config. One call: wires the report step onto the SAME batched Dataflow job as whichever datasources the report's own `datasources[]` declares and aren't already `COMPLETED` (gated on `Wait.on()`, via `ReportFinalizeTransform`), **submits once, and returns immediately**. The report itself, and its completion email, run on a worker once every datasource branch finishes. |
+| `STATUS_CHECK` | `--processType=STATUS_CHECK` | Fast, synchronous, DB-only readiness poll — reads `DaRefer` via `DataSourceStatusChecker`, never blocks or sleeps. `--reportName` set → checks a `PIPELINE` run's required datasources; blank → checks a single `DATA_SOURCE_DOWNLOAD` run. Exit `0` = ready, exit `75` = still pending (not an error), any other non-zero = terminal failure (already routed through `FailureNotifier`). **Optional diagnostic only** — `DATA_SOURCE_DOWNLOAD`/`PIPELINE` never poll internally, so this is the only way to check readiness from outside the pipeline. |
 
 ```bash
 # Download raw trades from an external API
@@ -61,19 +74,20 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 ### Data source selection (DATA_SOURCE_DOWNLOAD only)
 ```
 --datasourceName=trades
---periodId=2024-01-15
+--periodId=20240115          # IGNORED — the source needs run_details + a calendar, and its period id is
+                             # calculated from the Business Date (--runDate / today in --businessTimeZone)
 --subprocessName=eod
---overrideDownload=false
+--manualOverrun=false       # explicit operator key: bypasses COMPLETED guard in DaRefer and overwrites storage.
+                             # NEVER changes eligibility or calculated dates (pass the eligible --runDate).
+                            # DaRefer always gets a fresh row (never overwritten); once the new
+                            # run reaches COMPLETED, the superseded run's DaRec rows are deleted.
 ```
 
-### Parameter database
+### Parameter BigQuery store
 ```
---paramDbUrl=jdbc:postgresql://db-host:5432/pipeline_params
---paramDbUser=pipeline_svc
---paramDbCredentialSecretId=projects/p/secrets/db-pass/versions/latest
---paramDbSchema=public
---paramDbSourceConfigTable=source_config
---paramDbRequiredParamsTable=required_parameters
+--paramBqProject=my-gcp-project
+--paramBqDataset=dw
+--paramStoreTable=parameter_store
 ```
 
 ### Checkpoint storage
@@ -83,22 +97,57 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 --checkpointBqTable=pipeline_checkpoints
 ```
 
-### Source / transform / sink (REPORT_PROCESSING)
+### Run date (REPORT_PROCESSING)
 ```
---sourceType=BQ
---bqSourceTable=my-project:my-dataset.orders
---transformChain=filter-nulls,mask-pii
---sinkType=GCS
---gcsSinkPath=gs://bucket/output/
---writeDisposition=TRUNCATE
---retryPolicy=EXPONENTIAL
---maxRetries=3
---deadLetterSink=gs://bucket/dlq/
 --runDate=2024-01-15
---calendarName=NYSE
---businessEmail=reports@company.com
---devErrorEmail=oncall@company.com
+--businessTimeZone=UTC       # default UTC — zone for "today" (Business Date) when --runDate is unset
+--businessDayOffset=0
+--calendarName=NYSE          # optional, default "DEFAULT" — used by CalendarUtils
 ```
+
+### Custom query parameters (DATA_SOURCE_DOWNLOAD and REPORT_PROCESSING)
+```
+--customParamsJson={"exchange":"NASDAQ","threshold":"10000"}
+```
+The CLI-supplied equivalent of a step's own `query_params_json` in `parameter_store`, for a
+value that should come from the invocation itself (Airflow DAG conf, an ad-hoc CLI run) rather
+than be hard-coded into stored config. Resolved by `QueryParameterResolver` alongside any
+step-level `query_params_json` — on a key collision, `--customParamsJson` wins. Values may
+reference `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}`, resolved first. Malformed JSON
+or a non-object root fails the run immediately rather than silently resolving to nothing.
+
+### Pipeline selection (PIPELINE only)
+
+No separate flags — `PIPELINE` reuses the exact same `--reportName`/`--reportSubprocess` as
+`REPORT_PROCESSING` (see above). There is no separate pipeline config to look up: the report's
+own `datasources[]` (with each entry's `is_required`) already declares which datasources feed it
+and which are mandatory, so `PipelineSequenceFactory` reads that directly, batches them into one
+Dataflow job together with a `Wait.on()`-gated report step (`ReportFinalizeTransform`), and
+submits once — the report itself, via the unchanged `ReportPipelineFactory`, runs on a worker
+once every required datasource reaches `COMPLETED`, all within the one `--processType=PIPELINE`
+call.
+
+> **Source, sink, transform chain, and retry/DLQ settings** are no longer CLI flags.
+> They are fetched per-datasource from `parameter_store` via `PipelineRunConfig`.
+> Add a row with the appropriate keys (e.g. `source_type`, `sink_type`, `transform_chain`, etc.) to `parameter_store`.
+> Per-source failure-notification email (SMTP host/port/secret, recipients) is separate — it lives
+> on `SourceConfig.failureEmailConfig` (`SourceFailureEmailConfig`, `failure_email_*` keys), not on
+> `PipelineRunConfig`. `--calendarName` is a whole-run CLI flag — see below.
+
+### Global failure notification (all process types)
+```
+--opsFailureEmail=oncall@example.com,platform-team@example.com   # comma-separated; default empty
+--opsFailureFromAddress=pipeline-alerts@example.com               # default empty
+```
+Last-resort recipient for `FailureNotifier`, called either from `Main`'s top-level catch
+(synchronous, driver-JVM failures) or directly from `ReportFinalizeTransform`'s worker DoFn (a
+`PIPELINE` failure discovered only after `main()` has already returned) — see
+`beam-runner/README.md`'s `FailureNotifier` section and `CLAUDE.md` §19. Distinct from `SourceFailureEmailConfig`
+(per-source) and `ReportEmailConfig` (per-report): those are used at the point of failure, when
+that config is already loaded; `--opsFailureEmail` is the one address that works even when it
+isn't (e.g. a bad `parameter_store` row that never let config load in the first place). Both
+flags default to empty — leave unset to skip email entirely (the failure is still logged).
+Requires an `EmailSendUtility` returned by `EmailSendUtilities.create()` (`beam-runner`); a no-op, not an error, if none is configured.
 
 ### Adding a new flag
 
@@ -108,7 +157,7 @@ Every pipeline config — process type, source, sink, transforms, DB, checkpoint
 
 ---
 
-## Key concept: BeamTransform SPI
+## Key concept: BeamTransform
 
 `BeamTransform` is the interface all transforms implement. The `name()` string is
 what you put in `--transformChain`. `toComposite()` returns the Beam `PTransform`
@@ -121,8 +170,8 @@ public final class MyTransform implements BeamTransform {
     public String name() { return "my-transform"; }
 
     @Override
-    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options) {
-        return new MyComposite(options.getSomeFlag());
+    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig) {
+        return new MyComposite(runConfig.get("my_config_key", "default"));
     }
 
     public static final class MyComposite
@@ -136,10 +185,7 @@ public final class MyTransform implements BeamTransform {
 }
 ```
 
-Register in `META-INF/services/com.yourco.beam.transform.BeamTransform`:
-```
-com.myco.transforms.MyTransform
-```
+Register it by adding `new MyTransform()` to the `TransformRegistry.of(...)` list in `beam-runner`'s `PipelineFactory` (no `ServiceLoader` / `META-INF/services`).
 
 Then use: `--transformChain=filter-nulls,my-transform,mask-pii`
 
