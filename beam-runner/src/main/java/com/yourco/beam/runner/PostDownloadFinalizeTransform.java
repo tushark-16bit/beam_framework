@@ -124,17 +124,82 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         public void processElement(@Element Long pipelineRowCount, OutputReceiver<Long> out) {
             LOG.info("Finalizing da_id={} datasource='{}' (pipeline row count: {})",
                      daId, sourceConfig.datasourceName, pipelineRowCount);
+            Throwable fatal = null;
             try {
+                breadcrumb("start", "pipelineRowCount=" + pipelineRowCount);
                 runValidation(pipelineRowCount);
-            } catch (Exception e) {
+                breadcrumb("done", null);
+            } catch (Throwable t) {
                 LOG.error("Finalize failed for '{}' (da_id={}): {}",
-                          sourceConfig.datasourceName, daId, e.getMessage(), e);
-                checkpointAdapter.updateStatus(daId, DataSourceCheckpoint.STA_FAILED, null);
-                sendFailureEmail(DataSourceCheckpoint.STA_FAILED, e.getMessage(), null);
+                          sourceConfig.datasourceName, daId, t.getMessage(), t);
+                breadcrumb("ERROR", t.getClass().getName() + ": " + t.getMessage());
+                // Records the failure; retried, and if it still cannot be written the exception
+                // propagates so the job fails visibly instead of leaving the row at LOADING.
+                updateStatusWithRetry(DataSourceCheckpoint.STA_FAILED, null);
+                sendFailureEmail(DataSourceCheckpoint.STA_FAILED, t.getMessage(), null);
+                if (t instanceof Error) {
+                    fatal = t;  // VM-level errors (OOM, linkage) are still rethrown after recording
+                }
             } finally {
                 // Always emit a signal element — success or failure — so this transform's output
                 // can gate a downstream Wait.on() step regardless of how this source finished.
                 out.output(daId);
+            }
+            if (fatal instanceof Error) {
+                throw (Error) fatal;
+            }
+        }
+
+        /**
+         * Worker logs are not always reachable, but every BigQuery statement a worker runs is
+         * visible, with its text, in {@code INFORMATION_SCHEMA.JOBS}. So progress and failures are
+         * reported as trivial {@code SELECT '<message>'} statements:
+         * <pre>{@code
+         * SELECT creation_time, query FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+         * WHERE query LIKE 'SELECT ''finalize da_id=99 %' ORDER BY creation_time;
+         * }</pre>
+         * Best-effort: a failure here is only logged, and never changes the run's outcome.
+         */
+        private void breadcrumb(String stage, String detail) {
+            try {
+                String text = "finalize da_id=" + daId + " ds=" + sourceConfig.datasourceName
+                            + " stage=" + stage + (detail != null ? " " + detail : "");
+                String safe = text.replaceAll("[\\\\'\"`\\p{Cntrl}]", " ");
+                if (safe.length() > 400) {
+                    safe = safe.substring(0, 400);
+                }
+                bqJobService.runQuery("SELECT '" + safe + "' AS breadcrumb");
+            } catch (Exception e) {
+                LOG.warn("breadcrumb '{}' for da_id={} not recorded: {}", stage, daId, e.getMessage());
+            }
+        }
+
+        /**
+         * {@code updateStatus} with up to three attempts and a short back-off — a transient DML
+         * failure must not leave the DaRefer row at LOADING. After the last attempt the exception
+         * propagates (the failure is also visible via {@link #breadcrumb}).
+         */
+        private void updateStatusWithRetry(String staCd, String bncJson) {
+            final int maxAttempts = 3;
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    breadcrumb("updating_status", staCd + " attempt=" + attempt);
+                    checkpointAdapter.updateStatus(daId, staCd, bncJson);
+                    breadcrumb("status_updated", staCd);
+                    return;
+                } catch (RuntimeException e) {
+                    breadcrumb("ERROR update_status attempt=" + attempt,
+                               e.getClass().getName() + ": " + e.getMessage());
+                    if (attempt >= maxAttempts) {
+                        throw e;
+                    }
+                    try {
+                        Thread.sleep(2000L * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw e;
+                    }
+                }
             }
         }
 
@@ -144,6 +209,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             // Query DaRec for the actual committed count — streaming inserts are immediately
             // queryable, so by the time this DoFn runs all rows are visible.
             long rowCount = recordAdapter.countRecords(daId);
+            breadcrumb("after_count", "storedRowCount=" + rowCount);
             boolean bqCountSucceeded = (rowCount != -1L);
             if (!bqCountSucceeded) {
                 // BQ query itself failed (infra error); fall back to pipeline count so we still
@@ -239,7 +305,8 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             }
 
             String bncJson = toJson(bncSummary);
-            checkpointAdapter.updateStatus(daId, staCd, bncJson);
+            breadcrumb("before_update", "status=" + staCd);
+            updateStatusWithRetry(staCd, bncJson);
             if (!DataSourceCheckpoint.STA_COMPLETED.equals(staCd)) {
                 sendFailureEmail(staCd, String.join("; ", failures), bncJson);
             }
