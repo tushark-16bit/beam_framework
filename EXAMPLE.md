@@ -227,7 +227,9 @@ VALUES (
         "datasource_name":       "trades",
         "datasource_subprocess": "eod",
         "transform_alias":       "raw_trades",
-        "is_required":           true
+        "is_required":           true,
+        "lookback_from":         0,
+        "lookback_to":           -11
       }
     ],
     "preprocessing": [],
@@ -363,7 +365,7 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 1 | Load `ReportConfig` from `parameter_store` (nested JSON in `parameters_val_json`) | — |
 | 2 | `createCheckpoint('daily_trades_summary', 202401, ...)` → inserts RptRefer row → returns `rpt_id` | → **LOADING** |
 | 3 | Run preprocessing steps in `step_order` (BQ_QUERY or API_ENRICHMENT), if any | — |
-| 4 | For each required datasource ref: `isCompleted(srce_nm, 202401)` via DaRefer — fail if not COMPLETED | — |
+| 4 | For each required datasource ref: `isCompleted(srce_nm, 202401)` via DaRefer — fail if not COMPLETED. A ref with `lookback_from`/`lookback_to` (the seed above: `0` / `-11`) must also be COMPLETED for every earlier period back to `lookback_to` — 12 months for a MONTHLY source — stepping in that datasource's own frequency (datasource and report must share a frequency); any missing period fails the report with the ids listed | — |
 | 5 | For each datasource ref: `fetchLatestCompletedDaId()` → `addDaMapping(rpt_id, da_id)` → RptDaMap row | — |
 | 6 | `stageFromDaRec(map_id, da_id)` — copies every DaRec page for that da_id into RptStageDa verbatim (one RptStageDa row per DaRec page, batched like DaRec itself — not one row per source record) | — |
 | 7 | Register alias: `raw_trades` → `stagedDataSubquery(map_id)`, which un-nests RptStageDa's pages back into individual source rows on read (`SELECT row_json AS stage_ds_json_tx FROM RptStageDa CROSS JOIN UNNEST(...) AS row_json WHERE map_id=X`) — page boundaries invisible from here on, same as before batching | — |
