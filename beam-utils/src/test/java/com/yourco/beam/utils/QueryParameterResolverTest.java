@@ -173,4 +173,17 @@ class QueryParameterResolverTest {
         assertEquals(java.util.List.of(),
             QueryParameterResolver.unresolvedPlaceholders("WHERE a = 'Jan-24' AND j = JSON '{\"k\": 1}'"));
     }
+
+    @Test
+    void caseOptionUppercasesOrLowercasesTheRenderedLabel() {
+        assertEquals("x = JAN-24", resolveWith("x = {a}", new com.yourco.beam.model.DateParamConfig(
+            "{a}", "PERIOD_START", "MMM-yy", "UPPER", java.util.List.of())));
+        assertEquals("x = jan-24", resolveWith("x = {a}", new com.yourco.beam.model.DateParamConfig(
+            "{a}", "PERIOD_START", "MMM-yy", "lower", java.util.List.of())));
+        assertEquals("x = Jan-24", resolveWith("x = {a}", new com.yourco.beam.model.DateParamConfig(
+            "{a}", "PERIOD_START", "MMM-yy", null, java.util.List.of())));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+            () -> new com.yourco.beam.model.DateParamConfig(
+                "{a}", "PERIOD_START", "MMM-yy", "title", java.util.List.of()));
+    }
 }

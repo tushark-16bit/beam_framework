@@ -33,6 +33,10 @@ import java.util.Locale;
  *       {@code PERIOD_ID} as the integer period id. {@code PERIOD_ID} <b>with</b> a format renders
  *       the period's start date in that format (a monthly period 202401 with {@code MMM-yy} →
  *       {@code Jan-24}). A bad pattern fails the config load.</li>
+ *   <li>{@link #textCase} — optional {@code "case"}: {@code UPPER} ({@code MMM-yy} →
+ *       {@code JAN-24}), {@code LOWER} ({@code jan-24}) or {@code AS_IS} (default, {@code Jan-24}).
+ *       Applied to the rendered text; a number-only value is unaffected. Anything else fails the
+ *       config load.</li>
  *   <li>{@link #applyTo} — optional list of the queries to resolve it in: for a report the
  *       {@code step_name} of a preprocessing or transform step; for a data source the input query
  *       is named {@value #SOURCE_QUERY}. Empty/absent = every query of that source or report.</li>
@@ -44,6 +48,29 @@ public final class DateParamConfig implements Serializable {
 
     /** Scope name of a data source's input query, for {@link #applyTo}. */
     public static final String SOURCE_QUERY = "bq_query";
+
+    public enum TextCase {
+        AS_IS, UPPER, LOWER;
+
+        static TextCase parse(String text) {
+            if (text == null || text.isBlank()) return AS_IS;
+            return switch (text.trim().replace("_", "").replace("-", "").toLowerCase(Locale.ROOT)) {
+                case "asis", "none", "default" -> AS_IS;
+                case "upper", "uppercase"      -> UPPER;
+                case "lower", "lowercase"      -> LOWER;
+                default -> throw new IllegalArgumentException(
+                    "unknown date_params case '" + text + "' — expected UPPER, LOWER or AS_IS");
+            };
+        }
+
+        public String apply(String value) {
+            return switch (this) {
+                case UPPER -> value.toUpperCase(Locale.ENGLISH);
+                case LOWER -> value.toLowerCase(Locale.ENGLISH);
+                case AS_IS -> value;
+            };
+        }
+    }
 
     public enum Source {
         PERIOD_ID, PERIOD_START, PERIOD_END, RUN_DATE;
@@ -67,6 +94,8 @@ public final class DateParamConfig implements Serializable {
     public final Source       source;
     /** Null when not configured. */
     public final String       format;
+    /** Never null; how the rendered text is cased. */
+    public final TextCase     textCase;
     /** Never null; empty means "every query". */
     public final List<String> applyTo;
 
@@ -76,11 +105,17 @@ public final class DateParamConfig implements Serializable {
      *         unresolved placeholder in a query
      */
     public DateParamConfig(String token, String source, String format, List<String> applyTo) {
+        this(token, source, format, null, applyTo);
+    }
+
+    public DateParamConfig(String token, String source, String format, String textCase,
+                           List<String> applyTo) {
         if (token == null || token.isBlank()) {
             throw new IllegalArgumentException("date_params entry has no \"token\"");
         }
         this.token  = token;
         this.source = Source.parse(source);
+        this.textCase = TextCase.parse(textCase);
         this.format = (format == null || format.isBlank()) ? null : format;
         if (this.format != null) {
             try {
@@ -105,7 +140,7 @@ public final class DateParamConfig implements Serializable {
 
     @Override
     public String toString() {
-        return "DateParamConfig{token=" + token + ", source=" + source + ", format=" + format
+        return "DateParamConfig{token=" + token + ", source=" + source + ", format=" + format + ", case=" + textCase
             + ", applyTo=" + applyTo + "}";
     }
 }

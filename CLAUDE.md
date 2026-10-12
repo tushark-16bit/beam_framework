@@ -200,7 +200,7 @@ model/RunScheduleConfig.java          Optional Finance Automation run schedule f
                                        Source: run_details_json in parameters_val_json; report: nested "run_details" object.
                                        hasSchedule() = any attribute set (none → the item is NOT processed, owner decision D5).
                                        Interpreted only by beam-utils/RunDateCalculator.java.
-model/DateParamConfig.java            One operator-configured date/period query parameter from the `date_params` array of a source's or report's parameters_val_json: token (the exact placeholder text in the query), source (PERIOD_ID | PERIOD_START | PERIOD_END | RUN_DATE), optional Java date format (e.g. MMM-yy; PERIOD_ID without a format = the integer id, PERIOD_ID with a format = the period's start date in that format), optional apply_to (report step_name(s), or `bq_query` for a source's input query; empty = every query). Validated at construction (blank token / unknown source / bad pattern throws → config load fails). SourceConfig.dateParams / ReportConfig.dateParams.
+model/DateParamConfig.java            One operator-configured date/period query parameter from the `date_params` array of a source's or report's parameters_val_json: token (the exact placeholder text in the query), source (PERIOD_ID | PERIOD_START | PERIOD_END | RUN_DATE), optional Java date format (e.g. MMM-yy) and optional `case` (UPPER/LOWER/AS_IS, default AS_IS — `MMM-yy` gives `Jan-24`, with UPPER `JAN-24`) ( PERIOD_ID without a format = the integer id, PERIOD_ID with a format = the period's start date in that format), optional apply_to (report step_name(s), or `bq_query` for a source's input query; empty = every query). Validated at construction (blank token / unknown source / bad pattern throws → config load fails). SourceConfig.dateParams / ReportConfig.dateParams.
 model/RunDates.java                   The dates one eligible source/report run operates on: runDate = BAU Business Date
                                        (--runDate or today in --businessTimeZone), periodStart/periodEnd/periodId = BAU
                                        Reporting Period. Produced ONLY by RunDateCalculator.evaluateDataSource()/evaluateReport();
@@ -1040,9 +1040,10 @@ Layer 2 — Standard tokens (both process types)
 Layer 2b — Configured date parameters (both process types; `date_params` in the source's / report's
           parameters_val_json), resolved right after the standard tokens from the same RunDates
     [{"token": "{periodLabel}", "source": "PERIOD_END",  "format": "MMM-yy"},     → "Jan-24"
+     {"token": "{label}",       "source": "PERIOD_END",  "format": "MMM-yy", "case": "UPPER"},  → "JAN-24"
      {"token": "%PRD%",         "source": "PERIOD_ID"},                           → 202401
      {"token": "{asAt}",        "source": "RUN_DATE", "format": "dd/MM/yyyy", "apply_to": ["step_a"]}]
-    `source` = PERIOD_ID | PERIOD_START | PERIOD_END | RUN_DATE; `format` = a Java DateTimeFormatter pattern
+    `source` = PERIOD_ID | PERIOD_START | PERIOD_END | RUN_DATE; `case` = UPPER | LOWER | AS_IS (default; Java prints month names as `Jan`); `format` = a Java DateTimeFormatter pattern
     (case-sensitive: MM month, mm minutes; English names; absent = yyyy-MM-dd; PERIOD_ID with a format
     renders the period's start date); `apply_to` = report step_name(s), or `bq_query` for a source's input
     query (absent = every query). Longer tokens are replaced first. A bad entry fails the config load.

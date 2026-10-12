@@ -414,7 +414,7 @@ public final class BigQuerySourceConfigRepository {
                 applyTo.add(scope.asText());
             }
             result.add(new DateParamConfig(textOrNull(entry, "token"), textOrNull(entry, "source"),
-                                           textOrNull(entry, "format"), applyTo));
+                                           textOrNull(entry, "format"), textOrNull(entry, "case"), applyTo));
         }
         return result;
     }

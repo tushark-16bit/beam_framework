@@ -204,7 +204,7 @@ public final class QueryParameterResolver {
         DateTimeFormatter formatter = param.format == null
             ? DateTimeFormatter.ISO_LOCAL_DATE
             : DateTimeFormatter.ofPattern(param.format, Locale.ENGLISH);
-        return date.format(formatter);
+        return param.textCase.apply(date.format(formatter));
     }
 
     private static String resolveStandardTokens(String s, RunDates dates) {
