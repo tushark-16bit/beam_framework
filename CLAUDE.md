@@ -882,7 +882,7 @@ PIPELINE has no config of its own: it reads the same report config as REPORT_PRO
 |---|---|---|
 | `parameter_store` | All pipeline params (source configs + report configs) | parameter_group_name (--parentId), parameter_data_source (--subprocessName / --reportSubprocess), parameter_name (--datasourceName / --reportName) |
 
-`schema_of_json` declares required top-level fields. `parameters_val_json` holds the config JSON.
+`schema_of_json` declares required top-level fields. `parameters_val_json` holds the config JSON. The config repositories read it leniently: a raw line break or tab inside a string value (a multi-line SQL pasted without `\n` escapes) is accepted; everything else must be valid JSON.
 
 ### Source configs (DATA_SOURCE_DOWNLOAD) — flat JSON in parameters_val_json
 

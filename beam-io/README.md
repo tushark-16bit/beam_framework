@@ -138,6 +138,7 @@ io/config/
                                      RunDateCalculator (beam-utils). Also parses file_date_pattern into
                                      FileSourceConfig.fileDatePattern for FILE sources.
     (both config repositories also parse `date_params` — an array of {token, source, format?, apply_to?} — into DateParamConfig; BigQuerySourceConfigRepository.parseDateParams is shared with the report repository; accepts an array or a string containing one; test: DateParamsParsingTest)
+    (config JSON is read with BigQuerySourceConfigRepository.CONFIG_JSON, which tolerates raw line breaks/tabs inside strings — pasted multi-line SQL; test: ConfigJsonLeniencyTest)
     BigQueryReportRepository       — reads report config nested JSON from parameter_store for REPORT_PROCESSING; each datasources[] entry may carry lookback_from/lookback_to (ints, 0 or negative; both or neither — invalid combinations fail the config load; tests: ReportDatasourceLookbackTest)
                                      AND PIPELINE (same lookup, same ReportConfig — PIPELINE has no config of its
                                      own; see beam-runner/README.md's PipelineSequenceFactory section).

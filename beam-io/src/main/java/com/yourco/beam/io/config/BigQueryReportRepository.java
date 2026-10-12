@@ -86,7 +86,7 @@ import java.util.stream.Collectors;
 public final class BigQueryReportRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(BigQueryReportRepository.class);
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = BigQuerySourceConfigRepository.CONFIG_JSON;  // tolerates raw newlines in strings
 
     private final BigQuery bigquery;
     private final String storeTable; // fully-qualified: `project.dataset.parameter_store`

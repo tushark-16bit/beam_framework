@@ -1,8 +1,10 @@
 package com.yourco.beam.io.config;
 
+import com.fasterxml.jackson.core.JsonReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.FieldValueList;
@@ -145,7 +147,17 @@ import java.util.Map;
 public final class BigQuerySourceConfigRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(BigQuerySourceConfigRepository.class);
-    private static final ObjectMapper JSON = new ObjectMapper();
+    /**
+     * Reads stored config JSON. Tolerates raw line breaks and tabs inside string values — what an
+     * operator gets when a multi-line SQL query is pasted into {@code parameters_val_json} without
+     * escaping each line break as {@code \n} — which strict JSON rejects ("Illegal unquoted
+     * character (CTRL-CHAR, code 10)"). Shared with {@link BigQueryReportRepository}.
+     */
+    static final ObjectMapper CONFIG_JSON = JsonMapper.builder()
+        .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
+        .build();
+
+    private static final ObjectMapper JSON = CONFIG_JSON;
     private static final TypeReference<Map<String, String>> STR_MAP  = new TypeReference<>() {};
     private static final TypeReference<List<String>>        STR_LIST = new TypeReference<>() {};
 
