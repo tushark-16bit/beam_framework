@@ -1,6 +1,6 @@
 package com.yourco.beam.io.config;
 
-import com.fasterxml.jackson.core.JsonReadFeature;
+import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
