@@ -6,6 +6,7 @@ import com.yourco.beam.exception.ReportProcessingException;
 import com.yourco.beam.io.config.BigQueryReportRepository;
 import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
 import com.yourco.beam.model.ReportConfig;
+import com.yourco.beam.model.ReportDataPlan;
 import com.yourco.beam.model.ReportDatasourceRef;
 import com.yourco.beam.model.RunDates;
 import com.yourco.beam.model.SourceConfig;
@@ -172,16 +173,17 @@ public final class PipelineSequenceFactory {
             LOG.info("Report declares no datasources — report step will run with nothing to wait for");
         }
 
-        // Lookback periods (driver JVM — needs each data source's schedule). If they can't be
-        // resolved the report step is skipped and reported, like a not-evaluable report schedule;
-        // the data sources still load.
-        Map<String, List<Integer>> lookbackPeriods = Map.of();
+        // The data source periods the report needs (driver JVM — needs each data source's
+        // schedule): its own period, every period inside it for a finer data source (D7), or a
+        // lookback range. If they can't be worked out the report step is skipped and reported,
+        // like a not-evaluable report schedule; the data sources still load.
+        ReportDataPlan plan = ReportDataPlan.empty();
         if (reportDates != null) {
-            warnOnPeriodMismatch(options, sourceConfigs, reportDates);
             try {
-                lookbackPeriods = ReportPipelineFactory.resolveLookbackPeriods(options, reportConfig, reportDates);
+                plan = ReportPipelineFactory.resolveDataPlan(options, reportConfig, reportDates);
+                warnOnPeriodMismatch(options, sourceConfigs, reportDates, plan);
             } catch (Exception e) {
-                LOG.error("Report '{}' skipped — lookback periods could not be resolved: {}",
+                LOG.error("Report '{}' skipped — the data source periods it needs could not be worked out: {}",
                           reportConfig.reportName, e.getMessage());
                 FailureNotifier.notify(options, e);
                 reportDates = null;
@@ -204,7 +206,7 @@ public final class PipelineSequenceFactory {
             // Wire the report step onto the SAME pipeline, gated on every datasource branch's
             // finalize signal via Wait.on() — no driver-JVM poll loop.
             ReportFinalizeTransform.wire(assembly.pipeline, assembly.finalizeSignals, reportConfig,
-                reportDates, lookbackPeriods, options);
+                reportDates, plan, options);
         }
 
         LOG.info("Submitting batched PIPELINE job ({} datasource branch(es){}) to runner: {}",
@@ -255,14 +257,16 @@ public final class PipelineSequenceFactory {
     }
 
     /**
-     * The report finds each datasource's DaRefer row by the report's own {@code periodId}, so a
-     * datasource whose schedule resolves to a different one can never be picked up by this
-     * report. Warn at submission rather than only discovering it after the download runs.
-     * Only data sources eligible today are compared; the others are skipped (and reported) by
-     * {@code assembleForConfigs()} right after.
+     * The report finds each datasource's DaRefer rows by the periods in its {@code plan} — its own
+     * {@code periodId} for a data source of the same frequency, every period inside the report
+     * period for a finer one (owner decision D7). A data source whose run today produces a period
+     * the report will not read is logged: a WARN when the report expects that data source's own
+     * period (so it can never be picked up), an INFO for a finer data source, where every run
+     * simply adds one period the report may read later. Only data sources eligible today are
+     * compared; the others are skipped (and reported) by {@code assembleForConfigs()} right after.
      */
     private static void warnOnPeriodMismatch(FrameworkOptions options, List<SourceConfig> sourceConfigs,
-                                             RunDates reportDates) {
+                                             RunDates reportDates, ReportDataPlan plan) {
         for (SourceConfig config : sourceConfigs) {
             int sourcePeriodId;
             try {
@@ -273,7 +277,15 @@ public final class PipelineSequenceFactory {
             } catch (Exception e) {
                 continue;
             }
-            if (sourcePeriodId != reportDates.periodId) {
+            List<Integer> needed = plan.validatePeriods(config.datasourceName, reportDates.periodId);
+            if (needed.contains(sourcePeriodId)) {
+                continue;
+            }
+            if (plan.hasEntry(config.datasourceName)) {
+                LOG.info("Datasource '{}' loads periodId={} in this run; the report (periodId={}) reads "
+                         + "the datasource periods {}", config.datasourceName, sourcePeriodId,
+                         reportDates.periodId, needed);
+            } else {
                 LOG.warn("Datasource '{}' resolves to periodId={} but report resolves to periodId={} "
                          + "— the report will not find this datasource's run",
                          config.datasourceName, sourcePeriodId, reportDates.periodId);

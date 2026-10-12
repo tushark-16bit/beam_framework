@@ -92,6 +92,13 @@ public interface ReportCheckpointAdapter {
     String stagedDataSubquery(long mapId);
 
     /**
+     * Same shape as {@link #stagedDataSubquery(long)}, over several staged data source runs at
+     * once — the rows of every {@code mapId} (e.g. one per daily data source period inside a
+     * monthly report period), un-nested to one row per source record.
+     */
+    String stagedDataSubquery(java.util.List<Long> mapIds);
+
+    /**
      * Deletes all {@code RptStageDa} rows associated with this report run
      * (joined via {@code RptDaMap.rpt_id}). Called after all outputs are produced.
      *

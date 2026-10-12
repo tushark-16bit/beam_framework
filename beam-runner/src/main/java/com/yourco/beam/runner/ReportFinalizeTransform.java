@@ -3,6 +3,7 @@ package com.yourco.beam.runner;
 import com.yourco.beam.exception.PipelineException;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.model.ReportConfig;
+import com.yourco.beam.model.ReportDataPlan;
 import com.yourco.beam.model.ReportDatasourceRef;
 import com.yourco.beam.model.RunDates;
 import com.yourco.beam.options.FrameworkOptions;
@@ -73,7 +74,7 @@ final class ReportFinalizeTransform {
      */
     static void wire(Pipeline pipeline, List<PCollection<?>> finalizeSignals,
                      ReportConfig config, RunDates dates,
-                     Map<String, List<Integer>> lookbackPeriods, FrameworkOptions options) {
+                     ReportDataPlan plan, FrameworkOptions options) {
         String project = options.getCheckpointBqProject() != null
                         && !options.getCheckpointBqProject().isBlank()
                         ? options.getCheckpointBqProject() : options.getProject();
@@ -88,7 +89,7 @@ final class ReportFinalizeTransform {
             : trigger.apply("WaitForDatasources-" + config.reportName, Wait.on(finalizeSignals));
 
         gated.apply("RunReport-" + config.reportName,
-            ParDo.of(new ReportRunDoFn(config, dates, lookbackPeriods, daReferTableRef)));
+            ParDo.of(new ReportRunDoFn(config, dates, plan, daReferTableRef)));
     }
 
     // ── Named DoFn — required for Beam serialization safety ──────────────────
@@ -99,15 +100,15 @@ final class ReportFinalizeTransform {
 
         private final ReportConfig config;
         private final RunDates     dates;
-        /** Resolved in the driver JVM — see ReportPipelineFactory.resolveLookbackPeriods(). */
-        private final HashMap<String, List<Integer>> lookbackPeriods;
+        /** Resolved in the driver JVM — see ReportPipelineFactory.resolveDataPlan(). */
+        private final ReportDataPlan plan;
         private final String       daReferTableRef;
 
-        ReportRunDoFn(ReportConfig config, RunDates dates, Map<String, List<Integer>> lookbackPeriods,
+        ReportRunDoFn(ReportConfig config, RunDates dates, ReportDataPlan plan,
                       String daReferTableRef) {
             this.config          = config;
             this.dates           = dates;
-            this.lookbackPeriods = new HashMap<>(lookbackPeriods);
+            this.plan            = plan;
             this.daReferTableRef = daReferTableRef;
         }
 
@@ -122,7 +123,7 @@ final class ReportFinalizeTransform {
                      config.reportName, config.reportSubprocess, dates.periodId);
             try {
                 verifyRequiredDatasources(options);
-                new ReportPipelineFactory().execute(options, config, dates, lookbackPeriods);
+                new ReportPipelineFactory().execute(options, config, dates, plan);
                 LOG.info("Report '{}' completed", config.reportName);
             } catch (Exception e) {
                 LOG.error("Report '{}' failed: {}", config.reportName, e.getMessage(), e);
@@ -142,8 +143,12 @@ final class ReportFinalizeTransform {
             List<String> failedRequired = new ArrayList<>();
             for (ReportDatasourceRef ref : config.datasources) {
                 if (!ref.required) continue;
-                if (!checkpointAdapter.isCompleted(ref.datasourceName, dates.periodId)) {
-                    failedRequired.add(ref.datasourceName);
+                // every period the plan lists for this data source (just the report's own period
+                // unless it is finer than the report — owner decision D7)
+                for (int period : plan.validatePeriods(ref.datasourceName, dates.periodId)) {
+                    if (!checkpointAdapter.isCompleted(ref.datasourceName, period)) {
+                        failedRequired.add(ref.datasourceName + " (period " + period + ")");
+                    }
                 }
             }
             if (!failedRequired.isEmpty()) {

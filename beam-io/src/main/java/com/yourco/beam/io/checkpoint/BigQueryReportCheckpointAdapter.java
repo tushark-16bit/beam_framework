@@ -182,9 +182,18 @@ public final class BigQueryReportCheckpointAdapter implements ReportCheckpointAd
         // row array either way, so the FILE source's DataHeaders legend is never unnested and
         // never reaches report input data, same guarantee as before, just applied on read
         // instead of on write.
+        return stagedDataSubquery(java.util.List.of(mapId));
+    }
+
+    @Override
+    public String stagedDataSubquery(java.util.List<Long> mapIds) {
+        if (mapIds == null || mapIds.isEmpty()) {
+            throw new IllegalArgumentException("no staged data source runs (map ids) to read");
+        }
+        String ids = mapIds.stream().map(String::valueOf).collect(java.util.stream.Collectors.joining(", "));
         return "(SELECT row_json AS stage_ds_json_tx FROM " + rptStageDaTable
             + " CROSS JOIN UNNEST(" + FileHeaderLegend.dataArrayExpr("stage_ds_json_tx") + ") AS row_json"
-            + " WHERE map_id = " + mapId + ")";
+            + " WHERE map_id IN (" + ids + "))";
     }
 
     @Override

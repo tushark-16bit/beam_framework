@@ -606,6 +606,19 @@ persisted for a skip, so the item runs on the next business day that is still in
 DAILY item's missed day is still not caught up, Part 1 §9). Weekends and holidays are not business
 days in every `WD±n` calculation (run days, DAILY lag, `lastBusDayMonth`) — as Part 1 already states.
 
+### D7 — A data source may be finer-grained than the report that reads it (2026-10-12)
+
+*Replaces the earlier assumption (Part 3 #7) that a report and its data sources must resolve to the
+same period.*
+
+A data source's `frequency` may be **finer than or equal to** its report's (DAILY ≤ MONTHLY ≤
+QUARTERLY ≤ ANNUALLY) — e.g. daily data sources feeding a monthly report. The report then needs
+**every data source period that falls inside the report's period** (`periodStart` … `periodEnd`,
+inclusive): all of them must be `COMPLETED` for the report to run, and the report reads the rows of
+all of them (the latest `COMPLETED` run of each period). A data source **coarser** than its report is
+not supported and fails the report loudly. With equal frequencies nothing changes: the one period is
+the report's own period. Lookback (`lookback_from`/`lookback_to`) still requires equal frequencies.
+
 ---
 
 # PART 3 — Implementation notes and OPEN items (not part of the contract)
@@ -626,9 +639,12 @@ owner the same day — see D3 and D4.)
 4. **Non-DAILY with blank `freqRunDay`** — assumed no lower bound.
 5. **Exact, case-sensitive matching** of `WD`/`CAL` prefixes, `lastBusDayMonth` and frequency names (`monthly` ≠ `MONTHLY`).
 6. **Report `paramReplace[].dateType`** (`periodId` / `RunDate` / period end + `periodOffset`, Part 1 §7B) — not implemented; its config shape and `periodOffset` unit are not described.
-7. **A report whose data sources have a different frequency** — a report looks its data sources up by its own `periodId`; mapping between differing frequencies is not implemented.
+7. **A report whose data sources have a different frequency** — superseded by owner decision D7: finer data sources are covered period by period (see #10); a data source *coarser* than its report fails the report loudly (not supported).
 8. **`maxFreqRunDay`** is read as a `WD±n` string like `freqRunDay`; a bare number (`5`) is NOT_EVALUABLE.
 9. **Report lookback (`lookback_from` / `lookback_to`, owner request 2026-10-05)** — each entry of a report's `datasources[]` may carry both (0 or negative, `from >= to`; e.g. `0` and `-11`). Offset `0` = the report's own period, `-k` = k periods before it, stepped in the **data source's own frequency** (MONTHLY a month, QUARTERLY a quarter with the D3 id, ANNUALLY a year, DAILY a business day for `WD-n`/blank lag — the business-day step for a blank lag is an assumption — or a calendar day for `CAL-n`). Every period in the range must be `COMPLETED` in DaRefer, else the report fails (`DATASOURCE_UNAVAILABLE`) — enforced whether or not the data source is `is_required`. Needs the data source and report to have the **same frequency**, else the lookback cannot be resolved (never guessed; same gap as #7). Pure logic: `RunDateCalculator.lookbackPeriodIds()`.
+
+10. **Which periods a finer data source must have inside the report period (D7)** — the contract does not say which DAILY periods exist. Assumed: a DAILY data source produces a period for a day `d` only when a run could have produced it, i.e. `dayLag` blank or `WD-n` → `d` must be a business day in the data source's calendar; `CAL-n` → `d + n` calendar days must be a business day (a run happens only on a business day, D6). Weekends and holidays are therefore not expected. MONTHLY / QUARTERLY / ANNUALLY data sources are expected for every whole month / quarter / year inside the report period. If no data source period falls inside the report period the report fails rather than reading nothing.
+11. **Lookback with differing frequencies** — not supported; a data source with `lookback_from`/`lookback_to` must have the report's frequency (fails loudly otherwise).
 
 ### How the contract maps to code
 

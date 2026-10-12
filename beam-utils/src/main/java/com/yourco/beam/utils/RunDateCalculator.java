@@ -536,6 +536,109 @@ public final class RunDateCalculator {
             "calendar has no business days within " + MAX_DAYS_SCANNED + " days of " + around);
     }
 
+    // ── Report coverage: the data source periods inside a report period (D7) ──
+
+    private static int frequencyRank(String frequency) {
+        if (frequency == null) {
+            throw new IllegalArgumentException("no frequency configured");
+        }
+        return switch (frequency) {
+            case RunScheduleConfig.DAILY     -> 0;
+            case RunScheduleConfig.MONTHLY   -> 1;
+            case RunScheduleConfig.QUARTERLY -> 2;
+            case RunScheduleConfig.ANNUALLY  -> 3;
+            default -> throw new IllegalArgumentException("unsupported frequency " + frequency);
+        };
+    }
+
+    /**
+     * The data source period ids a report must find {@code COMPLETED} — every period of the data
+     * source's own frequency that lies inside the report's period ({@code periodStart} …
+     * {@code periodEnd}, inclusive). Owner decision D7: a data source may be finer than its report
+     * (daily data sources, monthly report).
+     * <ul>
+     *   <li><b>Same frequency</b> → just the report's own period id (nothing changes).</li>
+     *   <li><b>Finer frequency</b> → every period inside the report period: a MONTHLY source for
+     *       a QUARTERLY report gives its three months; a DAILY source gives each day it can have
+     *       produced — assumption (contract Part 3 #10): {@code dayLag} blank or {@code WD-n} →
+     *       business days of the data source's calendar; {@code CAL-n} → days {@code d} where
+     *       {@code d + n} is a business day (a run needs a business day, D6).</li>
+     *   <li><b>Coarser frequency</b> → {@link IllegalArgumentException}: not supported.</li>
+     * </ul>
+     * Ids use the usual encodings (DAILY {@code yyyyMMdd}, MONTHLY {@code yyyyMM}, QUARTERLY
+     * {@code yyyyMMddqq}, ANNUALLY {@code yyyy}), ascending.
+     *
+     * @param calendar the data source's calendar — used only for a DAILY source
+     * @throws IllegalArgumentException coarser data source, a positive DAILY lag (D4), or no data
+     *         source period falls inside the report period
+     */
+    public static List<Integer> sourcePeriodIdsWithin(RunScheduleConfig dataSource, RunScheduleConfig report,
+                                                      RunDates reportDates, BusinessCalendar calendar) {
+        int sourceRank = frequencyRank(dataSource.frequency);
+        int reportRank = frequencyRank(report.frequency);
+        if (sourceRank > reportRank) {
+            throw new IllegalArgumentException("data source frequency " + dataSource.frequency
+                + " is coarser than the report's " + report.frequency + " — not supported");
+        }
+        if (sourceRank == reportRank) {
+            return List.of(reportDates.periodId);
+        }
+        LocalDate start = reportDates.periodStart;
+        LocalDate end   = reportDates.periodEnd;
+        if (start == null || end == null) {
+            throw new IllegalArgumentException("the report period has no start/end dates");
+        }
+        List<Integer> ids = new ArrayList<>();
+        switch (dataSource.frequency) {
+            case RunScheduleConfig.DAILY -> {
+                int lagDays = 0;
+                boolean calendarLag = false;
+                if (dataSource.dayLag != null) {
+                    if (DAILY_LAG_POSITIVE.matcher(dataSource.dayLag).matches()) {
+                        throw new IllegalArgumentException(
+                            "positive DAILY dayLag '" + dataSource.dayLag + "' is not allowed (D4)");
+                    }
+                    Matcher m = DAILY_LAG.matcher(dataSource.dayLag);
+                    if (!m.matches()) {
+                        throw new IllegalArgumentException("unparseable DAILY dayLag '" + dataSource.dayLag + "'");
+                    }
+                    calendarLag = "CAL".equals(m.group(1));
+                    lagDays = calendarLag ? Integer.parseInt(m.group(2)) : 0;
+                }
+                for (LocalDate d = start; !d.isAfter(end); d = d.plusDays(1)) {
+                    LocalDate runDay = calendarLag ? d.plusDays(lagDays) : d;
+                    if (calendar.isBusinessDay(runDay)) {
+                        ids.add(d.getYear() * 10000 + d.getMonthValue() * 100 + d.getDayOfMonth());
+                    }
+                }
+            }
+            case RunScheduleConfig.MONTHLY -> {
+                for (YearMonth m = YearMonth.from(start); !m.isAfter(YearMonth.from(end)); m = m.plusMonths(1)) {
+                    if (!m.atDay(1).isBefore(start) && !m.atEndOfMonth().isAfter(end)) {
+                        ids.add(m.getYear() * 100 + m.getMonthValue());
+                    }
+                }
+            }
+            case RunScheduleConfig.QUARTERLY -> {
+                LocalDate q = LocalDate.of(start.getYear(), quarterStartMonth(start.getMonthValue()), 1);
+                for (; !q.isAfter(end); q = q.plusMonths(3)) {
+                    LocalDate qEnd = YearMonth.from(q.plusMonths(2)).atEndOfMonth();
+                    if (!q.isBefore(start) && !qEnd.isAfter(end)) {
+                        ids.add(quarterPeriodId(q, (q.getMonthValue() - 1) / 3 + 1));
+                    }
+                }
+            }
+            default -> {   // ANNUALLY is the coarsest, so it can never be finer than its report
+                throw new IllegalArgumentException("unsupported frequency " + dataSource.frequency);
+            }
+        }
+        if (ids.isEmpty()) {
+            throw new IllegalArgumentException("no " + dataSource.frequency + " data source period falls "
+                + "inside the report period " + start + " … " + end);
+        }
+        return ids;
+    }
+
     // ── Report lookback: period ids of earlier periods of a data source ───────
 
     /**

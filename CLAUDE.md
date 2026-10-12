@@ -216,6 +216,7 @@ model/RunDates.java                   The dates one eligible source/report run o
 model/ReportConfig.java               Full report config assembled from parameter_store nested JSON blob. periodId is int (the
                                        --periodId it was fetched with; ReportPipelineFactory uses RunDates.periodId instead).
                                        runScheduleConfig from the optional "run_details" object (RunScheduleConfig.none() if absent).
+model/ReportDataPlan.java             Serializable per-data-source plan of which source periods a report must find COMPLETED (validate) and which it reads (stage): none recorded → the report's own period; finer data source (D7) → every source period inside the report period; lookback → validate the whole range, stage only the report's own period. Built in the driver JVM by ReportPipelineFactory.resolveDataPlan() and carried to the worker in ReportRunDoFn.
 model/ReportDatasourceRef.java        Required DS for a report + transform alias. Optional lookbackFrom/lookbackTo (config keys lookback_from/lookback_to, 0 or negative, from >= to; both or neither): the report fails unless every period from the report's own period (0) back to lookbackTo is COMPLETED, stepped in the data source's own frequency. hasLookback().
 model/ReportPreprocessingStep.java    Pre-run step: BQ_QUERY or API_ENRICHMENT.
 model/ReportTransformStep.java        One BQ query in the chain: inputAlias → outputAlias.
@@ -277,7 +278,7 @@ sink/DataSourceRecordSinkTransform.java  Collects all source rows globally, pagi
 checkpoint/DataSourceCheckpointAdapter.java         Interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
 checkpoint/BigQueryDataSourceCheckpointAdapter.java BQ DML impl. MAX(da_id)+1 sequence. MAX(vsn_no)+1 per (srce_nm, per_id). All timestamps DATETIME. Has String-tableRef constructor for in-worker use.
 checkpoint/ReportCheckpointAdapter.java             Interface for all 4 REPORT_PROCESSING tables: RptRefer, RptDaMap, RptStageDa, RptOutput.
-checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
+checkpoint/BigQueryReportCheckpointAdapter.java     BQ DML impl. stagedDataSubquery(List<Long> mapIds) reads several staged data source runs (one per source period inside a report period) as one alias; the single-id overload delegates to it. Reads table names from --rptReferTable/--rptDaMapTable/--rptStageDaTable/--rptOutputTable flags.
                                                      stageFromDaRec copies DaRec's pages into RptStageDa verbatim (one RptStageDa row per DaRec
                                                      page, batched like DaRec itself — not one row per source record). stagedDataSubquery()
                                                      un-nests those pages back into individual source-row JSON objects on read, via
@@ -369,6 +370,10 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                              its quarter (QUARTERLY, assumption), January (ANNUALLY, assumption).
                              lookbackPeriodIds(dataSource, report, reportDates, from, to, calendar) → the period ids a report's lookback must
                              find COMPLETED (contract Part 3 #9; same frequency required).
+                             sourcePeriodIdsWithin(dataSource, report, reportDates, calendar) → the data source periods a report needs (owner
+                             decision D7): same frequency → the report's own period; FINER data source (daily source, monthly report) →
+                             every data source period inside the report period (DAILY: business days, per contract Part 3 #10); COARSER →
+                             IllegalArgumentException (not supported).
                              Pure evaluate(schedule, businessDate, itemType, calendarProvider) overload is what
                              RunDateCalculatorTest (65 tests) exercises. All call sites run in the driver JVM:
                              DataSourcePipelineFactory (per source), ReportPipelineFactory.execute(options),
@@ -806,16 +811,19 @@ Main.runReportProcessing(options)
     │
     ├─ Phase 2: Datasource availability check
     │   (lookback: for a datasource with lookback_from/lookback_to, EVERY period id in the range must be COMPLETED;
-    │    ids resolved in the driver JVM by resolveLookbackPeriods() → RunDateCalculator.lookbackPeriodIds())
+    │    ids resolved in the driver JVM by resolveDataPlan() → ReportDataPlan: RunDateCalculator.lookbackPeriodIds() for a lookback,
+    │    sourcePeriodIdsWithin() for a data source finer than the report — EVERY data source period inside the report period
+    │    must be COMPLETED (owner decision D7); a coarser data source fails the report)
     │   └─ for each required ReportDatasourceRef:
     │       └─ BigQueryDataSourceCheckpointAdapter.isCompleted(srceNm, perId) → must be true
     │
     ├─ Phase 3: Build alias registry (stage datasource rows)
     │   └─ for each ReportDatasourceRef:
+    │       ├─ per data source period the plan reads (just the report's period; every period inside it for a finer data source):
     │       ├─ BigQueryDataSourceCheckpointAdapter.fetchLatestCompletedDaId(srceNm, perId) → da_id
     │       ├─ BigQueryReportCheckpointAdapter.addDaMapping(rptId, daId)   → map_id (RptDaMap row)
     │       ├─ BigQueryReportCheckpointAdapter.stageFromDaRec(mapId, daId) → copies DaRec's pages into RptStageDa verbatim (one RptStageDa row per page, not per record — batched like DaRec)
-    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT row_json AS stage_ds_json_tx FROM RptStageDa CROSS JOIN UNNEST(...) AS row_json WHERE map_id=X) — un-nests RptStageDa's pages back into individual records on read, so report SQL still sees one row per record
+    │       └─ aliasRegistry[alias] = stagedDataSubquery(mapId)           → (SELECT row_json AS stage_ds_json_tx FROM RptStageDa CROSS JOIN UNNEST(...) AS row_json WHERE map_id IN (all staged runs of this data source)) — un-nests RptStageDa's pages back into individual records on read, so report SQL still sees one row per record
     │
     ├─ Phase 4: Transformation chain
     │   └─ for each ReportTransformStep (by step_order):
@@ -963,8 +971,12 @@ naming for reports) and `dateType` is ignored (BAU doesn't use a report's run-le
 It feeds `RunDateCalculator.evaluateReport()`; absent → the report is not processed (NOT_EVALUABLE, owner decision D5). A report is
 scheduled independently of its datasources: a scheduled report already `COMPLETED` for its
 calculated period is skipped unless `--manualOverrun`. A report
-looks its datasources up in `DaRefer` by its own resolved `periodId`, so a report and the
-datasources it reads must resolve to the same `periodId` (PIPELINE logs a warning when they don't).
+looks its datasources up in `DaRefer` by period: a data source of the **same frequency** by the report's
+own resolved `periodId`; a **finer** data source (daily data sources for a monthly report — owner decision
+D7, `DATE_SCHEDULING_RULES.md`) by **every data source period inside the report's `periodStart`…`periodEnd`**
+— all must be `COMPLETED` and the rows of all of them are staged into the report's alias. A data source
+**coarser** than its report fails the report (not supported). PIPELINE logs a WARN when a same-frequency
+data source resolves to a different period than the report's.
 
 The `datasources[]` array (with each entry's `is_required`) is the **same config PIPELINE reads**
 — there is no separate pipeline config. `--processType=PIPELINE` takes the identical

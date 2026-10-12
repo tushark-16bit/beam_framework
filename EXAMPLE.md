@@ -414,6 +414,15 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 13a | Success → `updateStatus(rpt_id, COMPLETED)` | → **COMPLETED** |
 | 13b | Any failure → `updateStatus(rpt_id, FAILED)` | → **FAILED** |
 
+### Daily data sources for a monthly report
+
+The `trades` data source above is MONTHLY, like the report. A data source may also be *finer* than
+the report — give it `"frequency": "DAILY"` in its `run_details_json` (calendar and a `dayLag` such as
+`WD-1`) and keep the report MONTHLY. The report for September then needs **every business day of
+September** loaded and `COMPLETED` (one `da_refer` row per day, `per_id` 20260901 … 20260930), and its
+`raw_trades` alias contains the rows of all of them. A missing day fails the report and names the
+period; a data source coarser than the report (e.g. monthly source, daily report) is not supported.
+
 ### Query parameters for dates (`date_params`)
 
 Add a `date_params` array next to `transforms` (or to the data source's `parameters_val_json`) to

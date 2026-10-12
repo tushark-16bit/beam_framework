@@ -968,6 +968,80 @@ class RunDateCalculatorTest {
             () -> RunDateCalculator.lookbackPeriodIds(q, m, dates, 0, -3, CALENDAR));
     }
 
+    // ── D7: a data source may be finer than its report (contract Part 2 D7, Part 3 #10) ──────
+
+    private static final RunScheduleConfig MONTHLY_REPORT   = schedule("MONTHLY", "WD+3", "WD+5", "", null);
+    private static final RunScheduleConfig QUARTERLY_REPORT = schedule("QUARTERLY", "WD+3", "WD+5", "", null);
+    private static final RunScheduleConfig ANNUAL_REPORT    = schedule("ANNUALLY", "WD+3", "WD+5", "", null);
+
+    private static List<Integer> within(RunScheduleConfig dataSource, RunScheduleConfig report, LocalDate businessDate) {
+        RunDates dates = RunDateCalculator.calculateLastPeriod(report, businessDate, CALENDAR);
+        return RunDateCalculator.sourcePeriodIdsWithin(dataSource, report, dates, CALENDAR);
+    }
+
+    @Test
+    void sameFrequencyIsJustTheReportsOwnPeriod() {
+        assertEquals(List.of(202609), within(schedule("MONTHLY", "WD+3", "WD+5", "", null), MONTHLY_REPORT, d(2026, 10, 8)));
+    }
+
+    @Test
+    void dailySourceForAMonthlyReportNeedsEveryBusinessDayOfTheMonth() {
+        // September 2026: 22 weekdays minus the 09-07 holiday = 21 business days
+        List<Integer> ids = within(schedule("DAILY", null, null, "WD-1", null), MONTHLY_REPORT, d(2026, 10, 8));
+        assertEquals(21, ids.size());
+        assertEquals(20260901, ids.get(0));
+        assertEquals(20260930, ids.get(ids.size() - 1));
+        assertFalse(ids.contains(20260907), "holiday");
+        assertFalse(ids.contains(20260905), "Saturday");
+        assertFalse(ids.contains(20260906), "Sunday");
+    }
+
+    @Test
+    void dailySourceWithABlankLagAlsoExpectsOnlyBusinessDays() {
+        assertEquals(21, within(schedule("DAILY", null, null, null, null), MONTHLY_REPORT, d(2026, 10, 8)).size());
+    }
+
+    @Test
+    void aCalendarDayLagExpectsTheDaysWhoseRunDayIsABusinessDay() {
+        // CAL-1: the period for day d is produced by the run on d+1, which must be a business day
+        List<Integer> ids = within(schedule("DAILY", null, null, "CAL-1", null), MONTHLY_REPORT, d(2026, 10, 8));
+        assertFalse(ids.contains(20260904), "Friday: d+1 is Saturday, no run");
+        assertFalse(ids.contains(20260906), "Sunday: d+1 is the 09-07 holiday");
+        assertTrue(ids.contains(20260913), "Sunday: d+1 is Monday 09-14, a business day");
+        assertTrue(ids.contains(20260903), "Thursday: d+1 is Friday");
+    }
+
+    @Test
+    void monthlySourceForAQuarterlyReportNeedsItsThreeMonths() {
+        assertEquals(List.of(202607, 202608, 202609),
+            within(schedule("MONTHLY", "WD+3", "WD+5", "", null), QUARTERLY_REPORT, d(2026, 10, 8)));
+    }
+
+    @Test
+    void monthlyAndQuarterlySourcesForAnAnnualReport() {
+        assertEquals(12, within(schedule("MONTHLY", "WD+3", "WD+5", "", null), ANNUAL_REPORT, d(2026, 1, 8)).size());
+        assertEquals(List.of(2025010101, 2025040102, 2025070103, 2025100104),
+            within(schedule("QUARTERLY", "WD+3", "WD+5", "", null), ANNUAL_REPORT, d(2026, 1, 8)));
+    }
+
+    @Test
+    void aSourceCoarserThanItsReportIsNotSupported() {
+        assertThrows(IllegalArgumentException.class,
+            () -> within(schedule("QUARTERLY", "WD+3", "WD+5", "", null), MONTHLY_REPORT, d(2026, 10, 8)));
+        assertThrows(IllegalArgumentException.class,
+            () -> within(schedule("ANNUALLY", "WD+3", "WD+5", "", null), QUARTERLY_REPORT, d(2026, 10, 8)));
+    }
+
+    @Test
+    void aPositiveDailyLagStillFailsAndAnEmptyWindowFailsLoudly() {
+        assertThrows(IllegalArgumentException.class,
+            () -> within(schedule("DAILY", null, null, "WD+1", null), MONTHLY_REPORT, d(2026, 10, 8)));
+        BusinessCalendar closed = date -> false;
+        RunDates dates = RunDateCalculator.calculateLastPeriod(MONTHLY_REPORT, d(2026, 10, 8), CALENDAR);
+        assertThrows(IllegalArgumentException.class, () -> RunDateCalculator.sourcePeriodIdsWithin(
+            schedule("DAILY", null, null, "WD-1", null), MONTHLY_REPORT, dates, closed));
+    }
+
     private static void assertNotEquals(Object unexpected, Object actual, String message) {
         assertFalse(unexpected.equals(actual), message);
     }

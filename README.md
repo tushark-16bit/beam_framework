@@ -573,6 +573,13 @@ and whether each one is mandatory, in its own `datasources[]`:
 }
 ```
 
+**Frequencies need not match (finer data sources).** A data source may be *finer* than the report that
+reads it — e.g. daily data sources for a monthly report. The report then needs **every data source
+period inside its own `periodStart`…`periodEnd`** to be `COMPLETED` (for a DAILY source: each day a run
+could have produced — business days of the source's calendar, or for `dayLag` `CAL-n` the days whose
+run day `d+n` is a business day) and reads the rows of **all** of them. A data source *coarser* than its
+report fails the report; a lookback still needs equal frequencies. See `DATE_SCHEDULING_RULES.md` D7.
+
 `lookback_from`/`lookback_to` (optional, both or neither; 0 or negative) make the report fail unless the data source is `COMPLETED` for every period from the report's own (0) back to `lookback_to`, stepping in the data source's own frequency (`0`/`-11` monthly = 12 months). The data source and report must share a frequency.
 
 ### Configured date parameters (`date_params`)

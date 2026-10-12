@@ -11,6 +11,7 @@ import com.yourco.beam.model.EmailAttachment;
 import com.yourco.beam.model.EmailParams;
 import com.yourco.beam.model.ReportCheckpoint;
 import com.yourco.beam.model.ReportConfig;
+import com.yourco.beam.model.ReportDataPlan;
 import com.yourco.beam.model.ReportDatasourceRef;
 import com.yourco.beam.model.ReportOutputConfig;
 import com.yourco.beam.model.ReportPreprocessingStep;
@@ -167,31 +168,39 @@ public final class ReportPipelineFactory {
             return;
         }
 
-        Map<String, List<Integer>> lookback = resolveLookbackPeriods(options, config, dates);
-        execute(options, config, dates, lookback);
+        execute(options, config, dates, resolveDataPlan(options, config, dates));
     }
 
     /**
-     * Period ids each data source with a {@code lookback_from}/{@code lookback_to} must have
-     * COMPLETED, keyed by datasource name — the report's own period (offset 0) back to
-     * {@code lookback_to}, stepping in that <b>data source's own frequency</b>
-     * ({@link RunDateCalculator#lookbackPeriodIds}). Needs the data source's {@code run_details_json}
-     * (and, for DAILY, its calendar), so it runs in the <b>driver JVM</b> and the result is passed
-     * on to {@link #execute(FrameworkOptions, ReportConfig, RunDates, Map)} / carried to the
-     * worker — {@code BigQuerySourceConfigRepository} must never run in a DoFn (CLAUDE.md §12).
-     * Data sources without a lookback are absent from the map.
+     * Works out, per data source, which periods the report must find {@code COMPLETED} and which
+     * of them it reads — a {@link ReportDataPlan}. Needs each data source's {@code run_details_json}
+     * schedule (and, for a DAILY source, its calendar), so it runs in the <b>driver JVM</b> and the
+     * result is passed on to {@link #execute(FrameworkOptions, ReportConfig, RunDates, ReportDataPlan)}
+     * / carried to the worker — {@code BigQuerySourceConfigRepository} must never run in a DoFn
+     * (CLAUDE.md §12).
+     * <ul>
+     *   <li>Data source with a lookback ({@code lookback_from}/{@code lookback_to}): validate the
+     *       whole lookback range ({@link RunDateCalculator#lookbackPeriodIds}), read only the
+     *       report's own period; the frequencies must be equal.</li>
+     *   <li>Otherwise, from the data source's own frequency
+     *       ({@link RunDateCalculator#sourcePeriodIdsWithin}, owner decision D7): equal to the
+     *       report's → just the report's period; <b>finer</b> (daily sources, monthly report) →
+     *       every data source period inside the report period, all validated and all read;
+     *       <b>coarser</b> → the report fails.</li>
+     *   <li>A data source whose config can't be loaded or has no schedule keeps the report's own
+     *       period (the pre-existing behaviour) — unless it has a lookback, which needs both.</li>
+     * </ul>
      *
-     * @throws ReportProcessingException ({@code DATASOURCE_UNAVAILABLE}) if a data source's
-     *         schedule can't be loaded or doesn't support the lookback (no schedule, differing
-     *         frequency, no calendar) — never computed on a guess
+     * @throws ReportProcessingException ({@code DATASOURCE_UNAVAILABLE}) if a data source is
+     *         coarser than the report, has a lookback it can't support, or its calendar can't be
+     *         loaded — never computed on a guess
      */
-    static Map<String, List<Integer>> resolveLookbackPeriods(FrameworkOptions options,
-                                                              ReportConfig config, RunDates dates) {
-        Map<String, List<Integer>> plan = new LinkedHashMap<>();
+    static ReportDataPlan resolveDataPlan(FrameworkOptions options, ReportConfig config, RunDates dates) {
+        ReportDataPlan plan = ReportDataPlan.empty();
         BigQuerySourceConfigRepository sourceRepo = null;
         BusinessCalendarProvider calendars = null;
         for (ReportDatasourceRef ref : config.datasources) {
-            if (!ref.hasLookback()) continue;
+            RunScheduleConfig dsSchedule = null;
             try {
                 if (sourceRepo == null) {
                     sourceRepo = new BigQuerySourceConfigRepository(options);
@@ -202,23 +211,48 @@ public final class ReportPipelineFactory {
                 if (found.isEmpty()) {
                     throw new IllegalArgumentException("no source config found");
                 }
-                RunScheduleConfig dsSchedule = found.get(0).runScheduleConfig;
-                if (dsSchedule == null || !dsSchedule.hasSchedule()) {
+                dsSchedule = found.get(0).runScheduleConfig;
+            } catch (Exception e) {
+                if (ref.hasLookback()) {
+                    throw planFailure(config, dates, ref, e);
+                }
+                LOG.warn("Cannot read the schedule of data source '{}' ({}) — the report will use its "
+                         + "own period {} for it", ref.datasourceName, e.getMessage(), dates.periodId);
+                continue;
+            }
+            boolean scheduled = dsSchedule != null && dsSchedule.hasSchedule();
+            if (!scheduled && !ref.hasLookback()) {
+                continue;   // no schedule to compare with: the report's own period, as before
+            }
+            try {
+                if (!scheduled) {
                     throw new IllegalArgumentException("it has no run_details_json schedule");
                 }
                 BusinessCalendar calendar = RunScheduleConfig.DAILY.equals(dsSchedule.frequency)
                     ? calendars.forKey(dsSchedule.calendarKey) : null;
-                plan.put(ref.datasourceName, RunDateCalculator.lookbackPeriodIds(
-                    dsSchedule, config.runScheduleConfig, dates,
-                    ref.lookbackFrom, ref.lookbackTo, calendar));
+                if (ref.hasLookback()) {
+                    plan.put(ref.datasourceName,
+                        RunDateCalculator.lookbackPeriodIds(dsSchedule, config.runScheduleConfig, dates,
+                            ref.lookbackFrom, ref.lookbackTo, calendar),
+                        List.of(dates.periodId));
+                } else {
+                    List<Integer> within = RunDateCalculator.sourcePeriodIdsWithin(
+                        dsSchedule, config.runScheduleConfig, dates, calendar);
+                    plan.put(ref.datasourceName, within, within);
+                }
             } catch (Exception e) {
-                throw new ReportProcessingException(ReportProcessingException.Reason.DATASOURCE_UNAVAILABLE,
-                    config.reportName, config.reportSubprocess, dates.periodId,
-                    "Cannot resolve lookback periods for data source '" + ref.datasourceName
-                    + "': " + e.getMessage(), e);
+                throw planFailure(config, dates, ref, e);
             }
         }
         return plan;
+    }
+
+    private static ReportProcessingException planFailure(ReportConfig config, RunDates dates,
+                                                          ReportDatasourceRef ref, Exception cause) {
+        return new ReportProcessingException(ReportProcessingException.Reason.DATASOURCE_UNAVAILABLE,
+            config.reportName, config.reportSubprocess, dates.periodId,
+            "Cannot work out the periods needed from data source '" + ref.datasourceName + "': "
+            + cause.getMessage(), cause);
     }
 
     /**
@@ -260,11 +294,11 @@ public final class ReportPipelineFactory {
      * {@link #execute(FrameworkOptions)} directly on a worker would cause, and guaranteeing the
      * report uses the dates decided at submission time rather than whenever the worker runs.
      *
-     * @param lookbackPeriods from {@link #resolveLookbackPeriods} (driver JVM): every period id
-     *                        listed per data source must be COMPLETED before the report proceeds
+     * @param plan from {@link #resolveDataPlan} (driver JVM): the data source periods that must be
+     *             COMPLETED before the report proceeds, and the ones whose rows it reads
      */
     public void execute(FrameworkOptions options, ReportConfig config, RunDates dates,
-                        Map<String, List<Integer>> lookbackPeriods) {
+                        ReportDataPlan plan) {
         String reportName       = config.reportName;
         String reportSubprocess = config.reportSubprocess;
         int    periodId         = dates.periodId;
@@ -286,11 +320,11 @@ public final class ReportPipelineFactory {
 
             // ── 4. Datasource availability check ──────────────────────────────
             currentReason = ReportProcessingException.Reason.DATASOURCE_UNAVAILABLE;
-            checkDatasourceAvailability(config, periodId, dsAdapter, lookbackPeriods);
+            checkDatasourceAvailability(config, periodId, dsAdapter, plan);
 
             // ── 5. Build alias registry (stage DaRec rows into RptStageDa) ───
             currentReason = ReportProcessingException.Reason.STAGING_FAILURE;
-            Map<String, String> aliasRegistry = buildAliasRegistry(config, periodId, rptId, dsAdapter, reportAdapter);
+            Map<String, String> aliasRegistry = buildAliasRegistry(config, periodId, rptId, dsAdapter, reportAdapter, plan);
 
             // ── 6. Transformation chain ───────────────────────────────────────
             currentReason = ReportProcessingException.Reason.TRANSFORM_FAILURE;
@@ -375,32 +409,29 @@ public final class ReportPipelineFactory {
 
     private void checkDatasourceAvailability(ReportConfig config, int periodId,
                                               DataSourceCheckpointAdapter dsAdapter,
-                                              Map<String, List<Integer>> lookbackPeriods) {
+                                              ReportDataPlan plan) {
         LOG.info("Checking availability of {} datasource(s)", config.datasources.size());
         List<String> missing = new ArrayList<>();
         for (ReportDatasourceRef ref : config.datasources) {
-            // Lookback is an explicit validation: every period in the configured range must be
-            // loaded, whether or not the data source is is_required. Offset 0 is included.
-            List<Integer> lookback = lookbackPeriods.get(ref.datasourceName);
-            if (lookback != null) {
-                for (int lookbackPeriod : lookback) {
-                    if (!dsAdapter.isCompleted(ref.datasourceName, lookbackPeriod)) {
-                        missing.add(ref.datasourceName + "/" + ref.datasourceSubprocess
-                                    + " (lookback period=" + lookbackPeriod + " not COMPLETED)");
-                    }
-                }
-                if (lookback.contains(periodId)) continue; // offset 0 already checked above
+            // Required data sources, and any data source with a lookback (an explicit validation),
+            // must be COMPLETED for every period the plan lists: the report's own period; every
+            // data source period inside the report period for a finer data source (D7); or the
+            // whole lookback range.
+            if (!ref.required && !ref.hasLookback()) continue;
+            List<Integer> periods = new ArrayList<>(plan.validatePeriods(ref.datasourceName, periodId));
+            if (ref.required && ref.hasLookback() && !periods.contains(periodId)) {
+                periods.add(periodId);   // a lookback range may not include offset 0
             }
-            if (!ref.required) continue;
-            boolean completed = dsAdapter.isCompleted(ref.datasourceName, periodId);
-            if (!completed) {
-                missing.add(ref.datasourceName + "/" + ref.datasourceSubprocess
-                            + " (not COMPLETED for period=" + periodId + ")");
+            for (int period : periods) {
+                if (!dsAdapter.isCompleted(ref.datasourceName, period)) {
+                    missing.add(ref.datasourceName + "/" + ref.datasourceSubprocess
+                                + " (period=" + period + " not COMPLETED)");
+                }
             }
         }
         if (!missing.isEmpty()) {
             throw new IllegalStateException(
-                "Required datasource(s) not yet COMPLETED for period="
+                "Datasource period(s) not yet COMPLETED for report period="
                 + periodId + ": " + missing);
         }
         LOG.info("All required datasources are available");
@@ -415,29 +446,39 @@ public final class ReportPipelineFactory {
      */
     private Map<String, String> buildAliasRegistry(ReportConfig config, int periodId, long rptId,
                                                     DataSourceCheckpointAdapter dsAdapter,
-                                                    ReportCheckpointAdapter reportAdapter) {
+                                                    ReportCheckpointAdapter reportAdapter,
+                                                    ReportDataPlan plan) {
         Map<String, String> registry = new LinkedHashMap<>();
 
         for (ReportDatasourceRef ref : config.datasources) {
-            long daId;
-            try {
-                daId = dsAdapter.fetchLatestCompletedDaId(ref.datasourceName, periodId);
-            } catch (IllegalArgumentException e) {
-                if (ref.required) {
-                    throw e;  // required datasource must be present
+            // One staged run per data source period the report reads: just the report's own period
+            // normally; every data source period inside the report period for a finer data source.
+            List<Long> mapIds = new ArrayList<>();
+            for (int period : plan.stagePeriods(ref.datasourceName, periodId)) {
+                long daId;
+                try {
+                    daId = dsAdapter.fetchLatestCompletedDaId(ref.datasourceName, period);
+                } catch (IllegalArgumentException e) {
+                    if (ref.required) {
+                        throw e;  // required datasource must be present for every period
+                    }
+                    LOG.warn("Optional datasource '{}' has no COMPLETED DaRefer row for period={} "
+                             + "— that period is left out of alias '{}'",
+                             ref.datasourceName, period, ref.transformAlias);
+                    continue;
                 }
-                LOG.warn("Optional datasource '{}' has no COMPLETED DaRefer row for period={} "
-                         + "— alias '{}' will not be registered",
-                         ref.datasourceName, periodId, ref.transformAlias);
-                continue;
+                long mapId = reportAdapter.addDaMapping(rptId, daId);
+                reportAdapter.stageFromDaRec(mapId, daId);
+                mapIds.add(mapId);
+                LOG.info("Datasource '{}' period {} staged (da_id={} map_id={})",
+                         ref.datasourceName, period, daId, mapId);
             }
-
-            long mapId = reportAdapter.addDaMapping(rptId, daId);
-            reportAdapter.stageFromDaRec(mapId, daId);
-            String subquery = reportAdapter.stagedDataSubquery(mapId);
-            registry.put(ref.transformAlias, subquery);
-            LOG.info("Alias '{}' → RptStageDa subquery (da_id={} map_id={})",
-                     ref.transformAlias, daId, mapId);
+            if (mapIds.isEmpty()) {
+                continue;   // optional datasource with nothing available: alias not registered
+            }
+            registry.put(ref.transformAlias, reportAdapter.stagedDataSubquery(mapIds));
+            LOG.info("Alias '{}' → RptStageDa subquery over {} staged run(s)",
+                     ref.transformAlias, mapIds.size());
         }
         return registry;
     }
