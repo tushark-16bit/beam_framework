@@ -24,6 +24,7 @@ import com.yourco.beam.io.config.BigQuerySourceConfigRepository;
 import com.yourco.beam.utils.BusinessCalendar;
 import com.yourco.beam.utils.BigQueryBusinessCalendarProvider;
 import com.yourco.beam.utils.BusinessCalendarProvider;
+import com.yourco.beam.utils.JsonRowFlattener;
 import com.yourco.beam.utils.QueryParameterResolver;
 import com.yourco.beam.utils.RunDateCalculator;
 import org.slf4j.Logger;
@@ -476,7 +477,7 @@ public final class ReportPipelineFactory {
                 String tempTable = options.getProject() + "."
                     + options.getCheckpointBqDataset()
                     + ".tmp_" + config.reportName + "_" + output.inputAlias;
-                bqJobService.runQueryToTable("SELECT * FROM " + sourceTable, tempTable);
+                bqJobService.runQueryToTable(flattenStaged(sourceTable), tempTable);
                 sourceTable = tempTable;
             }
 
@@ -490,6 +491,23 @@ public final class ReportPipelineFactory {
             LOG.info("Output {} done → {}", output.outputOrder, outputResult.destination());
         }
         return result;
+    }
+
+    /**
+     * SQL that reads a staged data source alias as an ordinary table: one column per top-level
+     * JSON key (the CSV header), the key's value in each row — instead of the single
+     * {@code stage_ds_json_tx} column holding each record's JSON. See {@link JsonRowFlattener}.
+     * An empty source (no rows, so no keys) keeps the plain {@code SELECT *}, which is empty too.
+     */
+    private String flattenStaged(String stagedSubquery) {
+        List<String> keys = bqJobService.queryStrings(JsonRowFlattener.keysQuery(stagedSubquery))
+            .stream().filter(k -> k != null && !k.isEmpty()).toList();
+        if (keys.isEmpty()) {
+            LOG.warn("Staged data has no JSON keys (empty source?) — exporting it unchanged");
+            return "SELECT * FROM " + stagedSubquery;
+        }
+        LOG.info("Flattening staged data into {} column(s): {}", keys.size(), keys);
+        return JsonRowFlattener.selectSql(stagedSubquery, keys);
     }
 
     /**
@@ -523,8 +541,9 @@ public final class ReportPipelineFactory {
                 "output_bq_input_alias '" + sourceAlias + "' not found in alias registry. "
                 + "Available: " + aliasRegistry.keySet());
         }
-        String fromClause = sourceRef.startsWith("(") ? sourceRef : "`" + sourceRef + "`";
-        String sql = "SELECT * FROM " + fromClause;
+        String sql = sourceRef.startsWith("(")
+            ? flattenStaged(sourceRef)
+            : "SELECT * FROM `" + sourceRef + "`";
         LOG.info("Writing final report: alias='{}' → {}", sourceAlias, config.outputBqTable);
         bqJobService.runQueryToTable(sql, config.outputBqTable);
         LOG.info("Final report written to {}", config.outputBqTable);

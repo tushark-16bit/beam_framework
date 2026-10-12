@@ -414,6 +414,21 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 13a | Success → `updateStatus(rpt_id, COMPLETED)` | → **COMPLETED** |
 | 13b | Any failure → `updateStatus(rpt_id, FAILED)` | → **FAILED** |
 
+### Outputs that read a data source alias directly
+
+If an output's `input_alias` is a **data source alias** (e.g. `raw_trades`) rather than a transform step's
+result, the staged rows are JSON objects. The framework flattens them before export: each top-level key
+becomes a column (the CSV header) and its value goes in that column, so `{"trade_id":"T001","currency":"USD"}`
+exports as
+
+```
+trade_id,currency,amount,trade_dt,desk
+T001,USD,150000.0,2024-01-05,FX
+```
+
+Keys are the union across all rows, in first-seen order (a row missing a key gets an empty cell); nested
+values are written as JSON text. `output_bq_table` reading a data source alias is flattened the same way.
+
 ### Output routing (step 7 detail)
 
 | `sink_type` | What happens | Email attachment? |

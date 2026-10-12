@@ -12,6 +12,9 @@ import com.google.cloud.bigquery.TableId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Service for running BigQuery jobs synchronously.
  *
@@ -113,6 +116,29 @@ public final class BigQueryJobService {
             throw new RuntimeException("BQ row count query interrupted for " + tableRef, e);
         }
         return 0L;
+    }
+
+    /**
+     * Runs {@code sql} and returns the first column of every row as text, in result order
+     * (SQL NULL becomes {@code null}). For small result sets such as a list of column names —
+     * not for reading data.
+     *
+     * @throws RuntimeException if the query fails or is interrupted
+     */
+    public List<String> queryStrings(String sql) {
+        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setUseLegacySql(false)
+            .build();
+        List<String> values = new ArrayList<>();
+        try {
+            for (FieldValueList row : bigquery.query(config).iterateAll()) {
+                values.add(row.get(0).isNull() ? null : row.get(0).getStringValue());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("BQ query interrupted", e);
+        }
+        return values;
     }
 
     /**

@@ -165,7 +165,7 @@ io/email/
                                 model/ package, not here.
 
 io/report/
-    BigQueryJobService        — BQ jobs: query→table, table→GCS export (CSV/JSON), countRows(tableRef)
+    BigQueryJobService        — BQ jobs: query→table, table→GCS export (CSV/JSON), countRows(tableRef), queryStrings(sql) (first column of a small result as text — used to list the JSON keys of staged data)
                                 (exact live SELECT COUNT(*), not table-metadata based), dropTableIfExists()
                                 (best-effort cleanup). No-arg constructor holds only a plain BigQuery client
                                 (no FrameworkOptions), so it's also safe to use inside a Beam worker DoFn —

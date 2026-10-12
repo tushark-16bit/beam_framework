@@ -301,7 +301,7 @@ email/EmailSendUtility.java           Interface: SetEmailParams(fromAddress, sub
                                        constructed (or accepted via ReportPipelineFactory's constructor); if none
                                        is available, report-completion email is skipped with a warning, not a failure.
 
-report/BigQueryJobService.java        BQ jobs: runQueryToTable(), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
+report/BigQueryJobService.java        BQ jobs: runQueryToTable(), queryStrings() (first column of a small result as text — used to list the JSON keys of staged data), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
 
 params/BigQueryParameterAdapter.java     Interface: fetchRequiredKeys(), fetchParameters(), fetchRequiredParameters().
 params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@key). Reads --paramBqProject/Dataset/StoreTable/RequiredTable.
@@ -372,6 +372,7 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                              RunDateCalculatorTest (65 tests) exercises. All call sites run in the driver JVM:
                              DataSourcePipelineFactory (per source), ReportPipelineFactory.execute(options),
                              PipelineSequenceFactory (report half, carried to the worker).
+JsonRowFlattener.java       Pure SQL builder that turns a report's staged data (one JSON object per row in stage_ds_json_tx) into an ordinary table: keysQuery() lists the distinct top-level keys (first-seen order, JSON_KEYS depth 1), selectSql() makes one STRING column per key (JSON_VALUE, nested values as JSON text via JSON_QUERY, JSON null → NULL). Column names sanitised to [A-Za-z0-9_] and made unique case-insensitively. Used by ReportPipelineFactory.flattenStaged() so a CSV/JSON output (or output_bq_table) that reads a data source alias directly has the keys as header and the values in the columns. FILE sources are keyed A, B, … so their header is the letter.
 BusinessCalendar.java       @FunctionalInterface isBusinessDay(LocalDate) — one calendar (weekends + holidays). All WD
                              arithmetic is built on this single answer, in RunDateCalculator.
 BusinessCalendarProvider.java forKey(calendarKey) → BusinessCalendar. Callers construct BigQueryBusinessCalendarProvider(options)
@@ -826,7 +827,8 @@ Main.runReportProcessing(options)
     │   ├─ Resolve source alias: output_bq_input_alias → last transform outputAlias → first datasource alias
     │   └─ BigQueryJobService.runQueryToTable("SELECT * FROM <alias>", config.outputBqTable)
     │
-    ├─ Phase 5: File export
+    ├─ Phase 5: File export   (an output whose input_alias is a data source alias — staged JSON — is first flattened by
+    │   ReportPipelineFactory.flattenStaged()/JsonRowFlattener: keys → columns/header, values → cells; same for output_bq_table)
     │   └─ for each ReportOutputConfig:
     │       ├─ BigQueryJobService.exportToCsv() or exportToJson()
     │       └─ record ExportedFile(gcsUri, fileName, contentType)
