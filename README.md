@@ -578,9 +578,9 @@ reads it — e.g. daily data sources for a monthly report. The report then needs
 period inside its own `periodStart`…`periodEnd`** to be `COMPLETED` (for a DAILY source: each day a run
 could have produced — business days of the source's calendar, or for `dayLag` `CAL-n` the days whose
 run day `d+n` is a business day) and reads the rows of **all** of them. A data source *coarser* than its
-report fails the report; a lookback still needs equal frequencies. See `DATE_SCHEDULING_RULES.md` D7.
+report fails the report. A lookback needs no equal frequency: it steps in the data source's own frequency, offset 0 being the report's period (same frequency) or the *last* data source period inside the report period (finer source). See `DATE_SCHEDULING_RULES.md` D7, Part 3 #11.
 
-`lookback_from`/`lookback_to` (optional, both or neither; 0 or negative) make the report fail unless the data source is `COMPLETED` for every period from the report's own (0) back to `lookback_to`, stepping in the data source's own frequency (`0`/`-11` monthly = 12 months). The data source and report must share a frequency.
+`lookback_from`/`lookback_to` (optional, both or neither; 0 or negative) make the report fail unless the data source is `COMPLETED` for every period from the report's own (0) back to `lookback_to`, stepping in the data source's own frequency (`0`/`-11` monthly = 12 months). The frequencies need not match: for a *finer* data source offset 0 is its last period inside the report period (see above).
 
 ### Configured date parameters (`date_params`)
 

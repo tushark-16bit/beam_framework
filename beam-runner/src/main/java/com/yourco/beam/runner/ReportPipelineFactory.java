@@ -180,8 +180,10 @@ public final class ReportPipelineFactory {
      * (CLAUDE.md §12).
      * <ul>
      *   <li>Data source with a lookback ({@code lookback_from}/{@code lookback_to}): validate the
-     *       whole lookback range ({@link RunDateCalculator#lookbackPeriodIds}), read only the
-     *       report's own period; the frequencies must be equal.</li>
+     *       whole lookback range ({@link RunDateCalculator#lookbackPeriodIds}). Same frequency as
+     *       the report: read only the report's own period. <b>Finer</b> data source (D7): the range
+     *       is stepped in the data source's own frequency from the last period inside the report
+     *       period, and every period inside the report period is validated and read too.</li>
      *   <li>Otherwise, from the data source's own frequency
      *       ({@link RunDateCalculator#sourcePeriodIdsWithin}, owner decision D7): equal to the
      *       report's → just the report's period; <b>finer</b> (daily sources, monthly report) →
@@ -192,7 +194,7 @@ public final class ReportPipelineFactory {
      * </ul>
      *
      * @throws ReportProcessingException ({@code DATASOURCE_UNAVAILABLE}) if a data source is
-     *         coarser than the report, has a lookback it can't support, or its calendar can't be
+     *         coarser than the report, has a lookback but no schedule, or its calendar can't be
      *         loaded — never computed on a guess
      */
     static ReportDataPlan resolveDataPlan(FrameworkOptions options, ReportConfig config, RunDates dates) {
@@ -230,15 +232,30 @@ public final class ReportPipelineFactory {
                 }
                 BusinessCalendar calendar = RunScheduleConfig.DAILY.equals(dsSchedule.frequency)
                     ? calendars.forKey(dsSchedule.calendarKey) : null;
-                if (ref.hasLookback()) {
-                    plan.put(ref.datasourceName,
-                        RunDateCalculator.lookbackPeriodIds(dsSchedule, config.runScheduleConfig, dates,
-                            ref.lookbackFrom, ref.lookbackTo, calendar),
-                        List.of(dates.periodId));
-                } else {
-                    List<Integer> within = RunDateCalculator.sourcePeriodIdsWithin(
-                        dsSchedule, config.runScheduleConfig, dates, calendar);
+                List<Integer> within = RunDateCalculator.sourcePeriodIdsWithin(
+                    dsSchedule, config.runScheduleConfig, dates, calendar);
+                if (!ref.hasLookback()) {
                     plan.put(ref.datasourceName, within, within);
+                } else {
+                    List<Integer> validate = new ArrayList<>(RunDateCalculator.lookbackPeriodIds(
+                        dsSchedule, config.runScheduleConfig, dates,
+                        ref.lookbackFrom, ref.lookbackTo, calendar));
+                    boolean sameFrequency = dsSchedule.frequency.equals(config.runScheduleConfig.frequency);
+                    if (sameFrequency) {
+                        // report period itself is the data source period; a required data source needs
+                        // it even if the lookback range starts below offset 0
+                        if (ref.required && !validate.contains(dates.periodId)) {
+                            validate.add(dates.periodId);
+                        }
+                        plan.put(ref.datasourceName, validate, List.of(dates.periodId));
+                    } else {
+                        // finer data source (D7): every period inside the report period is also required
+                        // and read, on top of the lookback range
+                        for (int period : within) {
+                            if (!validate.contains(period)) validate.add(period);
+                        }
+                        plan.put(ref.datasourceName, validate, within);
+                    }
                 }
             } catch (Exception e) {
                 throw planFailure(config, dates, ref, e);
@@ -418,11 +435,7 @@ public final class ReportPipelineFactory {
             // data source period inside the report period for a finer data source (D7); or the
             // whole lookback range.
             if (!ref.required && !ref.hasLookback()) continue;
-            List<Integer> periods = new ArrayList<>(plan.validatePeriods(ref.datasourceName, periodId));
-            if (ref.required && ref.hasLookback() && !periods.contains(periodId)) {
-                periods.add(periodId);   // a lookback range may not include offset 0
-            }
-            for (int period : periods) {
+            for (int period : plan.validatePeriods(ref.datasourceName, periodId)) {
                 if (!dsAdapter.isCompleted(ref.datasourceName, period)) {
                     missing.add(ref.datasourceName + "/" + ref.datasourceSubprocess
                                 + " (period=" + period + " not COMPLETED)");

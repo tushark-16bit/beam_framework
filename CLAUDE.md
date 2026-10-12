@@ -369,7 +369,8 @@ RunDateCalculator.java      Finance Automation scheduling rules — CONTRACT: DA
                              day of the previous month; window month = Business Date's month (MONTHLY), first month of
                              its quarter (QUARTERLY, assumption), January (ANNUALLY, assumption).
                              lookbackPeriodIds(dataSource, report, reportDates, from, to, calendar) → the period ids a report's lookback must
-                             find COMPLETED (contract Part 3 #9; same frequency required).
+                             find COMPLETED (contract Part 3 #9, #11): stepped in the data source's own frequency; offset 0 = the report's period (same
+                             frequency) or the LAST data source period inside the report period (finer source, D7).
                              sourcePeriodIdsWithin(dataSource, report, reportDates, calendar) → the data source periods a report needs (owner
                              decision D7): same frequency → the report's own period; FINER data source (daily source, monthly report) →
                              every data source period inside the report period (DAILY: business days, per contract Part 3 #10); COARSER →

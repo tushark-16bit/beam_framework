@@ -1042,6 +1042,41 @@ class RunDateCalculatorTest {
             schedule("DAILY", null, null, "WD-1", null), MONTHLY_REPORT, dates, closed));
     }
 
+    // ── lookback with a data source finer than the report (owner: lookback needs no same frequency) ──
+
+    private static List<Integer> lookbackFiner(RunScheduleConfig dataSource, RunScheduleConfig report,
+                                                LocalDate businessDate, int from, int to) {
+        RunDates dates = RunDateCalculator.calculateLastPeriod(report, businessDate, CALENDAR);
+        return RunDateCalculator.lookbackPeriodIds(dataSource, report, dates, from, to, CALENDAR);
+    }
+
+    @Test
+    void lookbackOffsetZeroForADailySourceIsTheLastBusinessDayInsideTheReportPeriod() {
+        // September 2026 report; last business day 09-30
+        assertEquals(List.of(20260930, 20260929, 20260928),
+            lookbackFiner(schedule("DAILY", null, null, "WD-1", null), MONTHLY_REPORT, d(2026, 10, 8), 0, -2));
+    }
+
+    @Test
+    void lookbackRunsBackPastTheStartOfTheReportPeriodInTheSourcesOwnSteps() {
+        // 21 business days in September: offset -20 is 09-01, -21 is Mon 08-31, -22 is Fri 08-28
+        List<Integer> ids = lookbackFiner(schedule("DAILY", null, null, "WD-1", null), MONTHLY_REPORT,
+            d(2026, 10, 8), -20, -22);
+        assertEquals(List.of(20260901, 20260831, 20260828), ids);
+    }
+
+    @Test
+    void lookbackForAMonthlySourceAndAQuarterlyReportStartsAtTheLastMonthOfTheQuarter() {
+        assertEquals(List.of(202609, 202608, 202607, 202606),
+            lookbackFiner(schedule("MONTHLY", "WD+3", "WD+5", "", null), QUARTERLY_REPORT, d(2026, 10, 8), 0, -3));
+    }
+
+    @Test
+    void lookbackStillRefusesACoarserSource() {
+        assertThrows(IllegalArgumentException.class, () -> lookbackFiner(
+            schedule("QUARTERLY", "WD+3", "WD+5", "", null), MONTHLY_REPORT, d(2026, 10, 8), 0, -2));
+    }
+
     private static void assertNotEquals(Object unexpected, Object actual, String message) {
         assertFalse(unexpected.equals(actual), message);
     }

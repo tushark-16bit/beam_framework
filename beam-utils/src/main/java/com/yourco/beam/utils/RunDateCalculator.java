@@ -574,21 +574,49 @@ public final class RunDateCalculator {
      */
     public static List<Integer> sourcePeriodIdsWithin(RunScheduleConfig dataSource, RunScheduleConfig report,
                                                       RunDates reportDates, BusinessCalendar calendar) {
+        List<LocalDate> starts = sourcePeriodStartsWithin(dataSource, report, reportDates, calendar);
+        List<Integer> ids = new ArrayList<>();
+        for (LocalDate start : starts) {
+            ids.add(periodIdOf(dataSource.frequency, start));
+        }
+        return ids;
+    }
+
+    /** The id of the data source period that starts on {@code periodStart}. */
+    private static int periodIdOf(String frequency, LocalDate periodStart) {
+        return switch (frequency) {
+            case RunScheduleConfig.DAILY ->
+                periodStart.getYear() * 10000 + periodStart.getMonthValue() * 100 + periodStart.getDayOfMonth();
+            case RunScheduleConfig.MONTHLY -> periodStart.getYear() * 100 + periodStart.getMonthValue();
+            case RunScheduleConfig.QUARTERLY ->
+                quarterPeriodId(periodStart, (periodStart.getMonthValue() - 1) / 3 + 1);
+            case RunScheduleConfig.ANNUALLY -> periodStart.getYear();
+            default -> throw new IllegalArgumentException("unsupported frequency " + frequency);
+        };
+    }
+
+    /**
+     * The start date of every data source period inside the report period, ascending — the shared
+     * core of {@link #sourcePeriodIdsWithin} and the finer-than-report case of
+     * {@link #lookbackPeriodIds}. Same frequency → the report's own period start.
+     */
+    private static List<LocalDate> sourcePeriodStartsWithin(RunScheduleConfig dataSource, RunScheduleConfig report,
+                                                            RunDates reportDates, BusinessCalendar calendar) {
         int sourceRank = frequencyRank(dataSource.frequency);
         int reportRank = frequencyRank(report.frequency);
         if (sourceRank > reportRank) {
             throw new IllegalArgumentException("data source frequency " + dataSource.frequency
                 + " is coarser than the report's " + report.frequency + " — not supported");
         }
-        if (sourceRank == reportRank) {
-            return List.of(reportDates.periodId);
-        }
         LocalDate start = reportDates.periodStart;
         LocalDate end   = reportDates.periodEnd;
+        if (sourceRank == reportRank) {
+            return List.of(start);
+        }
         if (start == null || end == null) {
             throw new IllegalArgumentException("the report period has no start/end dates");
         }
-        List<Integer> ids = new ArrayList<>();
+        List<LocalDate> starts = new ArrayList<>();
         switch (dataSource.frequency) {
             case RunScheduleConfig.DAILY -> {
                 int lagDays = 0;
@@ -608,14 +636,14 @@ public final class RunDateCalculator {
                 for (LocalDate d = start; !d.isAfter(end); d = d.plusDays(1)) {
                     LocalDate runDay = calendarLag ? d.plusDays(lagDays) : d;
                     if (calendar.isBusinessDay(runDay)) {
-                        ids.add(d.getYear() * 10000 + d.getMonthValue() * 100 + d.getDayOfMonth());
+                        starts.add(d);
                     }
                 }
             }
             case RunScheduleConfig.MONTHLY -> {
                 for (YearMonth m = YearMonth.from(start); !m.isAfter(YearMonth.from(end)); m = m.plusMonths(1)) {
                     if (!m.atDay(1).isBefore(start) && !m.atEndOfMonth().isAfter(end)) {
-                        ids.add(m.getYear() * 100 + m.getMonthValue());
+                        starts.add(m.atDay(1));
                     }
                 }
             }
@@ -624,7 +652,7 @@ public final class RunDateCalculator {
                 for (; !q.isAfter(end); q = q.plusMonths(3)) {
                     LocalDate qEnd = YearMonth.from(q.plusMonths(2)).atEndOfMonth();
                     if (!q.isBefore(start) && !qEnd.isAfter(end)) {
-                        ids.add(quarterPeriodId(q, (q.getMonthValue() - 1) / 3 + 1));
+                        starts.add(q);
                     }
                 }
             }
@@ -632,19 +660,19 @@ public final class RunDateCalculator {
                 throw new IllegalArgumentException("unsupported frequency " + dataSource.frequency);
             }
         }
-        if (ids.isEmpty()) {
+        if (starts.isEmpty()) {
             throw new IllegalArgumentException("no " + dataSource.frequency + " data source period falls "
                 + "inside the report period " + start + " … " + end);
         }
-        return ids;
+        return starts;
     }
 
     // ── Report lookback: period ids of earlier periods of a data source ───────
 
     /**
-     * Period ids a report must find COMPLETED for one of its data sources — the report's own
-     * period (offset 0) back through {@code lookbackTo}. Offset {@code k <= 0} is {@code -k}
-     * periods before the report's period, stepping in the <b>data source's own frequency</b>:
+     * Period ids a report must find COMPLETED for one of its data sources through a lookback: the
+     * range {@code lookbackFrom} … {@code lookbackTo} (0 or negative), stepping in the <b>data
+     * source's own frequency</b>:
      * <ul>
      *   <li>MONTHLY — one calendar month per step ({@code yyyyMM}); 0..-11 = 12 months.</li>
      *   <li>QUARTERLY — one calendar quarter per step ({@code yyyyMMddqq}, D3).</li>
@@ -653,27 +681,31 @@ public final class RunDateCalculator {
      *       {@code dayLag}, one calendar day for {@code CAL-n}. OPEN QUESTION (contract Part 3
      *       #9): the business-day step for a blank lag is an assumption.</li>
      * </ul>
-     * Offset 0 is always {@code reportDates.periodId} itself. The data source must have the same
-     * frequency as the report (contract Part 3 #7: no mapping between differing frequencies), else
-     * {@link IllegalArgumentException} — a lookback is never computed on a guess.
+     * <b>Offset 0</b> is the data source's own period for the report: with the same frequency, the
+     * report's period; with a <b>finer</b> data source (owner decision D7 — daily data sources for a
+     * monthly report) the <b>last</b> data source period inside the report period, so {@code -1}
+     * is the one before it, and so on back past the start of the report period. (Contract Part 3
+     * #11: the meaning of offset 0 for a finer data source is an assumption.) A data source
+     * coarser than the report is not supported — {@link IllegalArgumentException}.
      *
      * @param dataSource the data source's run schedule (its frequency/dayLag steps the periods)
-     * @param report     the report's schedule (only its frequency is compared)
+     * @param report     the report's schedule
      * @param calendar   the data source's calendar — used only for DAILY business-day steps
      * @return period ids ordered from {@code lookbackFrom} down to {@code lookbackTo}
      */
     public static List<Integer> lookbackPeriodIds(RunScheduleConfig dataSource, RunScheduleConfig report,
                                                   RunDates reportDates, int lookbackFrom, int lookbackTo,
                                                   BusinessCalendar calendar) {
-        if (dataSource.frequency == null || !dataSource.frequency.equals(report.frequency)) {
-            throw new IllegalArgumentException("lookback needs the data source and the report to have "
-                + "the same frequency (data source " + dataSource.frequency + ", report "
-                + report.frequency + ")");
-        }
+        boolean sameFrequency = dataSource.frequency != null && dataSource.frequency.equals(report.frequency);
+        List<LocalDate> within = sourcePeriodStartsWithin(dataSource, report, reportDates, calendar);
+        LocalDate anchor = within.get(within.size() - 1);   // the report's own / the last period inside it
         List<Integer> ids = new ArrayList<>();
         for (int offset = lookbackFrom; offset >= lookbackTo; offset--) {
-            ids.add(offset == 0 ? reportDates.periodId
-                                : periodIdBack(dataSource, reportDates.periodStart, -offset, calendar));
+            if (offset == 0) {
+                ids.add(sameFrequency ? reportDates.periodId : periodIdOf(dataSource.frequency, anchor));
+            } else {
+                ids.add(periodIdBack(dataSource, anchor, -offset, calendar));
+            }
         }
         return ids;
     }
