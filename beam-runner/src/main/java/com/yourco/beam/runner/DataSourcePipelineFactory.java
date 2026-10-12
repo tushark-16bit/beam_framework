@@ -298,6 +298,9 @@ public final class DataSourcePipelineFactory {
         BqFetchConfig bq = config.bqFetchConfig;
         String resolvedQuery = QueryParameterResolver.resolve(
             bq.query, bq.queryParams, options, dates, config.dateParams, DateParamConfig.SOURCE_QUERY);
+        // Driver JVM, so this reaches the launcher log (worker logs are not visible to operators).
+        LOG.info("Resolved BQ query for source '{}' (period={}):\n{}",
+            config.datasourceName, dates.periodId, resolvedQuery);
         BqFetchConfig resolvedBq = new BqFetchConfig(
             bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema);
         // toBuilder() copies every existing field first, so swapping in the token-resolved

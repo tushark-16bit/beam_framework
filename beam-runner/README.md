@@ -71,7 +71,7 @@ DataSourcePipelineFactory.assemble(options)
     │       Always a fresh INSERT — DaRefer only ever gains new rows, never overwritten
     │
     └─ 4. For each SourceConfig independently (no merge!):
-            a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query
+            a. resolveQueryTokens()                   inject {periodStart}/{periodEnd} into BQ query; logs the resolved query (INFO, driver JVM)
             b. fetchBqSchema()                        1. BqFetchConfig.schema (operator-declared bq_schema_json)
                                                           via BigQuerySchemaUtils.toBeamSchema() — no BQ call
                                                        2. else BigQuerySchemaUtils.fetchBeamSchema() (table metadata)
