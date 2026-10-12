@@ -164,4 +164,13 @@ class QueryParameterResolverTest {
         assertThrows(IllegalArgumentException.class, () -> param("{a}", "TODAY", null));
         assertThrows(IllegalArgumentException.class, () -> param("{a}", "PERIOD_END", "MMM-yy-bb"));
     }
+
+    @Test
+    void unresolvedPlaceholdersAreListedOnceEach() {
+        assertEquals(java.util.List.of("{periodLabel}", "{other}"),
+            QueryParameterResolver.unresolvedPlaceholders(
+                "WHERE a = {periodLabel} AND b = {periodLabel} AND c = '{other}' AND d = 202401"));
+        assertEquals(java.util.List.of(),
+            QueryParameterResolver.unresolvedPlaceholders("WHERE a = 'Jan-24' AND j = JSON '{\"k\": 1}'"));
+    }
 }

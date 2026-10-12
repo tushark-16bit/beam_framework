@@ -1062,7 +1062,9 @@ Layer 3 — Custom tokens (both process types, from query_params_json column,
     or a non-object root throws immediately rather than silently resolving to
     nothing.
 
-Any number of custom tokens are supported. Unknown tokens are left unchanged.
+Any number of custom tokens are supported. Unknown tokens are left unchanged — and a WARN in the driver log lists any
+`{name}` placeholder still in a resolved query (QueryParameterResolver.unresolvedPlaceholders). Resolved values are
+inserted as plain text: a string value such as a `MMM-yy` label must be quoted in the SQL (`'{periodLabel}'`).
 ```
 
 ---

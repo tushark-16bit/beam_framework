@@ -6,12 +6,17 @@ import com.yourco.beam.model.DateParamConfig;
 import com.yourco.beam.model.RunDates;
 import com.yourco.beam.options.FrameworkOptions;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Resolves placeholder tokens in query templates to their runtime values.
@@ -68,7 +73,9 @@ import java.util.Map;
  */
 public final class QueryParameterResolver {
 
+    private static final Logger LOG = LoggerFactory.getLogger(QueryParameterResolver.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\{[A-Za-z_][A-Za-z0-9_]*\\}");
 
     private QueryParameterResolver() {}
 
@@ -130,7 +137,32 @@ public final class QueryParameterResolver {
             result = result.replace("{" + entry.getKey() + "}", value);
         }
 
+        warnOnUnresolved(result, scope);
         return result;
+    }
+
+    /**
+     * {@code {name}}-style placeholders still in a fully resolved query — usually a token that has
+     * no matching {@code date_params} / {@code query_params_json} entry, a misspelt or
+     * differently-braced token, or an {@code apply_to} that excludes this query. Unknown tokens are
+     * left as written (by design), so BigQuery would otherwise be the first to complain.
+     */
+    static List<String> unresolvedPlaceholders(String resolved) {
+        List<String> found = new java.util.ArrayList<>();
+        Matcher m = PLACEHOLDER.matcher(resolved);
+        while (m.find()) {
+            if (!found.contains(m.group())) found.add(m.group());
+        }
+        return found;
+    }
+
+    private static void warnOnUnresolved(String resolved, String scope) {
+        List<String> left = unresolvedPlaceholders(resolved);
+        if (!left.isEmpty()) {
+            LOG.warn("Query{} still contains unresolved placeholder(s) {} — check the date_params / "
+                     + "query_params_json token text (braces included), apply_to, and that string "
+                     + "values are quoted in the SQL", scope != null ? " '" + scope + "'" : "", left);
+        }
     }
 
     /** Overload for templates with no custom param mappings. */

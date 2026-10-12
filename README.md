@@ -598,7 +598,7 @@ query placeholders for the run's dates and period:
 `token` is the text as it appears in the query; `source` is `PERIOD_ID`, `PERIOD_START`, `PERIOD_END` or
 `RUN_DATE`; `format` is a Java date pattern (case-sensitive: `MM` month, `mm` minutes; English month
 names) — without one a date is `yyyy-MM-dd` and `PERIOD_ID` is the integer (with one, `PERIOD_ID` is its
-start date in that format); `apply_to` limits it to named queries (a report step's `step_name`, or
+start date in that format); Values are inserted as plain text, so quote a string value in the SQL (`WHERE label = '{periodLabel}'`); a placeholder that is still left in a query after resolution is logged as a WARN in the driver log. `apply_to` limits it to named queries (a report step's `step_name`, or
 `bq_query` for a source's input query) — absent means every query. Resolved after the standard
 `{periodStart}`-style tokens; a bad entry fails the config load.
 
