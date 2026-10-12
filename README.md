@@ -575,6 +575,26 @@ and whether each one is mandatory, in its own `datasources[]`:
 
 `lookback_from`/`lookback_to` (optional, both or neither; 0 or negative) make the report fail unless the data source is `COMPLETED` for every period from the report's own (0) back to `lookback_to`, stepping in the data source's own frequency (`0`/`-11` monthly = 12 months). The data source and report must share a frequency.
 
+### Configured date parameters (`date_params`)
+
+A data source's or report's `parameters_val_json` may carry a `date_params` array that defines extra
+query placeholders for the run's dates and period:
+
+```json
+"date_params": [
+  {"token": "{periodLabel}", "source": "PERIOD_END", "format": "MMM-yy"},
+  {"token": "%PRD%",         "source": "PERIOD_ID"},
+  {"token": "{asAt}",        "source": "RUN_DATE", "format": "dd/MM/yyyy", "apply_to": ["aggregate_by_currency"]}
+]
+```
+
+`token` is the text as it appears in the query; `source` is `PERIOD_ID`, `PERIOD_START`, `PERIOD_END` or
+`RUN_DATE`; `format` is a Java date pattern (case-sensitive: `MM` month, `mm` minutes; English month
+names) — without one a date is `yyyy-MM-dd` and `PERIOD_ID` is the integer (with one, `PERIOD_ID` is its
+start date in that format); `apply_to` limits it to named queries (a report step's `step_name`, or
+`bq_query` for a source's input query) — absent means every query. Resolved after the standard
+`{periodStart}`-style tokens; a bad entry fails the config load.
+
 `PIPELINE` reads that same `datasources[]`, batches whichever aren't already `COMPLETED` for the
 period into **one** Dataflow job (never one job per datasource — sources stay independent
 branches within it, the same "never merged" rule as standalone `DATA_SOURCE_DOWNLOAD`), wires the

@@ -82,6 +82,12 @@ public final class SourceConfig implements Serializable {
      */
     public final RunScheduleConfig runScheduleConfig;
 
+    /**
+     * Operator-configured date/period query parameters ({@code date_params} in
+     * {@code parameters_val_json}); resolved in the source's input query. Never null.
+     */
+    public final List<DateParamConfig> dateParams;
+
     private SourceConfig(Builder b) {
         this.parentId            = b.parentId;
         this.datasourceName      = b.datasourceName;
@@ -99,6 +105,9 @@ public final class SourceConfig implements Serializable {
         this.failureEmailConfig  = b.failureEmailConfig;
         this.dataTransformConfig = b.dataTransformConfig != null ? b.dataTransformConfig : DataTransformConfig.none();
         this.runScheduleConfig   = b.runScheduleConfig != null ? b.runScheduleConfig : RunScheduleConfig.none();
+        this.dateParams          = b.dateParams != null
+                                   ? Collections.unmodifiableList(b.dateParams)
+                                   : Collections.emptyList();
     }
 
     // ── Factory helpers (convenience wrappers around Builder) ─────────────────
@@ -147,7 +156,8 @@ public final class SourceConfig implements Serializable {
             .validationConfig(validationConfig)
             .failureEmailConfig(failureEmailConfig)
             .dataTransformConfig(dataTransformConfig)
-            .runScheduleConfig(runScheduleConfig);
+            .runScheduleConfig(runScheduleConfig)
+            .dateParams(new java.util.ArrayList<>(dateParams));
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────
@@ -165,6 +175,7 @@ public final class SourceConfig implements Serializable {
         private SourceFailureEmailConfig failureEmailConfig;
         private DataTransformConfig dataTransformConfig;
         private RunScheduleConfig runScheduleConfig;
+        private List<DateParamConfig> dateParams;
 
         public Builder parentId(String v)                              { parentId = v;             return this; }
         public Builder datasourceName(String v)                        { datasourceName = v;       return this; }
@@ -180,6 +191,7 @@ public final class SourceConfig implements Serializable {
         public Builder failureEmailConfig(SourceFailureEmailConfig v)  { failureEmailConfig = v;   return this; }
         public Builder dataTransformConfig(DataTransformConfig v)      { dataTransformConfig = v;  return this; }
         public Builder runScheduleConfig(RunScheduleConfig v)          { runScheduleConfig = v;    return this; }
+        public Builder dateParams(List<DateParamConfig> v)             { dateParams = v;           return this; }
 
         public SourceConfig build() { return new SourceConfig(this); }
     }

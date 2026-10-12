@@ -200,6 +200,7 @@ model/RunScheduleConfig.java          Optional Finance Automation run schedule f
                                        Source: run_details_json in parameters_val_json; report: nested "run_details" object.
                                        hasSchedule() = any attribute set (none → the item is NOT processed, owner decision D5).
                                        Interpreted only by beam-utils/RunDateCalculator.java.
+model/DateParamConfig.java            One operator-configured date/period query parameter from the `date_params` array of a source's or report's parameters_val_json: token (the exact placeholder text in the query), source (PERIOD_ID | PERIOD_START | PERIOD_END | RUN_DATE), optional Java date format (e.g. MMM-yy; PERIOD_ID without a format = the integer id, PERIOD_ID with a format = the period's start date in that format), optional apply_to (report step_name(s), or `bq_query` for a source's input query; empty = every query). Validated at construction (blank token / unknown source / bad pattern throws → config load fails). SourceConfig.dateParams / ReportConfig.dateParams.
 model/RunDates.java                   The dates one eligible source/report run operates on: runDate = BAU Business Date
                                        (--runDate or today in --businessTimeZone), periodStart/periodEnd/periodId = BAU
                                        Reporting Period. Produced ONLY by RunDateCalculator.evaluateDataSource()/evaluateReport();
@@ -384,7 +385,7 @@ BigQueryBusinessCalendarProvider.java Default provider. Reads the parameter tabl
                              into a BusinessCalendar (business day = not a weekend day and not a holiday). "weekend" is required
                              (never assumed); a bad date/weekday name fails the whole calendar. One query per calendarKey per run,
                              cached. No row / duplicate rows / bad data → throws → NOT_EVALUABLE. Driver JVM only.
-QueryParameterResolver.java resolve(template, paramMappings, options[, RunDates]). Two-pass: standard then custom tokens.
+QueryParameterResolver.java resolve(template, paramMappings, options[, RunDates[, dateParams, scope]]). Two-pass: standard tokens then the configured date_params (longest token first, only those whose apply_to matches `scope`), then custom tokens.
                              Standard tokens come from the RunDates passed in (the source's/report's own); the 3-arg
                              overload uses RunDateCalculator.fromOptions(options).
                              Custom tokens merge paramMappings (a step's query_params_json) with
@@ -889,6 +890,7 @@ PIPELINE has no config of its own: it reads the same report config as REPORT_PRO
   "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":635000}]",
   "data_transform_query":         "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id, ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2) AS amount_with_tax FROM data",
   "data_transform_min_row_count": "1",
+  "date_params": [{"token": "{periodLabel}", "source": "PERIOD_END", "format": "MMM-yy"}],
   "run_details_json": "{\"frequency\":\"MONTHLY\",\"freqRunDay\":\"WD+3\",\"maxFreqRunDay\":\"WD+5\",\"dayLag\":\"\",\"dateType\":\"lastBusDayMonth\",\"calendarKey\":\"Calendar_EPS\"}"
 }
 ```
@@ -949,6 +951,7 @@ to `BigQuerySourceTransform`'s own name-only preview-query fallback.
                    "from_address": "pipeline-alerts@example.com", "encrypted": false},
   "output_bq_table":       "project.dataset.daily_trades_report",
   "output_bq_input_alias": "summary",
+  "date_params":  [{"token": "{periodLabel}", "source": "PERIOD_END", "format": "MMM-yy", "apply_to": ["aggregate"]}],
   "run_details":  {"frequency": "MONTHLY", "freqDtl": "WD+3", "maxFreqRunDay": "WD+5",
                    "dayLag": "", "calendarKey": "Calendar_EPS"}
 }
@@ -1020,6 +1023,16 @@ Layer 2 — Standard tokens (both process types)
     {name} tokens — for queries where curly braces collide with something else in the SQL
     dialect. Both styles resolve the identical underlying RunDates values; there is
     no query_params_json entry to declare for them, unlike Layer 3 below.
+
+Layer 2b — Configured date parameters (both process types; `date_params` in the source's / report's
+          parameters_val_json), resolved right after the standard tokens from the same RunDates
+    [{"token": "{periodLabel}", "source": "PERIOD_END",  "format": "MMM-yy"},     → "Jan-24"
+     {"token": "%PRD%",         "source": "PERIOD_ID"},                           → 202401
+     {"token": "{asAt}",        "source": "RUN_DATE", "format": "dd/MM/yyyy", "apply_to": ["step_a"]}]
+    `source` = PERIOD_ID | PERIOD_START | PERIOD_END | RUN_DATE; `format` = a Java DateTimeFormatter pattern
+    (case-sensitive: MM month, mm minutes; English names; absent = yyyy-MM-dd; PERIOD_ID with a format
+    renders the period's start date); `apply_to` = report step_name(s), or `bq_query` for a source's input
+    query (absent = every query). Longer tokens are replaced first. A bad entry fails the config load.
 
 Layer 3 — Custom tokens (both process types, from query_params_json column,
           plus --customParamsJson from the CLI on top)

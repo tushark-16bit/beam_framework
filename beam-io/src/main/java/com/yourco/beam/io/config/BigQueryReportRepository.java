@@ -178,7 +178,8 @@ public final class BigQueryReportRepository {
                                     datasources, preprocessing, transforms, outputs, email,
                                     outputBqTable, outputBqInputAlias,
                                     BigQuerySourceConfigRepository.parseRunSchedule(root.path("run_details"),
-                                        BigQuerySourceConfigRepository.REPORT_RUN_DAY_KEY));
+                                        BigQuerySourceConfigRepository.REPORT_RUN_DAY_KEY),
+                                    BigQuerySourceConfigRepository.parseDateParams(root.path("date_params")));
         } catch (IllegalArgumentException | IllegalStateException e) {
             throw e;
         } catch (Exception e) {

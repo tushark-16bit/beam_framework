@@ -355,7 +355,8 @@ public final class ReportPipelineFactory {
             switch (step.stepType) {
                 case ReportPreprocessingStep.BQ_QUERY -> {
                     String sql = QueryParameterResolver.resolve(
-                            step.bqQuery, step.queryParams, options, dates);
+                            step.bqQuery, step.queryParams, options, dates,
+                            config.dateParams, step.stepName);
                     if (step.bqOutputTable != null && !step.bqOutputTable.isBlank()) {
                         bqJobService.runQueryToTable(sql, step.bqOutputTable);
                     } else {
@@ -451,7 +452,8 @@ public final class ReportPipelineFactory {
             // Alias tokens first ({trades} → staged subquery or `project.dataset.table`),
             // then standard + custom params ({periodStart}, {exchange}, etc.)
             String sql = resolveAliasTokens(step.queryTemplate, aliasRegistry);
-            sql = QueryParameterResolver.resolve(sql, step.queryParams, options, dates);
+            sql = QueryParameterResolver.resolve(sql, step.queryParams, options, dates,
+                                                 config.dateParams, step.stepName);
 
             bqJobService.runQueryToTable(sql, step.outputBqTable);
             aliasRegistry.put(step.outputAlias, step.outputBqTable);

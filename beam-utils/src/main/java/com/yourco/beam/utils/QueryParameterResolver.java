@@ -2,10 +2,15 @@ package com.yourco.beam.utils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yourco.beam.model.DateParamConfig;
 import com.yourco.beam.model.RunDates;
 import com.yourco.beam.options.FrameworkOptions;
 
+import java.time.format.DateTimeFormatter;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -28,6 +33,14 @@ import java.util.Map;
  * query. Unlike curly-brace custom params (below), {@code %name%} tokens are a fixed, built-in
  * set — there's no operator-declared mapping for them; the name in {@code %name%} directly names
  * the {@link FrameworkOptions} value to substitute.
+ *
+ * <h2>Configured date parameters</h2>
+ * <p>{@code date_params} from the source's or report's config ({@link DateParamConfig}) are
+ * resolved right after the standard tokens, from the same {@link RunDates}: an operator names the
+ * placeholder as it appears in the query, which value of the run to use ({@code PERIOD_ID},
+ * {@code PERIOD_START}, {@code PERIOD_END}, {@code RUN_DATE}) and a date format such as
+ * {@code MMM-yy}. Each can be limited to named queries ({@code apply_to}). Longer tokens are
+ * replaced first, so a token that is a prefix of another does not clobber it.
  *
  * <h2>Custom params</h2>
  * Additional {@code paramMappings} (a step's own {@code query_params_json} from
@@ -84,10 +97,25 @@ public final class QueryParameterResolver {
      */
     public static String resolve(String template, Map<String, String> paramMappings,
                                  FrameworkOptions options, RunDates dates) {
+        return resolve(template, paramMappings, options, dates, List.of(), null);
+    }
+
+    /**
+     * As {@link #resolve(String, Map, FrameworkOptions, RunDates)}, additionally resolving the
+     * configured {@code dateParams} (those that apply to {@code scope}) after the standard tokens.
+     *
+     * @param dateParams the source's/report's {@code date_params}; may be empty
+     * @param scope      the name of the query being resolved — a report step's {@code step_name},
+     *                   or {@link DateParamConfig#SOURCE_QUERY} for a data source's input query
+     */
+    public static String resolve(String template, Map<String, String> paramMappings,
+                                 FrameworkOptions options, RunDates dates,
+                                 List<DateParamConfig> dateParams, String scope) {
         if (template == null || template.isBlank()) return template;
 
-        // Pass 1: resolve standard tokens
-        String result = resolveStandardTokens(template, dates);
+        // Pass 1: resolve standard tokens, then the configured date parameters
+        String result = resolveDateParams(resolveStandardTokens(template, dates),
+                                          dates, dateParams, scope);
 
         // Pass 2: resolve custom params — step-level query_params_json first, then
         // --customParamsJson on top, so an operator can override any step's configured value
@@ -97,8 +125,8 @@ public final class QueryParameterResolver {
         merged.putAll(parseCustomParamsJson(options.getCustomParamsJson()));
 
         for (Map.Entry<String, String> entry : merged.entrySet()) {
-            String value = resolveStandardTokens(
-                (entry.getValue() != null ? entry.getValue() : ""), dates);
+            String value = resolveDateParams(resolveStandardTokens(
+                (entry.getValue() != null ? entry.getValue() : ""), dates), dates, dateParams, scope);
             result = result.replace("{" + entry.getKey() + "}", value);
         }
 
@@ -111,6 +139,41 @@ public final class QueryParameterResolver {
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
+
+    /** Replaces every configured date parameter (longest token first) that applies to {@code scope}. */
+    static String resolveDateParams(String s, RunDates dates, List<DateParamConfig> dateParams,
+                                    String scope) {
+        if (dateParams == null || dateParams.isEmpty()) return s;
+        String result = s;
+        List<DateParamConfig> ordered = dateParams.stream()
+            .filter(p -> p.appliesTo(scope))
+            .sorted(Comparator.comparingInt((DateParamConfig p) -> p.token.length()).reversed())
+            .toList();
+        for (DateParamConfig param : ordered) {
+            result = result.replace(param.token, render(param, dates));
+        }
+        return result;
+    }
+
+    /** The value of one configured date parameter for this run (see {@link DateParamConfig}). */
+    static String render(DateParamConfig param, RunDates dates) {
+        java.time.LocalDate date = switch (param.source) {
+            case PERIOD_ID    -> param.format == null ? null : dates.periodStart;  // id → its start date
+            case PERIOD_START -> dates.periodStart;
+            case PERIOD_END   -> dates.periodEnd;
+            case RUN_DATE     -> dates.runDate;
+        };
+        if (param.source == DateParamConfig.Source.PERIOD_ID && param.format == null) {
+            return String.valueOf(dates.periodId);
+        }
+        if (date == null) {
+            return "";   // same convention as RunDates.periodStartIso()/periodEndIso() when unset
+        }
+        DateTimeFormatter formatter = param.format == null
+            ? DateTimeFormatter.ISO_LOCAL_DATE
+            : DateTimeFormatter.ofPattern(param.format, Locale.ENGLISH);
+        return date.format(formatter);
+    }
 
     private static String resolveStandardTokens(String s, RunDates dates) {
         String periodStart = dates.periodStartIso();

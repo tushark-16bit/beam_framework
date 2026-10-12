@@ -13,6 +13,7 @@ import com.yourco.beam.model.ApiSourceConfig;
 import com.yourco.beam.model.BncRule;
 import com.yourco.beam.model.BqFetchConfig;
 import com.yourco.beam.model.DataTransformConfig;
+import com.yourco.beam.model.DateParamConfig;
 import com.yourco.beam.model.FileSourceConfig;
 import com.yourco.beam.model.LookupConfig;
 import com.yourco.beam.model.QueryConfig;
@@ -230,7 +231,8 @@ public final class BigQuerySourceConfigRepository {
             .validationConfig(toValidationConfig(params))
             .failureEmailConfig(toFailureEmailConfig(params))
             .dataTransformConfig(toDataTransformConfig(params))
-            .runScheduleConfig(toRunScheduleConfig(params));
+            .runScheduleConfig(toRunScheduleConfig(params))
+            .dateParams(toDateParams(params));
 
         switch (sourceType) {
             case API  -> builder.apiConfig(toApiConfig(params));
@@ -358,6 +360,51 @@ public final class BigQuerySourceConfigRepository {
             throw new IllegalArgumentException("run_details_json must be a JSON object: " + json);
         }
         return parseRunSchedule(node, SOURCE_RUN_DAY_KEY);
+    }
+
+    private List<DateParamConfig> toDateParams(Map<String, String> p) {
+        String json = p.get("date_params");
+        if (json == null || json.isBlank()) return Collections.emptyList();
+        try {
+            return parseDateParams(JSON.readTree(json));
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("date_params is not valid JSON: " + json, e);
+        }
+    }
+
+    /**
+     * Parses a {@code date_params} value — an array of
+     * {@code {"token", "source", "format"?, "apply_to"?}} objects, or a string containing such an
+     * array (the {@code *_json} convention) — into {@link DateParamConfig}s. Shared with
+     * {@link BigQueryReportRepository}. Absent/empty → no parameters; anything malformed (no
+     * token, unknown source, bad format) throws so the config fetch fails loudly.
+     */
+    static List<DateParamConfig> parseDateParams(JsonNode node) throws java.io.IOException {
+        if (node == null || node.isMissingNode() || node.isNull()) return Collections.emptyList();
+        if (node.isTextual()) {
+            return node.asText().isBlank() ? Collections.emptyList() : parseDateParams(JSON.readTree(node.asText()));
+        }
+        if (!node.isArray()) {
+            throw new IllegalArgumentException("date_params must be a JSON array of objects");
+        }
+        List<DateParamConfig> result = new ArrayList<>();
+        for (JsonNode entry : node) {
+            if (!entry.isObject()) {
+                throw new IllegalArgumentException("each date_params entry must be a JSON object");
+            }
+            List<String> applyTo = new ArrayList<>();
+            JsonNode scope = entry.get("apply_to");
+            if (scope != null && scope.isArray()) {
+                scope.forEach(n -> applyTo.add(n.asText()));
+            } else if (scope != null && !scope.isNull() && !scope.asText().isBlank()) {
+                applyTo.add(scope.asText());
+            }
+            result.add(new DateParamConfig(textOrNull(entry, "token"), textOrNull(entry, "source"),
+                                           textOrNull(entry, "format"), applyTo));
+        }
+        return result;
     }
 
     /** Data sources store the run-window start as {@code freqRunDay} (BAU naming). */

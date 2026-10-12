@@ -78,6 +78,13 @@ public final class ReportConfig implements Serializable {
      */
     public final RunScheduleConfig runScheduleConfig;
 
+    /**
+     * Operator-configured date/period query parameters ({@code date_params} in the report's
+     * {@code parameters_val_json}); resolved in the preprocessing and transform queries, each
+     * optionally limited to named steps ({@code apply_to}). Never null.
+     */
+    public final List<DateParamConfig> dateParams;
+
     public ReportConfig(String reportName, String reportSubprocess, int periodId,
                         boolean overrideKey,
                         List<ReportDatasourceRef>    datasources,
@@ -88,6 +95,22 @@ public final class ReportConfig implements Serializable {
                         String                       outputBqTable,
                         String                       outputBqInputAlias,
                         RunScheduleConfig            runScheduleConfig) {
+        this(reportName, reportSubprocess, periodId, overrideKey, datasources, preprocessingSteps,
+             transformSteps, outputConfigs, emailConfig, outputBqTable, outputBqInputAlias,
+             runScheduleConfig, null);
+    }
+
+    public ReportConfig(String reportName, String reportSubprocess, int periodId,
+                        boolean overrideKey,
+                        List<ReportDatasourceRef>    datasources,
+                        List<ReportPreprocessingStep> preprocessingSteps,
+                        List<ReportTransformStep>    transformSteps,
+                        List<ReportOutputConfig>     outputConfigs,
+                        ReportEmailConfig            emailConfig,
+                        String                       outputBqTable,
+                        String                       outputBqInputAlias,
+                        RunScheduleConfig            runScheduleConfig,
+                        List<DateParamConfig>        dateParams) {
         this.reportName         = reportName;
         this.reportSubprocess   = reportSubprocess;
         this.periodId           = periodId;
@@ -100,6 +123,9 @@ public final class ReportConfig implements Serializable {
         this.outputBqTable      = outputBqTable;
         this.outputBqInputAlias = outputBqInputAlias;
         this.runScheduleConfig  = runScheduleConfig != null ? runScheduleConfig : RunScheduleConfig.none();
+        this.dateParams         = dateParams != null
+                                  ? Collections.unmodifiableList(new java.util.ArrayList<>(dateParams))
+                                  : Collections.emptyList();
     }
 
     public boolean hasPreprocessing()   { return !preprocessingSteps.isEmpty(); }

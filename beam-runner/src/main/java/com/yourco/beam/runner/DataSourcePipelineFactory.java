@@ -6,6 +6,7 @@ import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.sink.DataSourceRecordSinkTransform;
 import com.yourco.beam.io.source.SourceRouter;
 import com.yourco.beam.model.BqFetchConfig;
+import com.yourco.beam.model.DateParamConfig;
 import com.yourco.beam.model.RunDates;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.options.FrameworkOptions;
@@ -295,7 +296,8 @@ public final class DataSourcePipelineFactory {
             return config;
         }
         BqFetchConfig bq = config.bqFetchConfig;
-        String resolvedQuery = QueryParameterResolver.resolve(bq.query, bq.queryParams, options, dates);
+        String resolvedQuery = QueryParameterResolver.resolve(
+            bq.query, bq.queryParams, options, dates, config.dateParams, DateParamConfig.SOURCE_QUERY);
         BqFetchConfig resolvedBq = new BqFetchConfig(
             bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema);
         // toBuilder() copies every existing field first, so swapping in the token-resolved

@@ -414,6 +414,18 @@ and `RptOutput`. Override with `--daReferTable`, `--daRecTable`, `--rptReferTabl
 | 13a | Success → `updateStatus(rpt_id, COMPLETED)` | → **COMPLETED** |
 | 13b | Any failure → `updateStatus(rpt_id, FAILED)` | → **FAILED** |
 
+### Query parameters for dates (`date_params`)
+
+Add a `date_params` array next to `transforms` (or to the data source's `parameters_val_json`) to
+define placeholders for the run's period, formatted as the query needs it:
+
+```json
+"date_params": [{"token": "{periodLabel}", "source": "PERIOD_END", "format": "MMM-yy"}]
+```
+
+A transform containing `... AS report_month` with the literal `'{periodLabel}'` then runs with
+`'Jan-24'` for the January 2024 period. See the root README for all fields.
+
 ### Outputs that read a data source alias directly
 
 If an output's `input_alias` is a **data source alias** (e.g. `raw_trades`) rather than a transform step's
