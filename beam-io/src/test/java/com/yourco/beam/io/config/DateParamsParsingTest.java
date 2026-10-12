@@ -65,4 +65,16 @@ class DateParamsParsingTest {
         assertThrows(IllegalArgumentException.class,
             () -> parse("[{\"token\":\"{a}\",\"source\":\"PERIOD_END\",\"format\":\"MMM-yy-bb\"}]"));
     }
+
+    @Test
+    void nativeArrayValueSurvivesParamFlattening() throws Exception {
+        java.util.Map<String, String> p = BigQuerySourceConfigRepository.flattenParams(
+            "{\"bq_query\":\"SELECT 1\",\"date_params\":[{\"token\":\"{periodLabel}\","
+            + "\"source\":\"PERIOD_ID\",\"format\":\"MMM-yy\",\"apply_to\":[\"bq_query\"]}]}");
+        assertEquals("SELECT 1", p.get("bq_query"));
+        List<DateParamConfig> parsed =
+            BigQuerySourceConfigRepository.parseDateParams(
+                new ObjectMapper().readTree(p.get("date_params")));
+        assertEquals(1, parsed.size());
+    }
 }

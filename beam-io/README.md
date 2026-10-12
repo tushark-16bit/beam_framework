@@ -370,3 +370,5 @@ io/util/FileHeaderLegendTest.java      — wrapLegend/unwrapLegend round-trip, i
 Run with `mvn -pl beam-io -am test`. This is the starting point, not full coverage — the rest of
 `beam-io` (BigQuery/GCS-backed adapters) has none yet and would need Mockito (already a
 `dependencyManagement` entry in the root `pom.xml`, unused until now).
+
+> **Config value flattening:** `BigQuerySourceConfigRepository.flattenParams()` keeps a native JSON array/object value in `parameters_val_json` (e.g. `"date_params": [...]` written unquoted) as its JSON text. Previously such a value became an empty string, so `date_params` was silently ignored and `{periodLabel}` stayed unresolved.

@@ -312,7 +312,7 @@ params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@ke
 config/BigQueryReportRepository.java       Queries parameter_store for report config nested JSON.
                                            fetchReportConfig() parses datasources/preprocessing/transforms/outputs/email,
                                            plus top-level output_bq_table and output_bq_input_alias.
-config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOURCE_DOWNLOAD source configs.
+config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOURCE_DOWNLOAD source configs. flattenParams() keeps a native JSON array/object value (e.g. date_params) as JSON text instead of dropping it.
                                            fetchSourceConfigs(). Row → SourceConfig mapping. Also parses
                                            data_transform_query/data_transform_min_row_count/
                                            data_transform_max_row_count into DataTransformConfig.

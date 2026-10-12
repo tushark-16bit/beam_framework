@@ -531,17 +531,28 @@ public final class BigQuerySourceConfigRepository {
             return Collections.emptyMap();
         }
         try {
-            JsonNode node = JSON.readTree(valJson);
-            if (!node.isObject()) return Collections.emptyMap();
-            Map<String, String> result = new HashMap<>();
-            node.fields().forEachRemaining(e ->
-                result.put(e.getKey(), e.getValue().isNull() ? null : e.getValue().asText()));
-            return result;
+            return flattenParams(valJson);
         } catch (Exception e) {
             throw new IllegalStateException(
                 "Failed to parse parameters_val_json for source config "
                 + parentId + "/" + subprocess + "/" + datasource + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Top-level keys of parameters_val_json → string values. A native array/object value
+     * (e.g. {@code date_params} written as a real JSON array rather than a string) is kept as its
+     * JSON text; {@code asText()} would turn it into "" and the setting would silently vanish.
+     */
+    static Map<String, String> flattenParams(String valJson) throws java.io.IOException {
+        JsonNode node = JSON.readTree(valJson);
+        if (!node.isObject()) return Collections.emptyMap();
+        Map<String, String> result = new HashMap<>();
+        node.fields().forEachRemaining(e -> result.put(e.getKey(),
+            e.getValue().isNull() ? null
+            : e.getValue().isContainerNode() ? e.getValue().toString()
+            : e.getValue().asText()));
+        return result;
     }
 
     private List<SourceTransformConfig> toSourceTransforms(String json) {
