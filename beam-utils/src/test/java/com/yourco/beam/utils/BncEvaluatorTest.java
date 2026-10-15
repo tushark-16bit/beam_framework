@@ -112,6 +112,13 @@ class BncEvaluatorTest {
         assertTrue(BncEvaluator.evaluateStatus("SUCCESS", null).text().contains("bnctext column missing"));
     }
 
+    @Test
+    void d8_unsuccessfulCountsAsAPass_keptForLegacyParity() {
+        // BNC_RULES.md D-8 / regression row 13: contains("SUCCESS") treats "UNSUCCESSFUL" as a pass.
+        // Kept on purpose (B15) until the owner decides on an exact match — change this test with it.
+        assertEquals(Outcome.PASS, BncEvaluator.evaluateStatus("UNSUCCESSFUL", "x").outcome());
+    }
+
     // ── Errors, skips, numbers ────────────────────────────────────────────────
 
     @Test

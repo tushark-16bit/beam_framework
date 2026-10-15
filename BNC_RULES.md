@@ -349,7 +349,9 @@ DaRec `COUNT = 350`, `SUM(C) = 12,345.00`.
 ## L. Regression tests (minimum set)
 
 Columns: source · configuration · source values (count / amount) · destination values · expected result ·
-status · downstream. Rows 2 and 3 were photographed out of focus; their digits are marked.
+status · downstream. Rows 2 and 3 were photographed out of focus; their digits are marked. In rows 16–18 the
+"configuration" column holds the scenario; the photographed cell layout of rows 12 and 16–18 is ambiguous, so
+each is read by its meaning.
 
 | # | Source | Configuration | Source values | Destination values | Expected result | Status | Downstream |
 |---|---|---|---|---|---|---|---|
@@ -361,7 +363,64 @@ status · downstream. Rows 2 and 3 were photographed out of focus; their digits 
 | 6 | Q1 | `Dest_BnC_Column` blank, flag=false | – | – | SKIP | Completed | report runs |
 | 7 | Q2 | same (blank column) | – | – | FAIL | Failed B&C | – |
 | 8 | F1 | `bncType=None` | – | – | SKIP | Completed | – |
-| 9+ | – | – | – | – | **not photographed** (the table continues past the last photo) | | |
+| 9 | F2 | `bncType=None` | – | – | FAIL (see D-1 — [U]) | Failed B&C | – |
+| 10 | F2 xls | mismatch, flag true | – | – | FAIL | Failed *(D-6)* | – |
+| 11 | CSV | `Excel BnC Sheet` | – | – | ERROR | Failed B&C | cancelled |
+| 12 | F2 CSV | 0 rows | – | – | no BnC *(D-7)* | Loaded | report blocked |
+| 13 | F SQL | `bncstatus='UNSUCCESSFUL'` | – | – | PASS *(D-8)* | Completed | – |
+| 14 | Excel | `A2 = 0` | – | – | FAIL | Failed B&C | – |
+| 15 | Excel | `B2 = "1,234"` | – | – | ERROR / FAIL | Failed B&C | – |
+| 16 | any | prior failure, rerun inside the window, data fixed | – | – | PASS | new VsnNo Completed | report succeeds on next run |
+| 17 | forced run on a Completed source | mismatch | – | – | FAIL | same DaId becomes Failed B&C | report blocked |
+| 18 | after `maxFreqRunDay` | – | – | – | no retry | stays failed | – |
+
+## M. Open questions, defects and migration risks
+
+**Defects to verify. Do not fix them silently; decide whether to keep each one.**
+
+* **D-1.** In F2, `None` is passed through `bnCPassed` from `preValidationForBnCCheck`, so it returns FAIL. In F1 it
+  is a SKIP. (`BalanceAndControlUtil.preValidationForBnCCheck` sets `bnCDone=true`, `bnCPassed=true`, but
+  `checkExpostCheckBnCControlVariables` is never called and the text is `"BnC Type is 'None'…"`. Recheck:
+  `checkExcelFileBalanceAndControlValues` takes the else branch with `bnCPassed=true`, so F2 `None` may actually
+  PASS and set Completed.) Evidence needed: a unit test of `balAndCtrlXlsCsv` with `None`. Treat as **[U]** until
+  tested; the matrix above assumes FAIL.
+* **D-2.** The tolerance offset differs between paths (+0.001 for query, none for file).
+* **D-3.** In Q1/F1 the status is Completed before BnC runs, so there is a window where a report could map the
+  source. Also, a flag=false configuration gap leaves the source Completed.
+* **D-4.** In Q2 (`checkSQLBalanceAndControlValue`), technical error text is overwritten by the `"Source Count:
+  NA"` text.
+* **D-5.** With flag true in Q1/F1, the BnC text is never persisted.
+* **D-6.** The outer catch in the XLS streaming handler overwrites Failed B&C with Failed.
+* **D-7.** In F2, a zero-row CSV stays Loaded permanently.
+* **D-8.** `contains("SUCCESS")` treats `"UNSUCCESSFUL"` as a pass.
+* **D-9.** `GET_DAREFER_STACD` has no `ORDER BY`, so with several versions the eligibility status read is
+  unpredictable.
+* **D-10.** `query.replace("?", daId)` replaces every `?` in the SQL.
+* **D-11.** `ISNUMERIC` accepts values such as `$`, which `CAST AS FLOAT` then rejects, so the destination query
+  errors.
+* **D-12.** In F2, `getDouble` is called on a missing amount key (destination SUM NULL), which errors.
+* **D-13.** A forced re-run that fails BnC overwrites a previously Completed source.
+* **D-14.** In Q2, an invalid variance throws before the load. Q1 uses 0 instead.
+
+**Unknowns and the evidence needed**
+
+* Production configurations (all `Rpt_Framework_DataSources%` rows): needed to build the real inventory, see
+  whether any data source uses SQL Query Totals, Count Only or flag=false, and see the actual `paramReplace`
+  entries. Source: an export of `PrcsParmDtl`.
+* The `dbPaginated` and `LargeFileFlag` values in production: these decide which implementation actually runs.
+* `ace.utils` behaviour: whether `ParametersUtil.GetParameterValue(..., false)` returns `""` for a missing key,
+  and whether `DBUtils.retrieveOneColumnOneRow` returns the first row. Source: the library's code.
+* ACE `cancelTask` → EXITED behaviour, and `RptRefer` status on report failure. Source: ACE engine documentation,
+  and the `processReport` catch block.
+* Driver column-name case for `bnctext`/`bncstatus` (`JSONObject.has` is case-sensitive). Source: a SQL Server
+  JDBC test.
+
+**Migration design (recommended, separate from current behaviour).** Split the work into: Resolver →
+SourceExtractor (SQL-positional / SQL-status / ExcelSheet / RowCount) → DestinationExtractor (DaRec COUNT/SUM) →
+Validator → Persistence (DaRefer text plus status) → WorkflowDecision (flag → throw/cancel). To keep behaviour
+identical, the Validator needs a configurable `toleranceOffset` (0.001 for query, 0 for file) and a
+per-implementation `onMissingConfig` (SKIP vs FAIL). Optional improvements, such as per-check result rows,
+numeric columns, a retry cap and an exact `bncstatus` match, would change behaviour and need sign-off first.
 
 ---
 
@@ -414,8 +473,8 @@ mechanics do not. Everything below is a decision made here, not a statement from
 
 ## 2.3 Decisions
 
-**B1 — One engine, not four.** The legacy differences that are *accidents* (defects D-1, D-4, D-6, D-7) are
-not carried over. The differences that are *deliberate* are kept, keyed on the source kind, not on a
+**B1 — One engine, not four.** The legacy differences that are *accidents* (see B15 for each defect) are
+not carried over, except where B15 says a defect is kept. The differences that are *deliberate* are kept, keyed on the source kind, not on a
 switch:
 
 * query sources (`SOURCE_QUERY`): amount PASS iff `abs(src−dst) ≤ V + 0.001` (K: Q1/Q2);
@@ -427,8 +486,8 @@ The comparison is done in `BigDecimal` (not `double`) so the inclusive boundarie
 **B2 — Missing configuration.** An absent `bnc` object = no BnC (as an absent `bnc_rules_json` today). A
 `bnc` object that is present but incomplete (e.g. `SOURCE_QUERY` without `source_query` or `dest_column`)
 **FAILS** (Q2/F2 behaviour, not Q1/F1's SKIP), because this framework streams like Q2/F2 and a half-written
-check silently skipping is the worse failure. `type: NONE` is a SKIP for every source (this fixes D-1, where
-F2 failed on None). **OPEN:** confirm FAIL-not-SKIP.
+check silently skipping is the worse failure. `type: NONE` is a SKIP for every source (D-1: the legacy F2 behaviour is
+unverified — [U] — see B15). **OPEN:** confirm FAIL-not-SKIP for a missing configuration, and SKIP for `NONE`.
 
 **B3 — Technical errors.** A failing source query, destination query, unreadable sheet, etc. gives
 `FAILED_BNC` with an `ERROR:` message in the text (not disguised as a mismatch — fixes D-4). *There is no
@@ -488,6 +547,34 @@ such a check can only pass for an empty source. Return two columns.
 **B14 — Row order.** "Last row wins" is applied to the order BigQuery returns; a source query should return one
 row.
 
+**B15 — Each legacy defect (M), and what this framework does.** Section M says to decide, not fix silently.
+These are the decisions taken; **OPEN** ones need the owner.
+
+| Defect | This framework | Parity with legacy? |
+|---|---|---|
+| D-1 `None` in F2 (FAIL vs PASS, [U]) | `type: NONE` is a SKIP for every source (status unaffected) | **differs** from the matrix (FAIL) — OPEN: confirm |
+| D-2 offset +0.001 query / 0 file | kept (decision B1) | yes |
+| D-3 Completed before BnC / config gap leaves Completed | `COMPLETED` is written only after BnC passes (no window); an incomplete `bnc` fails (B2) | differs — deliberate |
+| D-4 error text overwritten by "Source Count: NA" | the error text is kept inside the NA sentence (`ERROR: …`) | differs — deliberate |
+| D-5 flag true: text never persisted | text is always persisted (B4) | differs — deliberate |
+| D-6 XLS outer catch overwrites with Failed | none: a failed check is `FAILED_BNC` | differs — deliberate |
+| D-7 zero-row CSV stays Loaded | `COUNT_ONLY` works with 0 rows (0 = 0 passes); no `Loaded` status exists | differs — deliberate |
+| D-8 `contains("SUCCESS")` passes `"UNSUCCESSFUL"` | **kept** — `SQL_STATUS` still uses `contains` (test `evaluateStatus` pins it) | yes — OPEN: switch to an exact match? |
+| D-9 status read without `ORDER BY` | n/a: `getLatest`/`isCompleted` order by `lst_updt_ts DESC` | n/a |
+| D-10 every `?` replaced | **kept** (also inside string literals) | yes |
+| D-11 `ISNUMERIC` accepts `$` then the CAST errors | `SAFE_CAST` makes a non-number NULL, which the SUM ignores (counts as 0, no error) | differs — deliberate |
+| D-12 F2 missing amount key errors | an empty destination sums to 0 | differs — deliberate |
+| D-13 forced re-run failing BnC overwrites a Completed source | a re-run is a new DaRefer row; the previous COMPLETED row and (until the new run completes) its DaRec rows are kept; reports read the *latest* row, so they are blocked while it is `FAILED_BNC` | same outcome (report blocked), different mechanism |
+| D-14 Q2 throws on a bad variance, Q1 uses 0 | throws at config load (Q2 rule, `BncConfig`) | yes (Q2) |
+
+Regression rows 9–18 against this framework: 9 differs (D-1); 10, 12 differ (D-6, D-7 not carried); 11, 14, 15 match
+(failed check, `FAILED_BNC`); 13 matches (D-8 kept); 16 matches (a retry is a new `DaRefer` version); 17 matches
+in outcome (D-13); 18 matches (`EXPIRED` — no run after `maxFreqRunDay`).
+
+**Not done, on purpose** (the document's list of improvements needing sign-off): per-check result rows, numeric
+result columns, a retry cap, an exact `bncstatus` match. The result stays in the existing `bal_and_cntl_smry_tx`
+column, as JSON.
+
 ## 2.4 Where it lives in code
 
 | Piece | Class |
@@ -505,11 +592,12 @@ row.
 
 # Part 3 — What the photographs did not contain
 
-* The legacy defect list. Only the references **D-1, D-4, D-6, D-7** (and a cross-reference **E-3**, the Q2
-  zero-row rule) appeared; the sections defining D-1…D-7 and E-3 were not photographed. Part 2 follows what
-  the matrix rows imply (D-1: F2 fails on `None`; D-4: Q2 error text lost, shown as a mismatch; D-6: XLS-F2
-  outer catch overwrites with Failed; D-7: F2 CSV skip leaves status Loaded).
-* Regression test rows 9 onward, and the exact digits of rows 2 and 3.
-* Anything after section L (if the source document continues).
+Complete as of the second batch of photographs (regression rows 8–18 and section M). Still not seen:
 
-Please send those pages if they exist, and this file will be extended.
+* The exact digits of regression rows 2 and 3 (photographed out of focus).
+* The cell layout of rows 12 and 16–18 is ambiguous in the photographs; they are read by their meaning (Part 1,
+  section L).
+* The text of section E-3 (the "Q2: see E-3" cross-reference for a zero-row load) was not seen as a separate
+  rule. Section F's rows for an empty source and an empty destination were used instead.
+* Anything before the title page or after the closing footer ("BnC Framework | Reverse-Engineering and
+  Migration Specification").
