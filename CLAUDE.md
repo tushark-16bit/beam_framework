@@ -114,6 +114,7 @@ Read in this order for a complete mental model:
 
 ```
 0.  DATE_SCHEDULING_RULES.md                          — date/scheduling contract (read FIRST for anything touching dates)
+0b. BNC_RULES.md                                      — Balance & Control: legacy rules (Part 1), how this framework maps them (Part 2)
 1.  WALKTHROUGH.md                                    — UML diagrams + execution flows (read this first)
 2.  EXAMPLE.md                                        — end-to-end BQ param store example with DDL + run command
 3.  beam-core/.../options/FrameworkOptions.java       — all CLI flags; the config contract
