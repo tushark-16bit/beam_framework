@@ -100,7 +100,7 @@ public final class SourceRouter {
                 BqFetchConfig bq = Objects.requireNonNull(config.bqFetchConfig,
                     "bqFetchConfig is required for sourceType=BQ in source: " + config.datasourceName);
                 yield pipeline.apply("Source-" + label,
-                    new BigQuerySourceTransform(bq.tableRef(), bq.query, bqSchema));
+                    new BigQuerySourceTransform(bq.tableRef(), bq.query, bqSchema, bq.location));
             }
             case GCS  -> pipeline.apply("Source-" + label,
                 new GcsSourceTransform(config.fileConfig != null ? config.fileConfig.location : null));

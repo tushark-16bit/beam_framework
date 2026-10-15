@@ -49,6 +49,9 @@ public final class DateParamConfig implements Serializable {
     /** Scope name of a data source's input query, for {@link #applyTo}. */
     public static final String SOURCE_QUERY = "bq_query";
 
+    /** Scope name of a data source's BnC source query ({@code bnc.source_query}), for {@link #applyTo}. */
+    public static final String BNC_QUERY = "bnc_query";
+
     public enum TextCase {
         AS_IS, UPPER, LOWER;
 

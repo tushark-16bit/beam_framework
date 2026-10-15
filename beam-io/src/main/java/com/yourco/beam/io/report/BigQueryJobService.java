@@ -6,7 +6,9 @@ import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.ExtractJobConfiguration;
 import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.Job;
+import com.google.cloud.bigquery.JobId;
 import com.google.cloud.bigquery.JobInfo;
+import com.google.cloud.bigquery.TableResult;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.TableId;
 import org.slf4j.Logger;
@@ -139,6 +141,53 @@ public final class BigQueryJobService {
             throw new RuntimeException("BQ query interrupted", e);
         }
         return values;
+    }
+
+    /** One result row: column names and values as text ({@code null} for SQL NULL). */
+    public record ResultRow(List<String> names, List<String> values) {
+        /** The value of the column called {@code name} (case-insensitive), or null if absent/NULL. */
+        public String get(String name) {
+            for (int i = 0; i < names.size(); i++) {
+                if (names.get(i).equalsIgnoreCase(name)) return values.get(i);
+            }
+            return null;
+        }
+        /** True if the result has a column called {@code name} (case-insensitive). */
+        public boolean has(String name) {
+            return names.stream().anyMatch(n -> n.equalsIgnoreCase(name));
+        }
+    }
+
+    /**
+     * Runs {@code sql} and returns the <b>last</b> row of the result (the legacy Balance &amp;
+     * Control source query "last row wins"), or {@code null} when it returns no rows.
+     *
+     * @param location BigQuery job location, or null for BigQuery's default
+     * @throws RuntimeException if the query fails or is interrupted
+     */
+    public ResultRow queryLastRow(String sql, String location) {
+        QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setUseLegacySql(false)
+            .build();
+        try {
+            TableResult result = (location == null || location.isBlank())
+                ? bigquery.query(config)
+                : bigquery.query(config, JobId.newBuilder().setLocation(location.trim()).build());
+            List<String> names = new ArrayList<>();
+            result.getSchema().getFields().forEach(f -> names.add(f.getName()));
+            ResultRow last = null;
+            for (FieldValueList row : result.iterateAll()) {
+                List<String> values = new ArrayList<>();
+                for (int i = 0; i < names.size(); i++) {
+                    values.add(row.get(i).isNull() ? null : row.get(i).getStringValue());
+                }
+                last = new ResultRow(names, values);
+            }
+            return last;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("BQ query interrupted", e);
+        }
     }
 
     /**

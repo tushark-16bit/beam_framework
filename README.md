@@ -382,7 +382,28 @@ Adding a new datasource requires only a BQ row in `parameter_store` — no code 
 |---|---|---|
 | `API` | REST API with pagination | `api_endpoint`, `api_auth_type`, `api_auth_secret_id`, `api_pagination_strategy` |
 | `FILE` | CSV or Excel on GCS | `file_type`, `file_location`, `file_prefix`, `file_suffix` (support `{date}`, `{dateCompact}`, `{periodId}`, `{fileDate}` placeholders — the last formatted via optional `file_date_pattern`, e.g. `yyyyMM`) |
-| `BQ` | BigQuery table or SQL query | `bq_project_id`, `bq_dataset`, `bq_table`, `bq_query` (may contain `{periodStart}`, `{periodEnd}`, `{periodId}` tokens) |
+| `BQ` | BigQuery table or SQL query | `query_details` (`table`, `query` — may contain `{periodStart}`, `{periodEnd}`, `{periodId}` tokens —, `query_params`, `schema`) + `bq_settings.fetch_options` (`project_id`, `dataset`, `location`) |
+
+### Source config shape
+
+Every source has the same JSON in `parameters_val_json`: a BQ source populates `query_details`, a FILE source
+`file_details` (the other block stays empty — a populated block for the wrong type fails the load), BigQuery
+defaults sit in `bq_settings` (`fetch_options` for reading the source, `storage_options` for storing rows in our
+tables), and an optional `bnc` object configures Balance & Control:
+
+```json
+{
+  "source_type": "FILE",
+  "query_details": {},
+  "file_details": {"type": "EXCEL", "location": "gs://bucket/in/", "prefix": "rev_", "suffix": ".xlsx",
+                   "has_header": true, "sheet_index": 0, "first_row": 1, "date_pattern": "yyyyMM"},
+  "bq_settings":  {"fetch_options": {"location": "US"}, "storage_options": {"page_size": 250}},
+  "bnc": {"type": "EXCEL_SHEET", "dest_column": "TotalRevenueAmt", "variance_allowed": 1.0}
+}
+```
+
+The old flat keys (`bq_project_id`, `bq_query`, `file_location`, …) are still read, per field, as a fallback.
+Details and the full key list: `CLAUDE.md` §10.
 
 ### Query parameter injection
 
@@ -391,7 +412,7 @@ a per-source `run_details_json` schedule — see `RunDateCalculator` above). The
 dates are injected into the `bq_query` template at runtime via `QueryParameterResolver`:
 
 ```sql
--- In parameter_store.parameters_val_json bq_query value:
+-- In parameter_store.parameters_val_json, the query_details.query value:
 SELECT * FROM trades WHERE trade_date BETWEEN '{periodStart}' AND '{periodEnd}'
 ```
 
@@ -418,7 +439,8 @@ After the pipeline writes rows to `DaRec`, the driver JVM validates:
 |---|---|---|
 | Header check | `required_headers_json` | Logged at pipeline-assembly time |
 | Row count | `min_row_count`, `max_row_count` | `DaRefer.sta_cd = FAILED_BNC` |
-| Balance & Control (BnC) | `bnc_rules_json` — field + expected sum + tolerance% | `DaRefer.sta_cd = FAILED_BNC` |
+| Balance & Control (BnC) | `bnc` — source control values (a query's count/amount, an Excel BnC sheet, a row count or a SQL status) vs the stored rows; rules in [`BNC_RULES.md`](BNC_RULES.md) | `DaRefer.sta_cd = FAILED_BNC` |
+| Fixed-total sum rule | `bnc_rules_json` — field + expected sum + tolerance% | `DaRefer.sta_cd = FAILED_BNC` |
 
 ### Run tracking (DaRefer)
 

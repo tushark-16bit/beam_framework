@@ -1,5 +1,7 @@
 package com.yourco.beam.io.records;
 
+import java.math.BigDecimal;
+
 /**
  * Queries the {@code DaRec} record table for post-pipeline validation.
  *
@@ -49,4 +51,22 @@ public interface DataSourceRecordAdapter {
      * @param daId the run identifier whose rows should be removed
      */
     void deleteRecords(long daId);
+
+    /** Row count and the sum of one column, as read back from DaRec for Balance &amp; Control. */
+    record Totals(long count, BigDecimal amount) {}
+
+    /**
+     * The BnC destination values for a run: {@code COUNT(*)} of the stored rows and the sum of
+     * {@code destColumn} over them. {@code destColumn} is matched case-insensitively — for rows
+     * keyed by column name against those names; for a FILE source (rows keyed A, B, …) against the
+     * header names first, then the column letter. Values that are not numbers count as 0
+     * (legacy rule); an empty run is {@code Totals(0, 0)}.
+     *
+     * @param destColumn the column to sum, or null/blank to read only the count (amount = 0)
+     * @throws IllegalArgumentException when the column cannot be found in the stored rows
+     * @throws IllegalStateException    when BigQuery cannot be queried — unlike the other methods
+     *         here this one never swallows a failure, because a BnC that cannot read its
+     *         destination must report an error, not a zero
+     */
+    Totals countAndSum(long daId, String destColumn);
 }

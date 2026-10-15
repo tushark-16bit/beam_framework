@@ -3,14 +3,19 @@ package com.yourco.beam.runner;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.records.BigQueryDataSourceRecordAdapter;
+import com.yourco.beam.io.records.DataSourceRecordAdapter;
 import com.yourco.beam.io.report.BigQueryJobService;
+import com.yourco.beam.io.source.FileBncSheetReader;
+import com.yourco.beam.io.source.FileSourceAdapter;
 import com.yourco.beam.io.util.FileHeaderLegend;
+import com.yourco.beam.model.BncConfig;
 import com.yourco.beam.model.BncRule;
 import com.yourco.beam.model.DataSourceCheckpoint;
 import com.yourco.beam.model.DataTransformConfig;
 import com.yourco.beam.model.SourceConfig;
 import com.yourco.beam.model.SourceFailureEmailConfig;
 import com.yourco.beam.model.ValidationConfig;
+import com.yourco.beam.utils.BncEvaluator;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -18,6 +23,8 @@ import org.apache.beam.sdk.values.PCollection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,7 +53,11 @@ import java.util.Map;
  * <h2>Phase order inside {@link FinalizeDoFn#runValidation}</h2>
  * <ol>
  *   <li>row_count_mismatch (always-on) + min/max row bounds (optional) against the raw stored rows</li>
- *   <li>{@code data_transform_query} (optional) — only attempted if phase 1 passed; a {@code data}
+ *   <li>Balance &amp; Control ({@code bnc}, optional; rules in {@code BNC_RULES.md}) — source control
+ *       values vs the rows as stored, <em>before</em> any transform (legacy: BnC runs after the load,
+ *       transformations run later). A failed check is {@code FAILED_BNC}, skips the transform, and is
+ *       never thrown (nothing here may rethrow — see {@link FinalizeDoFn#processElement}).</li>
+ *   <li>{@code data_transform_query} (optional) — only attempted if the phases above passed; a {@code data}
  *       CTE reunifying this run's stored rows is always prepended before the operator's query
  *       runs (see {@link FinalizeDoFn#withDataCte}), so unnesting is never opt-in or skippable —
  *       the operator's SQL just references {@code data} as a plain table. Validates the output
@@ -68,10 +79,12 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
     private final String       daReferTableRef; // `project.dataset.DaRefer`
     private final String       daRecTableRef;   // `project.dataset.DaRec`
     private final long         previousDaId;    // -1 = no previous run to supersede
+    private final String       runDateIso;      // the source's run date (yyyy-MM-dd): locates a FILE's BnC sheet
 
     PostDownloadFinalizeTransform(long daId, SourceConfig sourceConfig,
                                   String daReferTableRef, String daRecTableRef,
-                                  long previousDaId) {
+                                  long previousDaId, String runDateIso) {
+        this.runDateIso      = runDateIso;
         this.daId            = daId;
         this.sourceConfig    = sourceConfig;
         this.daReferTableRef = daReferTableRef;
@@ -82,7 +95,8 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
     @Override
     public PCollection<Long> expand(PCollection<Long> writtenCount) {
         return writtenCount.apply("Finalize-" + sourceConfig.datasourceName,
-            ParDo.of(new FinalizeDoFn(daId, sourceConfig, daReferTableRef, daRecTableRef, previousDaId)));
+            ParDo.of(new FinalizeDoFn(daId, sourceConfig, daReferTableRef, daRecTableRef, previousDaId,
+                                      runDateIso)));
     }
 
     // ── Named DoFn — required for Beam serialization safety ──────────────────
@@ -98,6 +112,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         private final String       daReferTableRef;
         private final String       daRecTableRef;
         private final long         previousDaId;
+        private final String       runDateIso;
 
         // Created in @Setup — BQ client is not serializable
         private transient BigQueryDataSourceCheckpointAdapter checkpointAdapter;
@@ -105,7 +120,9 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         private transient BigQueryJobService                  bqJobService;
 
         FinalizeDoFn(long daId, SourceConfig sourceConfig,
-                     String daReferTableRef, String daRecTableRef, long previousDaId) {
+                     String daReferTableRef, String daRecTableRef, long previousDaId,
+                     String runDateIso) {
+            this.runDateIso      = runDateIso;
             this.daId            = daId;
             this.sourceConfig    = sourceConfig;
             this.daReferTableRef = daReferTableRef;
@@ -245,6 +262,28 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             bncSummary.put("pipelineRowCount", pipelineRowCount);
             bncSummary.put("storedRowCount",   rowCount);
 
+            // Balance & Control (bnc) — source control values vs the rows exactly as stored, so it
+            // runs BEFORE the transform (legacy: BnC after the load, transformations later). A
+            // failed check goes into `failures`, which also keeps the transform from running.
+            BncConfig bnc = sourceConfig.bncConfig;
+            boolean bncFailed = false;
+            if (bnc.isActive()) {
+                BncEvaluator.Result bncResult = evaluateBnc(bnc, pipelineRowCount);
+                breadcrumb("bnc", bncResult.outcome().name());
+                Map<String, Object> bncBlock = new LinkedHashMap<>();
+                bncBlock.put("type",    bnc.type.name());
+                bncBlock.put("outcome", bncResult.outcome().name());
+                bncBlock.put("text",    bncResult.text());
+                bncBlock.putAll(bncResult.figures());
+                bncSummary.put("bnc",  bncBlock);
+                bncSummary.put("text", bncResult.text());
+                LOG.info("BnC for '{}' (da_id={}): {}", sourceConfig.datasourceName, daId, bncResult.text());
+                if (bncResult.failed()) {
+                    failures.add("BnC: " + bncResult.text());
+                    bncFailed = true;
+                }
+            }
+
             // Optional post-storage query transform — only attempted once storage integrity
             // (row_count_mismatch + bounds above) is confirmed clean. Runs against a reunified
             // view of this run's stored rows (UNNEST across all pages, so pagination is invisible
@@ -308,7 +347,107 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
             breadcrumb("before_update", "status=" + staCd);
             updateStatusWithRetry(staCd, bncJson);
             if (!DataSourceCheckpoint.STA_COMPLETED.equals(staCd)) {
-                sendFailureEmail(staCd, String.join("; ", failures), bncJson);
+                // BNC_RULES.md decision B4: error_on_failure=false means "record it, do not raise
+                // it" — the status is still FAILED_BNC (reports stay blocked), but a BnC mismatch
+                // that is the only failure does not send the failure email.
+                boolean onlyBnc = bncFailed && failures.size() == 1;
+                if (onlyBnc && !bnc.errorOnFailure) {
+                    LOG.warn("BnC failed for '{}' (da_id={}) with error_on_failure=false — status "
+                             + "{} recorded, no failure email", sourceConfig.datasourceName, daId, staCd);
+                } else {
+                    sendFailureEmail(staCd, String.join("; ", failures), bncJson);
+                }
+            }
+        }
+
+        // ── Balance & Control ─────────────────────────────────────────────────
+
+        /**
+         * Runs the configured BnC check and returns its outcome. Never throws: a check that cannot
+         * be evaluated (query error, unreadable sheet, missing configuration…) is a FAIL whose text
+         * says so — there is no ERROR or SKIP status (BNC_RULES.md, Part 1 section F, decision B3).
+         */
+        private BncEvaluator.Result evaluateBnc(BncConfig bnc, long pipelineRowCount) {
+            try {
+                return switch (bnc.type) {
+                    case NONE -> BncEvaluator.skipped("bnc.type NONE — no check");
+                    case COUNT_ONLY -> {
+                        DataSourceRecordAdapter.Totals stored = recordAdapter.countAndSum(daId, null);
+                        yield BncEvaluator.compareTotals(bnc.type,
+                            BigDecimal.valueOf(pipelineRowCount), BigDecimal.ZERO,
+                            BigDecimal.valueOf(stored.count()), BigDecimal.ZERO, bnc.varianceAllowed);
+                    }
+                    case SOURCE_QUERY -> bncSourceQuery(bnc);
+                    case EXCEL_SHEET  -> bncExcelSheet(bnc);
+                    case SQL_STATUS   -> bncSqlStatus(bnc);
+                };
+            } catch (Exception e) {
+                LOG.error("BnC could not be evaluated for '{}' (da_id={}): {}",
+                          sourceConfig.datasourceName, daId, e.getMessage(), e);
+                return BncEvaluator.error(e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }
+
+        /** Legacy Q1/Q2: source totals from {@code source_query} (column 1 = count, column 2 = amount). */
+        private BncEvaluator.Result bncSourceQuery(BncConfig bnc) {
+            if (bnc.sourceQuery == null || bnc.destColumn == null) {
+                return BncEvaluator.error("BnC not configured correctly: SOURCE_QUERY needs "
+                    + "bnc.source_query and bnc.dest_column");
+            }
+            BigQueryJobService.ResultRow row =
+                bqJobService.queryLastRow(bnc.sourceQuery, sourceConfig.bqSettings.fetch.location);
+            BigDecimal srcCount  = BigDecimal.ZERO;
+            BigDecimal srcAmount = BigDecimal.ZERO;
+            if (row != null) {                       // no rows → 0 / 0, as in the legacy framework
+                List<String> v = row.values();
+                if (v.size() == 1) {                 // one column is the amount only
+                    srcAmount = decimalOrZero(v.get(0), "source amount");
+                } else if (v.size() >= 2) {          // by position: the column names do not matter
+                    srcCount  = decimalOrZero(v.get(0), "source count");
+                    srcAmount = decimalOrZero(v.get(1), "source amount");
+                }
+            }
+            DataSourceRecordAdapter.Totals stored = recordAdapter.countAndSum(daId, bnc.destColumn);
+            return BncEvaluator.compareTotals(bnc.type, srcCount, srcAmount,
+                BigDecimal.valueOf(stored.count()), stored.amount(), bnc.varianceAllowed);
+        }
+
+        /** Legacy F1/F2 sheet mode: the sheet after the data sheet, A2 = count, B2 = amount. */
+        private BncEvaluator.Result bncExcelSheet(BncConfig bnc) {
+            if (bnc.destColumn == null) {
+                return BncEvaluator.error("BnC not configured correctly: EXCEL_SHEET needs bnc.dest_column");
+            }
+            if (sourceConfig.fileConfig == null) {
+                return BncEvaluator.error("EXCEL_SHEET is only valid for FILE sources");
+            }
+            FileSourceAdapter.BncSheet sheet = FileBncSheetReader.read(
+                sourceConfig.fileConfig, String.valueOf(sourceConfig.periodId), LocalDate.parse(runDateIso));
+            DataSourceRecordAdapter.Totals stored = recordAdapter.countAndSum(daId, bnc.destColumn);
+            return BncEvaluator.compareTotals(bnc.type, sheet.count(), sheet.amount(),
+                BigDecimal.valueOf(stored.count()), stored.amount(), bnc.varianceAllowed);
+        }
+
+        /** Legacy "SQL Query Totals": the author's SQL returns bncstatus/bnctext; every {@code ?} is the da_id. */
+        private BncEvaluator.Result bncSqlStatus(BncConfig bnc) {
+            if (bnc.sourceQuery == null) {
+                return BncEvaluator.error("BnC not configured correctly: SQL_STATUS needs bnc.source_query");
+            }
+            String sql = bnc.sourceQuery.replace("?", String.valueOf(daId));
+            BigQueryJobService.ResultRow row =
+                bqJobService.queryLastRow(sql, sourceConfig.bqSettings.fetch.location);
+            if (row == null) {
+                return BncEvaluator.evaluateStatus(null, "the BnC query returned no rows");
+            }
+            return BncEvaluator.evaluateStatus(row.get("bncstatus"), row.get("bnctext"));
+        }
+
+        /** SQL NULL / empty counts as 0 (legacy); a value that is not a number is an error. */
+        private static BigDecimal decimalOrZero(String text, String what) {
+            if (text == null || text.isBlank()) return BigDecimal.ZERO;
+            try {
+                return BncEvaluator.parseDecimal(text);
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException(what + " '" + text + "' is not a number", e);
             }
         }
 
@@ -370,6 +509,9 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
          * Replaces this run's DaRec rows with {@code tmpTable}'s (re-paginated at 250 rows/page)
          * by running the delete and the insert as a single atomic BigQuery multi-statement
          * transaction — never as two separate jobs.
+         *
+         * <p>Pages are re-cut at this source's {@code bq_settings.storage_options.page_size}
+         * (default 250), the same size the sink used.
          *
          * <p>This matters for two reasons:
          * <ol>
@@ -482,7 +624,7 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
                 + "  SELECT\n"
                 + "    GENERATE_UUID() AS rec_id,\n"
                 + "    " + daId + " AS da_id,\n"
-                + "    DIV(rn - 1, 250) + 1 AS page_no,\n"
+                + "    DIV(rn - 1, " + sourceConfig.bqSettings.storage.pageSize + ") + 1 AS page_no,\n"
                 + "    CONCAT('[', STRING_AGG(row_json, ',' ORDER BY rn), ']') AS row_da_json_tx,\n"
                 + "    CURRENT_DATE() AS load_dt,\n"
                 + "    CURRENT_TIMESTAMP() AS lst_updt_ts\n"

@@ -175,7 +175,7 @@ VALUES (
 
 -- Source config for DATA_SOURCE_DOWNLOAD — stored in parameter_store alongside report params.
 -- Key: parameter_group_name=parentId, parameter_data_source=subprocessName, parameter_name=datasourceName.
--- Period-specific filtering is handled by {periodStart}/{periodEnd} tokens inside bq_query.
+-- Period-specific filtering is handled by {periodStart}/{periodEnd} tokens inside query_details.query.
 INSERT INTO `my-gcp-project.dw.parameter_store`
   (parameter_name, parameter_group_name, parameter_data_source,
    schema_of_json, parameters_val_json, edit_grp_nm, last_updt_ts, lst_update_user_id)
@@ -185,15 +185,27 @@ VALUES (
   'eod',              -- ← --subprocessName
   JSON '{
     "source_type": {"required": true,  "type": "string"},
-    "bq_query":    {"required": true,  "type": "string"}
+    "query_details.query": {"required": true, "type": "string"}
   }',
   JSON '{
     "source_type":    "BQ",
-    "bq_project_id":  "my-gcp-project",
-    "bq_dataset":     "raw_data",
-    "bq_table":       "trades",
-    "bq_query":       "SELECT trade_id, currency, amount, trade_date, desk FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\"",
+    "query_details": {
+      "table": "trades",
+      "query": "SELECT trade_id, currency, amount, trade_date, desk FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\""
+    },
+    "file_details":   {},
+    "bq_settings": {
+      "fetch_options":   {"project_id": "my-gcp-project", "dataset": "raw_data", "location": "US"},
+      "storage_options": {"page_size": 250}
+    },
     "min_row_count":  "1",
+    "bnc": {
+      "type": "SOURCE_QUERY",
+      "source_query": "SELECT COUNT(*) AS total_count, SUM(amount) AS total_amt FROM `my-gcp-project.raw_data.trades` WHERE trade_date BETWEEN DATE \"{periodStart}\" AND DATE \"{periodEnd}\"",
+      "dest_column": "amount",
+      "variance_allowed": 0.5,
+      "error_on_failure": true
+    },
     "bnc_rules_json": "[{\"field\":\"amount\",\"expectedTotal\":1170000,\"tolerancePct\":0.01}]",
     "run_details_json": "{\"frequency\":\"MONTHLY\",\"freqRunDay\":\"WD+3\",\"maxFreqRunDay\":\"WD+5\",\"dayLag\":\"\",\"dateType\":\"lastDayMonth\",\"calendarKey\":\"Calendar_EPS\"}",
 

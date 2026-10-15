@@ -83,6 +83,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
 
     private final String              recordTableRef; // project:dataset.table — BigQueryIO format
     private final ValueProvider<Long> daId;
+    private final int                 pageSize;       // source rows per DaRec page
     private final String              loadDt;         // shared across all rows in this run
     private final String              lstUpdtTs;      // shared across all rows in this run
 
@@ -91,6 +92,19 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
     }
 
     public DataSourceRecordSinkTransform(FrameworkOptions options, ValueProvider<Long> daId) {
+        this(options, daId, PaginateAndBuildDoFn.PAGE_SIZE);
+    }
+
+    /**
+     * @param pageSize source rows per DaRec page ({@code bq_settings.storage_options.page_size};
+     *                 default {@link PaginateAndBuildDoFn#PAGE_SIZE} = 250)
+     */
+    public DataSourceRecordSinkTransform(FrameworkOptions options, ValueProvider<Long> daId,
+                                         int pageSize) {
+        if (pageSize < 1) {
+            throw new IllegalArgumentException("pageSize must be >= 1 (got " + pageSize + ")");
+        }
+        this.pageSize = pageSize;
         String project = options.getCheckpointBqProject() != null
                          && !options.getCheckpointBqProject().isBlank()
                          ? options.getCheckpointBqProject() : options.getProject();
@@ -124,7 +138,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         // Step 4: Chunk into pages; emit one TableRow per page (main) + total row count (side).
         PCollectionTuple paginatedOut = grouped
             .apply("PaginateAndBuild", ParDo
-                .of(new PaginateAndBuildDoFn(daId, loadDt, lstUpdtTs))
+                .of(new PaginateAndBuildDoFn(daId, loadDt, lstUpdtTs, pageSize))
                 .withOutputTags(PaginateAndBuildDoFn.PAGES_TAG,
                                 TupleTagList.of(PaginateAndBuildDoFn.TOTAL_ROWS_TAG)));
 
@@ -169,7 +183,7 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         private static final long serialVersionUID = 1L;
         private static final Logger LOG = LoggerFactory.getLogger(PaginateAndBuildDoFn.class);
 
-        /** Maximum source rows stored per DaRec row. */
+        /** Default maximum source rows stored per DaRec row (overridable per source). */
         static final int PAGE_SIZE = 250;
 
         /** Main output: one TableRow per page. */
@@ -180,8 +194,10 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         private final ValueProvider<Long> daId;
         private final String              loadDt;
         private final String              lstUpdtTs;
+        private final int                 pageSize;
 
-        PaginateAndBuildDoFn(ValueProvider<Long> daId, String loadDt, String lstUpdtTs) {
+        PaginateAndBuildDoFn(ValueProvider<Long> daId, String loadDt, String lstUpdtTs, int pageSize) {
+            this.pageSize  = pageSize;
             this.daId      = daId;
             this.loadDt    = loadDt;
             this.lstUpdtTs = lstUpdtTs;
@@ -214,8 +230,8 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
             long totalRows = allJsonRows.size();
             int  pageNo    = 1;
 
-            for (int start = 0; start < allJsonRows.size(); start += PAGE_SIZE) {
-                int end = Math.min(start + PAGE_SIZE, allJsonRows.size());
+            for (int start = 0; start < allJsonRows.size(); start += pageSize) {
+                int end = Math.min(start + pageSize, allJsonRows.size());
                 List<String> pageSlice = allJsonRows.subList(start, end);
 
                 // A FILE source with a header row builds {"Data":[...],"DataHeaders":[...]} — the

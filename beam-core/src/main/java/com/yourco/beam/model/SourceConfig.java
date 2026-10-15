@@ -88,6 +88,18 @@ public final class SourceConfig implements Serializable {
      */
     public final List<DateParamConfig> dateParams;
 
+    /**
+     * Default BigQuery settings of this source ({@code bq_settings}: {@code fetch_options} for
+     * reading it, {@code storage_options} for storing it). Never null.
+     */
+    public final BqSettings bqSettings;
+
+    /**
+     * Balance &amp; Control check ({@code bnc} object; see {@code BNC_RULES.md}). Never null —
+     * {@link BncConfig#none()} when absent.
+     */
+    public final BncConfig bncConfig;
+
     private SourceConfig(Builder b) {
         this.parentId            = b.parentId;
         this.datasourceName      = b.datasourceName;
@@ -108,6 +120,8 @@ public final class SourceConfig implements Serializable {
         this.dateParams          = b.dateParams != null
                                    ? Collections.unmodifiableList(b.dateParams)
                                    : Collections.emptyList();
+        this.bqSettings          = b.bqSettings != null ? b.bqSettings : BqSettings.none();
+        this.bncConfig           = b.bncConfig != null ? b.bncConfig : BncConfig.none();
     }
 
     // ── Factory helpers (convenience wrappers around Builder) ─────────────────
@@ -157,7 +171,9 @@ public final class SourceConfig implements Serializable {
             .failureEmailConfig(failureEmailConfig)
             .dataTransformConfig(dataTransformConfig)
             .runScheduleConfig(runScheduleConfig)
-            .dateParams(new java.util.ArrayList<>(dateParams));
+            .dateParams(new java.util.ArrayList<>(dateParams))
+            .bqSettings(bqSettings)
+            .bncConfig(bncConfig);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────
@@ -176,6 +192,8 @@ public final class SourceConfig implements Serializable {
         private DataTransformConfig dataTransformConfig;
         private RunScheduleConfig runScheduleConfig;
         private List<DateParamConfig> dateParams;
+        private BqSettings bqSettings;
+        private BncConfig bncConfig;
 
         public Builder parentId(String v)                              { parentId = v;             return this; }
         public Builder datasourceName(String v)                        { datasourceName = v;       return this; }
@@ -192,6 +210,8 @@ public final class SourceConfig implements Serializable {
         public Builder dataTransformConfig(DataTransformConfig v)      { dataTransformConfig = v;  return this; }
         public Builder runScheduleConfig(RunScheduleConfig v)          { runScheduleConfig = v;    return this; }
         public Builder dateParams(List<DateParamConfig> v)             { dateParams = v;           return this; }
+        public Builder bqSettings(BqSettings v)                        { bqSettings = v;           return this; }
+        public Builder bncConfig(BncConfig v)                          { bncConfig = v;            return this; }
 
         public SourceConfig build() { return new SourceConfig(this); }
     }

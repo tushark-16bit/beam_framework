@@ -442,9 +442,13 @@ ERROR log line; `false` → no failure email, WARN log line (K3). In **both** ca
 and dependent reports are blocked (K3), and the result text is always persisted (Q2/F2 behaviour). The flag
 never changes the validation result (B). **OPEN:** confirm.
 
-**B5 — `paramReplace`.** Not reimplemented. The standard tokens and `date_params` resolve in `source_query`
-exactly as they do in the data query. To keep the legacy meaning of `%periodid%` (the **end date** of the
-period, not the period id — section D note) configure
+**B5 — `paramReplace`.** Not reimplemented. `source_query` takes the same tokens as the data query —
+standard `{periodStart}`/`{periodEnd}`/`{periodId}`/`{runDate}`, the source's `date_params`, and custom
+tokens — resolved in the driver JVM before submission (the finalize step runs on a worker). This applies to
+`SQL_STATUS` queries too, where the legacy framework applied no `paramReplace` (a legacy limitation, not a
+rule anyone relied on; a query without `{…}` placeholders is unaffected). A `date_params` entry can be limited
+to the BnC query with `"apply_to": ["bnc_query"]` (the data query is `bq_query`). To keep the legacy meaning of
+`%periodid%` (the **end date** of the period, not the period id — section D note) configure
 `{"token": "%periodid%", "source": "PERIOD_END", "format": "yyyyMMdd"}`. Token matching is case-sensitive, so
 this does not collide with the built-in `%periodId%` (the integer id).
 
@@ -467,15 +471,35 @@ already how `ReportPipelineFactory` works.
 **B10 — Coexistence.** `bnc_rules_json` (a fixed expected total with a percentage tolerance) is a different,
 framework-native check and is unchanged. It may be used alongside `bnc`.
 
+**B11 — When it runs.** BnC compares the source's control values with the rows **as stored**, so it runs
+right after the row-count checks and **before** `data_transform_query` (legacy: BnC after the load,
+transformations later). A failed BnC therefore also stops the transform from running. `bnc_rules_json`, which
+runs after the transform, keeps checking whatever is stored at that point.
+
+**B12 — Where the source's location comes from.** The legacy `dataLocation` (which database the source query
+runs on) has no per-source equivalent: the source query is a BigQuery query, and its job location is
+`bq_settings.fetch_options.location` (default: BigQuery's own default). Fully qualified table names in the SQL
+select the project.
+
+**B13 — One-column source query.** Following Part 1 literally: if `source_query` returns one column it is the
+**amount** and the source count is 0. Because the count and amount are one combined check (Part 1, section D),
+such a check can only pass for an empty source. Return two columns.
+
+**B14 — Row order.** "Last row wins" is applied to the order BigQuery returns; a source query should return one
+row.
+
 ## 2.4 Where it lives in code
 
 | Piece | Class |
 |---|---|
-| config model | `beam-core/.../model/BncConfig.java` |
-| pure comparison logic (all of K and the F matrix) | `beam-utils/.../BncEvaluator.java` (tests: `BncEvaluatorTest`, including regression rows 1, 4, 5, 6, 7, 8) |
-| count + sum over stored rows, first row, header legend | `beam-io/.../records/BigQueryDataSourceRecordAdapter.java` |
-| Excel BnC sheet cells | `beam-io/.../source/FileSourceAdapter.java` |
-| orchestration and persistence | `beam-runner/.../PostDownloadFinalizeTransform.java` |
+| config model (`bnc` object) | `beam-core/.../model/BncConfig.java` |
+| default BigQuery settings (`bq_settings`: `fetch_options`, `storage_options`) | `beam-core/.../model/BqSettings.java` |
+| pure comparison logic (all of K and the F matrix) | `beam-utils/.../BncEvaluator.java` (tests: `BncEvaluatorTest`, covering regression rows 1, 4, 5 and the boundaries of 2, 3; rows 6–8 are config-level and covered by `SourceConfigStructureTest`) |
+| count + sum over stored rows, destination-column resolution | `beam-io/.../records/BigQueryDataSourceRecordAdapter.java` (`countAndSum`, `resolveColumnKey`) |
+| source query: last row, location | `beam-io/.../report/BigQueryJobService.java` (`queryLastRow`) |
+| Excel BnC sheet cells | `beam-io/.../source/FileSourceAdapter.java` (`readBncSheet`), `FileBncSheetReader.java` |
+| token resolution of `source_query` | `beam-runner/.../DataSourcePipelineFactory.java` (`resolveQueryTokens`) |
+| orchestration, persistence, notification | `beam-runner/.../PostDownloadFinalizeTransform.java` (`evaluateBnc`) |
 
 ---
 

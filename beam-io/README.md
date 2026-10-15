@@ -10,14 +10,18 @@ Also contains the `DeadLetterSinkTransform` for writing failed records.
 ```
 io/source/
     SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD); overload with nullable Schema param passes pre-fetched schema to BigQuerySourceTransform. routeFromConfig takes the source's resolved RunDates.runDate from beam-runner (beam-io can't call RunDateCalculator itself); FILE {periodId} comes from SourceConfig.periodId, already set to RunDates.periodId
-    BigQuerySourceTransform   — reads from BQ table or SQL query; typed mode uses a pre-fetched Schema (passed from beam-runner) with a custom TableRow→Row mapping; generic fallback when schema is null
+    BigQuerySourceTransform   — optional BQ job location (bq_settings.fetch_options.location) for the read and the preview query. Reads from BQ table or SQL query; typed mode uses a pre-fetched Schema (passed from beam-runner) with a custom TableRow→Row mapping; generic fallback when schema is null
                                 resolves real column names via a SELECT * LIMIT 1 preview query (no tables.get needed), all-STRING;
                                 falls back further to Schemas.RAW_JSON blob if even that query fails
     GcsSourceTransform        — reads newline-delimited JSON from GCS glob
     PubSubSourceTransform     — reads from a Pub/Sub subscription (streaming)
     ApiSourceAdapter          — pure HTTP adapter: auth, pagination (PAGE_NUMBER/CURSOR/OFFSET)
     ApiSourceTransform        — Beam wrapper for ApiSourceAdapter (@Setup/@Teardown for HttpClient)
-    FileSourceAdapter         — pure file adapter: CSV (Commons CSV) + Excel (Apache POI). Each data row is
+    FileBncSheetReader        — downloads a FILE source's workbook from GCS and reads its Balance & Control sheet
+                                (used by PostDownloadFinalizeTransform on a worker; EXCEL only)
+    FileSourceAdapter         — readBncSheet(bytes, bncSheetIndex) → BncSheet(count, amount): the sheet after the data
+                                sheet, A2 = count, B2 = amount, formulas evaluated, strict (blank cell, missing sheet/row,
+                                "1,234" → FileSourceException; tests: BncSheetReaderTest). Otherwise a pure file adapter: CSV (Commons CSV) + Excel (Apache POI). Each data row is
                                 keyed by Excel-style column letters (A, B, ..., Z, AA, AB, ...) in file column
                                 order — see columnLetter() — never by real header text. When the file has a
                                 header row, the real names are captured separately as a header-legend content
@@ -68,8 +72,14 @@ io/checkpoint/
                                           input data.
 
 io/records/
-    DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field), deleteRecords(daId)
-    BigQueryDataSourceRecordAdapter — row_da_json_tx per page is a flat JSON array, or (FILE source with a
+    DataSourceRecordAdapter         — interface: countRecords(daId), sumField(daId, field), deleteRecords(daId),
+                                      countAndSum(daId, destColumn) → Totals(count, amount) for Balance & Control
+    BigQueryDataSourceRecordAdapter — countAndSum(): COUNT(*) and an exact NUMERIC SUM(SAFE_CAST(JSON_VALUE(...))) of
+                                      the BnC destination column (a non-number counts as 0; BigQuery errors are thrown,
+                                      never turned into a 0). resolveColumnKey() matches the configured column
+                                      case-insensitively against the stored row keys — for a FILE page, the header name
+                                      first, then the column letter. Tests: DaRecColumnResolutionTest.
+                                      row_da_json_tx per page is a flat JSON array, or (FILE source with a
                                       header) {"Data":[...],"DataHeaders":[...]}. countRecords unnests via
                                       FileHeaderLegend.dataArrayExpr(...) — which extracts just the row array
                                       either way — and COUNT(*)s individual rows (not SUM(JSON_ARRAY_LENGTH(...))
@@ -94,7 +104,7 @@ io/records/
                                       Has a String-tableRef constructor for in-worker use (DoFn @Setup).
 
 io/sink/
-    DataSourceRecordSinkTransform   — Collects ALL source rows, paginates at 250 rows/page, writes one
+    DataSourceRecordSinkTransform   — page size = bq_settings.storage_options.page_size (default 250; the data_transform_query replace re-cuts at the same size). Collects ALL source rows, paginates at 250 rows/page, writes one
                                       DaRec row per page with row_da_json_tx = JSON array of that page.
                                       Uses streaming inserts (rows immediately queryable).
                                       Returns PCollection<Long> = total source rows (not page count),
@@ -124,8 +134,15 @@ io/config/
                                      Key: (parameter_group_name=parentId, parameter_data_source=subprocessName,
                                      parameter_name=datasourceName). Validates required fields from schema_of_json;
                                      parses parameters_val_json into SourceConfig. No separate source_config table.
-                                     Also parses the optional bq_schema_json array into BqFetchConfig.schema
+                                     Reads the structured shape: query_details (BQ) / file_details (FILE), exactly one
+                                     populated (the other must be empty, else the load fails); bq_settings
+                                     (fetch_options → BqFetchConfig defaults + location; storage_options.page_size);
+                                     bnc → BncConfig (strict: unknown type / bad variance throws). The legacy flat
+                                     bq_*/file_* keys are still read per field as a fallback (structured wins), and
+                                     lookupParam() lets a schema_of_json that requires a legacy key (bq_query) find it in
+                                     the structured config. query_details.schema (legacy bq_schema_json) → BqFetchConfig.schema
                                      (List<SourceSchemaField>) — an operator-declared column schema for BQ sources.
+                                     Tests: SourceConfigStructureTest.
                                      Also parses data_transform_query / data_transform_min_row_count /
                                      data_transform_max_row_count into SourceConfig.dataTransformConfig
                                      (DataTransformConfig) — an optional post-storage SQL transform.
@@ -167,7 +184,7 @@ io/email/
                                 model/ package, not here.
 
 io/report/
-    BigQueryJobService        — BQ jobs: query→table, table→GCS export (CSV/JSON), countRows(tableRef), queryStrings(sql) (first column of a small result as text — used to list the JSON keys of staged data)
+    BigQueryJobService        — queryLastRow(sql, location) → ResultRow (names + values of the LAST row, optional BQ job location; the BnC source query). BQ jobs: query→table, table→GCS export (CSV/JSON), countRows(tableRef), queryStrings(sql) (first column of a small result as text — used to list the JSON keys of staged data)
                                 (exact live SELECT COUNT(*), not table-metadata based), dropTableIfExists()
                                 (best-effort cleanup). No-arg constructor holds only a plain BigQuery client
                                 (no FrameworkOptions), so it's also safe to use inside a Beam worker DoFn —

@@ -12,7 +12,9 @@ import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
 import com.yourco.beam.model.AggregationConfig;
 import com.yourco.beam.model.ApiSourceConfig;
+import com.yourco.beam.model.BncConfig;
 import com.yourco.beam.model.BncRule;
+import com.yourco.beam.model.BqSettings;
 import com.yourco.beam.model.BqFetchConfig;
 import com.yourco.beam.model.DataTransformConfig;
 import com.yourco.beam.model.DateParamConfig;
@@ -214,7 +216,7 @@ public final class BigQuerySourceConfigRepository {
 
     // ── Row mapping ───────────────────────────────────────────────────────────
 
-    private SourceConfig mapToSourceConfig(Map<String, String> params, String parentId,
+    SourceConfig mapToSourceConfig(Map<String, String> params, String parentId,
                                             String datasource, String subprocess, int periodId) {
         String sourceTypeStr = params.get("source_type");
         if (sourceTypeStr == null || sourceTypeStr.isBlank()) {
@@ -232,24 +234,31 @@ public final class BigQuerySourceConfigRepository {
                 + parentId + "/" + subprocess + "/" + datasource);
         }
 
+        JsonNode queryDetails = objectParam(params, "query_details");
+        JsonNode fileDetails  = objectParam(params, "file_details");
+        requireOnlyOwnDetails(sourceType, queryDetails, fileDetails, parentId, subprocess, datasource);
+        BqSettings bqSettings = toBqSettings(params);
+
         SourceConfig.Builder builder = SourceConfig.builder()
             .parentId(parentId)
             .datasourceName(datasource)
             .periodId(periodId)
             .subprocessName(subprocess)
             .sourceType(sourceType)
-            .queryConfig(toQueryConfig(params))
+            .queryConfig(toQueryConfig(params, queryDetails))
             .sourceTransforms(toSourceTransforms(params.get("source_transforms_json")))
             .validationConfig(toValidationConfig(params))
             .failureEmailConfig(toFailureEmailConfig(params))
             .dataTransformConfig(toDataTransformConfig(params))
             .runScheduleConfig(toRunScheduleConfig(params))
-            .dateParams(toDateParams(params));
+            .dateParams(toDateParams(params))
+            .bqSettings(bqSettings)
+            .bncConfig(toBncConfig(params));
 
         switch (sourceType) {
             case API  -> builder.apiConfig(toApiConfig(params));
-            case FILE -> builder.fileConfig(toFileConfig(params));
-            case BQ   -> builder.bqFetchConfig(toBqConfig(params));
+            case FILE -> builder.fileConfig(toFileConfig(params, fileDetails));
+            case BQ   -> builder.bqFetchConfig(toBqConfig(params, queryDetails, bqSettings));
             default   -> throw new IllegalStateException(
                 "source_type " + sourceType + " is not supported in DATA_SOURCE_DOWNLOAD");
         }
@@ -272,30 +281,56 @@ public final class BigQuerySourceConfigRepository {
         );
     }
 
-    private FileSourceConfig toFileConfig(Map<String, String> p) {
+    /**
+     * {@code file_details} (FILE sources) with the legacy flat {@code file_*} keys as a fallback
+     * per field: {@code type}, {@code location}, {@code prefix}, {@code suffix}, {@code delimiter},
+     * {@code has_header}, {@code sheet_index}, {@code first_row}, {@code last_column},
+     * {@code date_pattern}.
+     */
+    private FileSourceConfig toFileConfig(Map<String, String> p, JsonNode fd) {
         return new FileSourceConfig(
-            p.get("file_type"),
-            p.get("file_location"),
-            p.get("file_prefix"),
-            p.get("file_suffix"),
-            p.get("file_delimiter"),
-            parseBool(p.get("file_has_header"), false),
-            parseIntOrDefault(p.get("file_sheet_index"), 0),
-            parseIntOrDefault(p.get("file_first_row"), 1),
-            p.get("file_last_column"),
-            p.get("file_date_pattern")
+            firstNonBlank(text(fd, "type"),          p.get("file_type")),
+            firstNonBlank(text(fd, "location"),      p.get("file_location")),
+            firstNonBlank(text(fd, "prefix"),        p.get("file_prefix")),
+            firstNonBlank(text(fd, "suffix"),        p.get("file_suffix")),
+            firstNonBlank(text(fd, "delimiter"),     p.get("file_delimiter")),
+            parseBool(firstNonBlank(text(fd, "has_header"), p.get("file_has_header")), false),
+            parseIntOrDefault(firstNonBlank(text(fd, "sheet_index"), p.get("file_sheet_index")), 0),
+            parseIntOrDefault(firstNonBlank(text(fd, "first_row"),   p.get("file_first_row")), 1),
+            firstNonBlank(text(fd, "last_column"),   p.get("file_last_column")),
+            firstNonBlank(text(fd, "date_pattern"),  p.get("file_date_pattern"))
         );
     }
 
-    private BqFetchConfig toBqConfig(Map<String, String> p) {
+    /**
+     * {@code query_details} (BQ sources) — {@code table} (bare, or qualified as
+     * {@code project.dataset.table}), {@code query}, {@code query_params}, {@code schema} — with
+     * the legacy flat {@code bq_*} keys as a fallback per field. The default project/dataset a bare
+     * table is resolved against come from {@code bq_settings.fetch_options} (legacy:
+     * {@code bq_project_id}/{@code bq_dataset}).
+     */
+    private BqFetchConfig toBqConfig(Map<String, String> p, JsonNode qd, BqSettings settings) {
         return new BqFetchConfig(
-            p.get("bq_project_id"),
-            p.get("bq_dataset"),
-            p.get("bq_table"),
-            p.get("bq_query"),
-            parseJsonMap(p.get("query_params_json")),
-            parseSchemaFields(p.get("bq_schema_json"))
+            firstNonBlank(settings.fetch.projectId, p.get("bq_project_id")),
+            firstNonBlank(settings.fetch.dataset,   p.get("bq_dataset")),
+            firstNonBlank(text(qd, "table"), p.get("bq_table")),
+            firstNonBlank(text(qd, "query"), p.get("bq_query")),
+            queryParams(p, qd),
+            qd.has("schema") ? parseSchemaNode(qd.get("schema")) : parseSchemaFields(p.get("bq_schema_json")),
+            settings.fetch.location
         );
+    }
+
+    private Map<String, String> queryParams(Map<String, String> p, JsonNode qd) {
+        JsonNode node = qd.get("query_params");
+        if (node == null || node.isNull()) return parseJsonMap(p.get("query_params_json"));
+        if (node.isTextual()) return parseJsonMap(node.asText());
+        if (!node.isObject()) {
+            throw new IllegalArgumentException("query_details.query_params must be a JSON object");
+        }
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        node.fields().forEachRemaining(e -> result.put(e.getKey(), e.getValue().asText()));
+        return result;
     }
 
     /**
@@ -307,30 +342,140 @@ public final class BigQuerySourceConfigRepository {
     private List<SourceSchemaField> parseSchemaFields(String json) {
         if (json == null || json.isBlank()) return Collections.emptyList();
         try {
-            JsonNode array = JSON.readTree(json);
-            if (!array.isArray()) return Collections.emptyList();
-            List<SourceSchemaField> fields = new ArrayList<>();
-            for (JsonNode node : array) {
-                String name = node.path("name").asText(null);
-                String type = node.path("type").asText(null);
-                if (name == null || name.isBlank() || type == null || type.isBlank()) {
-                    LOG.warn("Skipping malformed bq_schema_json entry (missing name/type): {}", node);
-                    continue;
-                }
-                fields.add(new SourceSchemaField(name, type));
-            }
-            return fields;
+            return parseSchemaNode(JSON.readTree(json));
         } catch (Exception e) {
             LOG.error("Failed to parse bq_schema_json: {}", e.getMessage());
             return Collections.emptyList();
         }
     }
 
-    private QueryConfig toQueryConfig(Map<String, String> p) {
+    /** A schema array ({@code query_details.schema}, or the parsed {@code bq_schema_json}). */
+    private List<SourceSchemaField> parseSchemaNode(JsonNode array) {
+        if (array == null) return Collections.emptyList();
+        try {
+            if (array.isTextual()) array = JSON.readTree(array.asText());
+        } catch (Exception e) {
+            LOG.error("Failed to parse the declared schema: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+        if (!array.isArray()) return Collections.emptyList();
+        List<SourceSchemaField> fields = new ArrayList<>();
+        for (JsonNode node : array) {
+            String name = node.path("name").asText(null);
+            String type = node.path("type").asText(null);
+            if (name == null || name.isBlank() || type == null || type.isBlank()) {
+                LOG.warn("Skipping malformed schema entry (missing name/type): {}", node);
+                continue;
+            }
+            fields.add(new SourceSchemaField(name, type));
+        }
+        return fields;
+    }
+
+    private QueryConfig toQueryConfig(Map<String, String> p, JsonNode qd) {
         return new QueryConfig(
-            p.get("bq_query"),
-            parseJsonMap(p.get("query_params_json"))
+            firstNonBlank(text(qd, "query"), p.get("bq_query")),
+            queryParams(p, qd)
         );
+    }
+
+    /**
+     * {@code bq_settings}: the default BigQuery settings, split into {@code fetch_options}
+     * ({@code project_id}, {@code dataset}, {@code location} — reading the source) and
+     * {@code storage_options} ({@code page_size} — storing rows in DaRec). A bad
+     * {@code page_size} fails the config load.
+     */
+    private BqSettings toBqSettings(Map<String, String> p) {
+        JsonNode settings = objectParam(p, "bq_settings");
+        JsonNode fetch    = nested(settings, "fetch_options");
+        JsonNode storage  = nested(settings, "storage_options");
+        BqSettings.FetchOptions fo = new BqSettings.FetchOptions(
+            text(fetch, "project_id"), text(fetch, "dataset"), text(fetch, "location"));
+        int pageSize = BqSettings.DEFAULT_PAGE_SIZE;
+        String ps = text(storage, "page_size");
+        if (ps != null) {
+            try {
+                pageSize = Integer.parseInt(ps);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "bq_settings.storage_options.page_size '" + ps + "' is not a whole number");
+            }
+        }
+        return new BqSettings(fo, new BqSettings.StorageOptions(pageSize));
+    }
+
+    /** {@code bnc} — see {@link BncConfig} and BNC_RULES.md. Absent/empty → no check. */
+    private BncConfig toBncConfig(Map<String, String> p) {
+        JsonNode bnc = objectParam(p, "bnc");
+        if (isEmpty(bnc)) return BncConfig.none();
+        return new BncConfig(
+            text(bnc, "type"), text(bnc, "source_query"), text(bnc, "dest_column"),
+            text(bnc, "variance_allowed"), text(bnc, "error_on_failure"));
+    }
+
+    // ── Structured-value helpers ──────────────────────────────────────────────
+
+    /**
+     * The JSON object stored under {@code key} (an object or a string holding one), or an empty
+     * object when absent. A value that is not an object fails the config load.
+     */
+    private static JsonNode objectParam(Map<String, String> p, String key) {
+        String json = p.get(key);
+        if (json == null || json.isBlank()) return JSON.createObjectNode();
+        JsonNode node;
+        try {
+            node = JSON.readTree(json);
+        } catch (Exception e) {
+            throw new IllegalArgumentException(key + " is not valid JSON: " + e.getMessage(), e);
+        }
+        if (node == null || node.isNull()) return JSON.createObjectNode();
+        if (!node.isObject()) {
+            throw new IllegalArgumentException(key + " must be a JSON object");
+        }
+        return node;
+    }
+
+    private static JsonNode nested(JsonNode parent, String key) {
+        JsonNode n = parent.get(key);
+        return (n != null && n.isObject()) ? n : JSON.createObjectNode();
+    }
+
+    private static boolean isEmpty(JsonNode node) {
+        return node == null || node.size() == 0;
+    }
+
+    /** Text of {@code node.key}; null when absent, JSON null or blank. */
+    private static String text(JsonNode node, String key) {
+        JsonNode v = node.get(key);
+        if (v == null || v.isNull() || v.isContainerNode()) return null;
+        String t = v.asText();
+        return t.isBlank() ? null : t;
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isBlank()) return v;
+        }
+        return null;
+    }
+
+    /**
+     * One source has one input: a BQ source populates {@code query_details}, a FILE source
+     * {@code file_details}, and the other block must stay empty — a populated block for the wrong
+     * type is almost always a copy-paste mistake, so it fails the config load rather than being
+     * silently ignored. (API sources use neither.)
+     */
+    private static void requireOnlyOwnDetails(SourceType type, JsonNode queryDetails, JsonNode fileDetails,
+                                              String parentId, String subprocess, String datasource) {
+        String where = parentId + "/" + subprocess + "/" + datasource;
+        if (type != SourceType.BQ && !isEmpty(queryDetails)) {
+            throw new IllegalStateException("query_details must be empty for source_type=" + type
+                + " (it is only for BQ sources) in " + where);
+        }
+        if (type != SourceType.FILE && !isEmpty(fileDetails)) {
+            throw new IllegalStateException("file_details must be empty for source_type=" + type
+                + " (it is only for FILE sources) in " + where);
+        }
     }
 
     private ValidationConfig toValidationConfig(Map<String, String> p) {
@@ -500,7 +645,7 @@ public final class BigQuerySourceConfigRepository {
             schema.fields().forEachRemaining(entry -> {
                 if (entry.getValue().path("required").asBoolean(false)) {
                     String key = entry.getKey();
-                    String val = params.get(key);
+                    String val = lookupParam(params, key);
                     if (val == null || val.isBlank()) {
                         missing.add(key);
                     }
@@ -517,6 +662,50 @@ public final class BigQuerySourceConfigRepository {
         } catch (Exception e) {
             LOG.warn("Failed to parse schema_of_json for source config {}/{}/{}: {}",
                      parentId, subprocess, datasource, e.getMessage());
+        }
+    }
+
+    /** Legacy flat key → where the same setting lives in the structured config. */
+    private static final Map<String, String> STRUCTURED_ALIAS = Map.ofEntries(
+        Map.entry("bq_project_id",    "bq_settings.fetch_options.project_id"),
+        Map.entry("bq_dataset",       "bq_settings.fetch_options.dataset"),
+        Map.entry("bq_table",         "query_details.table"),
+        Map.entry("bq_query",         "query_details.query"),
+        Map.entry("bq_schema_json",   "query_details.schema"),
+        Map.entry("query_params_json","query_details.query_params"),
+        Map.entry("file_type",        "file_details.type"),
+        Map.entry("file_location",    "file_details.location"),
+        Map.entry("file_prefix",      "file_details.prefix"),
+        Map.entry("file_suffix",      "file_details.suffix"),
+        Map.entry("file_delimiter",   "file_details.delimiter"),
+        Map.entry("file_has_header",  "file_details.has_header"),
+        Map.entry("file_sheet_index", "file_details.sheet_index"),
+        Map.entry("file_first_row",   "file_details.first_row"),
+        Map.entry("file_last_column", "file_details.last_column"),
+        Map.entry("file_date_pattern","file_details.date_pattern"));
+
+    /**
+     * A config value by key, for the {@code schema_of_json} required-field check. Accepts a
+     * dotted path into a structured object ({@code query_details.query}), and for a legacy flat
+     * key ({@code bq_query}) also looks where the structured config keeps it — so an existing
+     * {@code schema_of_json} that lists {@code bq_query} as required keeps working after a
+     * source is moved to the structured shape.
+     */
+    static String lookupParam(Map<String, String> params, String key) {
+        String direct = params.get(key);
+        if (direct != null && !direct.isBlank()) return direct;
+        String path = key.indexOf('.') >= 0 ? key : STRUCTURED_ALIAS.get(key);
+        if (path == null) return direct;
+        String[] parts = path.split("\\.");
+        String json = params.get(parts[0]);
+        if (json == null || json.isBlank()) return direct;
+        try {
+            JsonNode node = JSON.readTree(json);
+            for (int i = 1; i < parts.length && node != null; i++) node = node.get(parts[i]);
+            if (node == null || node.isNull()) return direct;
+            return node.isContainerNode() ? node.toString() : node.asText();
+        } catch (Exception e) {
+            return direct;
         }
     }
 

@@ -66,8 +66,21 @@ public final class BqFetchConfig implements Serializable {
      */
     public final List<SourceSchemaField> schema;
 
+    /**
+     * BigQuery job location of the fetch ({@code bq_settings.fetch_options.location}); null =
+     * BigQuery's default.
+     */
+    public final String location;
+
     public BqFetchConfig(String projectId, String dataset, String table, String query,
                          Map<String, String> queryParams, List<SourceSchemaField> schema) {
+        this(projectId, dataset, table, query, queryParams, schema, null);
+    }
+
+    public BqFetchConfig(String projectId, String dataset, String table, String query,
+                         Map<String, String> queryParams, List<SourceSchemaField> schema,
+                         String location) {
+        this.location    = (location != null && !location.isBlank()) ? location.trim() : null;
         this.projectId   = projectId;
         this.dataset     = dataset;
         this.table       = table;
@@ -89,8 +102,17 @@ public final class BqFetchConfig implements Serializable {
         this(projectId, dataset, table, query, Collections.emptyMap(), Collections.emptyList());
     }
 
-    /** Returns the fully qualified table reference {@code project:dataset.table}. */
+    /**
+     * Returns the fully qualified table reference {@code project:dataset.table}. A {@code table}
+     * that is already qualified ({@code project.dataset.table} or {@code project:dataset.table})
+     * is used as given; a bare name is qualified with {@link #projectId} and {@link #dataset}.
+     */
     public String tableRef() {
+        if (table != null && table.indexOf('.') >= 0) {
+            String[] parts = table.replace(':', '.').split("\\.");
+            if (parts.length == 3) return parts[0] + ":" + parts[1] + "." + parts[2];
+            if (parts.length == 2) return projectId + ":" + parts[0] + "." + parts[1];
+        }
         return projectId + ":" + dataset + "." + table;
     }
 

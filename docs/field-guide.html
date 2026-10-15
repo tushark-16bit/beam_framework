@@ -472,7 +472,7 @@ ul.plain li{margin-bottom:6px;}
         </div>
       </div>
 
-      <h3 class="sub">The four checks inside finalization, in order</h3>
+      <h3 class="sub">The checks inside finalization, in order</h3>
       <p>Each one only runs if the previous one passed — a failure short-circuits the rest and leaves
       whatever was already stored untouched.</p>
 
@@ -487,6 +487,15 @@ ul.plain li{margin-bottom:6px;}
         if absent.</p>
       </div>
       <div class="callout check">
+        <span class="lbl">Check 2b — Balance &amp; Control, <code>bnc</code> (optional)</span>
+        <p>Compares the source's own control values with the rows exactly as stored — a query's count and
+        amount, the A2/B2 cells of an Excel file's BnC sheet, a plain row count, or a status your SQL returns.
+        It runs <em>before</em> the transform, so it checks what was loaded, not what was reshaped. A mismatch —
+        or a check that cannot be evaluated — is <code>FAILED_BNC</code> with the result sentence saved in
+        <code>bal_and_cntl_smry_tx</code>; nothing is thrown, and <code>error_on_failure</code> only decides
+        whether the failure email goes out. The full rules: <code>BNC_RULES.md</code>.</p>
+      </div>
+      <div class="callout check">
         <span class="lbl">Check 3 — data_transform_query output bounds (optional)</span>
         <p>If <code>data_transform_query</code> is configured, it now always runs beneath an automatically
         prepended <code>WITH data AS (...)</code> CTE that reunifies every paginated row — the operator's SQL
@@ -495,7 +504,7 @@ ul.plain li{margin-bottom:6px;}
         replace anything already stored.</p>
       </div>
       <div class="callout check">
-        <span class="lbl">Check 4 — Balance-and-Control (BnC) sum rules (optional)</span>
+        <span class="lbl">Check 4 — fixed-total sum rules, <code>bnc_rules_json</code> (optional)</span>
         <p>From <code>bnc_rules_json</code>: each rule sums a field and compares it to an expected total within
         tolerance. Runs against the transformed rows if check 3 applied, otherwise the raw ones.</p>
       </div>
@@ -899,7 +908,8 @@ ul.plain li{margin-bottom:6px;}
             <tr><td>Row count match</td><td><code>PostDownloadFinalizeTransform</code></td><td>always-on</td><td><span class="badge fail">FAILED</span></td></tr>
             <tr><td>Min/max row bounds</td><td><code>PostDownloadFinalizeTransform</code></td><td><code>min_row_count</code>/<code>max_row_count</code></td><td><span class="badge fail">FAILED</span></td></tr>
             <tr><td>Transform output bounds</td><td><code>PostDownloadFinalizeTransform</code></td><td><code>data_transform_min/max_row_count</code></td><td><span class="badge warn">FAILED_TRANSFORM</span> (original rows untouched)</td></tr>
-            <tr><td>BnC sum rules</td><td><code>PostDownloadFinalizeTransform</code></td><td><code>bnc_rules_json</code></td><td><span class="badge warn">FAILED_BNC</span></td></tr>
+            <tr><td>Balance &amp; Control</td><td><code>PostDownloadFinalizeTransform</code> (<code>BncEvaluator</code>)</td><td><code>bnc</code> object</td><td><span class="badge warn">FAILED_BNC</span> (never thrown; an unevaluable check is a failure too)</td></tr>
+            <tr><td>Fixed-total sum rules</td><td><code>PostDownloadFinalizeTransform</code></td><td><code>bnc_rules_json</code></td><td><span class="badge warn">FAILED_BNC</span></td></tr>
             <tr><td>Required headers present</td><td><code>ValidationConfig</code> / file parsing</td><td><code>required_headers_json</code></td><td>configured validation failure path</td></tr>
             <tr><td>Declared schema type strictness</td><td><code>BigQuerySchemaUtils.toBeamSchema()</code></td><td><code>bq_schema_json</code> present</td><td>run fails immediately — a bad type name or mismatched value throws, naming the column</td></tr>
             <tr><td>Datasource availability (required)</td><td><code>ReportPipelineFactory</code></td><td><code>ReportDatasourceRef.required</code></td><td><code>IllegalStateException</code>, run aborts before staging</td></tr>

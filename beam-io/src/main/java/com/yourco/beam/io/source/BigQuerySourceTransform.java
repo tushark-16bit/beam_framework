@@ -63,6 +63,8 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
     // Nullable: when non-null, typed conversion is used; when null, generic fallback.
     // Schema is Serializable so it can be baked into a Classic Template graph.
     private final Schema schema;
+    // Nullable BigQuery job location (bq_settings.fetch_options.location); null = BigQuery's default.
+    private final String location;
 
     /** Generic fallback constructor — column names resolved via preview query in {@code expand()}. */
     public BigQuerySourceTransform(String bqTable, String bqQuery) {
@@ -76,9 +78,18 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
      * @param schema pre-fetched Beam Schema, or {@code null} to use the generic fallback
      */
     public BigQuerySourceTransform(String bqTable, String bqQuery, Schema schema) {
-        this.bqTable = bqTable;
-        this.bqQuery = bqQuery;
-        this.schema  = schema;
+        this(bqTable, bqQuery, schema, null);
+    }
+
+    /**
+     * As above, plus the BigQuery job {@code location} of the read and of the column-name preview
+     * query ({@code bq_settings.fetch_options.location}); {@code null} = BigQuery's default.
+     */
+    public BigQuerySourceTransform(String bqTable, String bqQuery, Schema schema, String location) {
+        this.bqTable  = bqTable;
+        this.bqQuery  = bqQuery;
+        this.schema   = schema;
+        this.location = (location != null && !location.isBlank()) ? location.trim() : null;
         validateOptions();
     }
 
@@ -109,9 +120,10 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
 
     private BigQueryIO.TypedRead<TableRow> buildRead() {
         if (bqQuery != null && !bqQuery.isBlank()) {
-            return BigQueryIO.readTableRows()
+            BigQueryIO.TypedRead<TableRow> read = BigQueryIO.readTableRows()
                     .fromQuery(bqQuery)
                     .usingStandardSql();
+            return location != null ? read.withQueryLocation(location) : read;
         }
         return BigQueryIO.readTableRows().from(bqTable);
     }
@@ -137,9 +149,13 @@ public final class BigQuerySourceTransform extends PTransform<PBegin, PCollectio
                 : "SELECT * FROM `" + bqTable.replace(':', '.') + "` LIMIT 1";
         try {
             BigQuery bq = BigQueryOptions.getDefaultInstance().getService();
-            TableResult result = bq.query(QueryJobConfiguration.newBuilder(previewSql)
+            QueryJobConfiguration previewConfig = QueryJobConfiguration.newBuilder(previewSql)
                     .setUseLegacySql(false)
-                    .build());
+                    .build();
+            TableResult result = location != null
+                    ? bq.query(previewConfig, com.google.cloud.bigquery.JobId.newBuilder()
+                            .setLocation(location).build())
+                    : bq.query(previewConfig);
 
             Schema.Builder builder = Schema.builder();
             result.getSchema().getFields().forEach(f -> builder.addNullableStringField(f.getName()));

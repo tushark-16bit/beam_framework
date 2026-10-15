@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringReader;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -192,6 +193,72 @@ public final class FileSourceAdapter {
             return new FileParseResult(jsonRows, legendJson);
         } catch (IOException e) {
             throw new FileSourceException("Failed to parse Excel file", e);
+        }
+    }
+
+    /**
+     * The Balance &amp; Control control values of an Excel file: the sheet <em>after</em> the data
+     * sheet, row 2 — cell A2 = the source row count, cell B2 = the source amount (see
+     * {@code BNC_RULES.md}, "Excel BnC Sheet"). The sheet position is not separately
+     * configurable: the data sheet is {@link FileSourceConfig#sheetIndex}, the BnC sheet is
+     * {@code sheetIndex + 1}.
+     */
+    public record BncSheet(BigDecimal count, BigDecimal amount) {}
+
+    /**
+     * Reads {@link BncSheet} control values from an xlsx workbook. Formulas (a typical {@code B2}
+     * is {@code =SUM(...)}) are evaluated; if evaluation fails the cached result is used. Strict, as
+     * the legacy framework was: a missing sheet/row/cell, a blank cell, or text that is not a plain
+     * number (e.g. {@code "1,234"}) is an error, never a silent 0.
+     *
+     * @param bncSheetIndex 0-based index of the BnC sheet ({@code sheetIndex + 1})
+     * @throws FileSourceException when the control values cannot be read
+     */
+    public static BncSheet readBncSheet(byte[] fileBytes, int bncSheetIndex) {
+        try (Workbook workbook = new XSSFWorkbook(new ByteArrayInputStream(fileBytes))) {
+            if (bncSheetIndex >= workbook.getNumberOfSheets()) {
+                throw new FileSourceException("BnC sheet (sheet " + (bncSheetIndex + 1)
+                    + ") does not exist — the workbook has " + workbook.getNumberOfSheets()
+                    + " sheet(s)", null);
+            }
+            Sheet sheet = workbook.getSheetAt(bncSheetIndex);
+            Row row = sheet.getRow(1);
+            if (row == null) {
+                throw new FileSourceException("BnC sheet '" + sheet.getSheetName() + "' has no row 2", null);
+            }
+            org.apache.poi.ss.usermodel.FormulaEvaluator evaluator =
+                workbook.getCreationHelper().createFormulaEvaluator();
+            BigDecimal count  = bncCell(row, 0, "A2", evaluator);
+            BigDecimal amount = bncCell(row, 1, "B2", evaluator);
+            return new BncSheet(count, amount);
+        } catch (IOException e) {
+            throw new FileSourceException("Failed to read the BnC sheet of the Excel file", e);
+        }
+    }
+
+    private static BigDecimal bncCell(Row row, int col, String ref,
+                                      org.apache.poi.ss.usermodel.FormulaEvaluator evaluator) {
+        Cell cell = row.getCell(col);
+        if (cell == null || cell.getCellType() == CellType.BLANK) {
+            throw new FileSourceException("BnC cell " + ref + " is blank", null);
+        }
+        CellType type = cell.getCellType();
+        if (type == CellType.FORMULA) {
+            try {
+                type = evaluator.evaluateFormulaCell(cell);
+            } catch (RuntimeException e) {
+                type = cell.getCachedFormulaResultType();   // fall back to the cached result
+            }
+        }
+        try {
+            return switch (type) {
+                case NUMERIC -> BigDecimal.valueOf(cell.getNumericCellValue());
+                case STRING  -> new BigDecimal(cell.getStringCellValue().trim());
+                default -> throw new FileSourceException(
+                    "BnC cell " + ref + " is not a number (" + type + ")", null);
+            };
+        } catch (NumberFormatException e) {
+            throw new FileSourceException("BnC cell " + ref + " is not a valid number", e);
         }
     }
 

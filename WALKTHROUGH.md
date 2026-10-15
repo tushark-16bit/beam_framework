@@ -133,9 +133,9 @@ sequenceDiagram
         alt pipeline DONE or UPDATED
             DSF->>DaRec: COUNT(*) WHERE da_id = X
             DaRec-->>DSF: rowCount
-            DSF->>DaRec: SUM(JSON_VALUE(row_da_json_tx, @field)) WHERE da_id = X (BnC)
-            DaRec-->>DSF: actual sum
-            DSF->>DSF: ValidationConfig checks (min/max rows, BnC tolerance%)
+            DSF->>DaRec: COUNT(*) + SUM(SAFE_CAST(JSON_VALUE(row_json, dest_column) AS NUMERIC)) WHERE da_id = X (bnc)
+            DaRec-->>DSF: stored count + amount
+            DSF->>DSF: ValidationConfig checks (min/max rows) + bnc (BncEvaluator, against the rows as stored — before any transform) + bnc_rules_json
             alt all checks pass
                 DSF->>Checkpoint: updateStatus(da_id, COMPLETED, bncJson)
             else validation failed
@@ -184,8 +184,8 @@ flowchart TD
     end
 
     subgraph "Still inside the Beam worker (PostDownloadFinalizeTransform — main() has already returned; nothing in the driver JVM is waiting)"
-        RecTab --> I["DataSourceRecordAdapter\n.countRecords(da_id)\n.sumField(da_id, field)"]
-        I --> J["ValidationConfig\nmin/max row count\nBnC JSON_VALUE SUM checks"]
+        RecTab --> I["DataSourceRecordAdapter\n.countRecords(da_id)\n.countAndSum(da_id, dest_column)\n.sumField(da_id, field)"]
+        I --> J["ValidationConfig\nmin/max row count\nbnc: BncEvaluator (BNC_RULES.md)\nbnc_rules_json SUM checks"]
         J --> K[("DaRefer\nCOMPLETED / FAILED_BNC / FAILED\n+ bal_and_cntl_smry_tx JSON")]
     end
 ```
@@ -717,8 +717,13 @@ erDiagram
 
 `bal_and_cntl_smry_tx` (BnC summary JSON, DATA_SOURCE_DOWNLOAD only):
 ```json
-{ "status": "Matched", "srcCount": 1000, "srcAmount": 5000000.00, "dstCount": 1000, "dstAmount": 5000000.00 }
+{ "pipelineRowCount": 1000, "storedRowCount": 1000,
+  "bnc": { "type": "SOURCE_QUERY", "outcome": "PASS", "sourceCount": "1000", "sourceAmount": "5000000.40",
+           "destinationCount": "1000", "destinationAmount": "4999999.60",
+           "text": "Status: Matched, Source Count: 1000, Source Amount: 5000000.40, Destination Count: 1000, Destination Amount: 4999999.60 (Amt variance allowed +/- 1)" },
+  "text": "Status: Matched, Source Count: 1000, …", "status": "Matched" }
 ```
+`bnc` and `text` appear only when the source configures a `bnc` check (see [`BNC_RULES.md`](BNC_RULES.md)); a failed check has `"status": "Not Matched"` and the failure text in `failures`.
 
 **RptRefer** — `sta_cd` values: `LOADING` | `COMPLETED` | `FAILED`. Written and updated by `REPORT_PROCESSING` only.
 

@@ -6,6 +6,7 @@ import com.yourco.beam.io.checkpoint.BigQueryDataSourceCheckpointAdapter;
 import com.yourco.beam.io.sink.DataSourceRecordSinkTransform;
 import com.yourco.beam.io.source.SourceRouter;
 import com.yourco.beam.model.BqFetchConfig;
+import com.yourco.beam.model.BncConfig;
 import com.yourco.beam.model.DateParamConfig;
 import com.yourco.beam.model.RunDates;
 import com.yourco.beam.model.SourceConfig;
@@ -261,7 +262,8 @@ public final class DataSourcePipelineFactory {
             PCollection<Long> writtenCount = transformed.apply(
                 "RecordSink-" + config.datasourceName,
                 new DataSourceRecordSinkTransform(options,
-                    ValueProvider.StaticValueProvider.of(dsId)));
+                    ValueProvider.StaticValueProvider.of(dsId),
+                    config.bqSettings.storage.pageSize));
 
             // Finalize: row/BnC validation, optional data_transform_query, checkpoint update,
             // manualOverrun cleanup, and failure email — all in the worker. Its output is a
@@ -271,7 +273,8 @@ public final class DataSourcePipelineFactory {
             PCollection<Long> finalizeSignal = writtenCount.apply(
                 "Finalize-" + config.datasourceName,
                 new PostDownloadFinalizeTransform(
-                    dsId, config, daReferTableRef, daRecTableRef, previousDaId));
+                    dsId, resolved, daReferTableRef, daRecTableRef, previousDaId,
+                    dates.runDateIso()));
             finalizeSignals.add(finalizeSignal);
         }
 
@@ -290,23 +293,41 @@ public final class DataSourcePipelineFactory {
      */
     private static SourceConfig resolveQueryTokens(SourceConfig config, FrameworkOptions options,
                                                    RunDates dates) {
-        if (config.sourceType != SourceType.BQ
-                || config.bqFetchConfig == null
-                || !config.bqFetchConfig.hasQuery()) {
-            return config;
+        SourceConfig.Builder builder = config.toBuilder();
+        boolean changed = false;
+
+        if (config.sourceType == SourceType.BQ
+                && config.bqFetchConfig != null
+                && config.bqFetchConfig.hasQuery()) {
+            BqFetchConfig bq = config.bqFetchConfig;
+            String resolvedQuery = QueryParameterResolver.resolve(
+                bq.query, bq.queryParams, options, dates, config.dateParams, DateParamConfig.SOURCE_QUERY);
+            // Driver JVM, so this reaches the launcher log (worker logs are not visible to operators).
+            LOG.info("Resolved BQ query for source '{}' (period={}):\n{}",
+                config.datasourceName, dates.periodId, resolvedQuery);
+            builder.bqFetchConfig(new BqFetchConfig(
+                bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema, bq.location));
+            changed = true;
         }
-        BqFetchConfig bq = config.bqFetchConfig;
-        String resolvedQuery = QueryParameterResolver.resolve(
-            bq.query, bq.queryParams, options, dates, config.dateParams, DateParamConfig.SOURCE_QUERY);
-        // Driver JVM, so this reaches the launcher log (worker logs are not visible to operators).
-        LOG.info("Resolved BQ query for source '{}' (period={}):\n{}",
-            config.datasourceName, dates.periodId, resolvedQuery);
-        BqFetchConfig resolvedBq = new BqFetchConfig(
-            bq.projectId, bq.dataset, bq.table, resolvedQuery, bq.queryParams, bq.schema);
-        // toBuilder() copies every existing field first, so swapping in the token-resolved
-        // bqFetchConfig here can never silently drop a field the way manually re-listing every
-        // field in a fresh SourceConfig.builder() call can (it once did, for runScheduleConfig).
-        return config.toBuilder().bqFetchConfig(resolvedBq).build();
+
+        // The BnC source query takes the same tokens (standard, date_params, custom) as the data
+        // query — this replaces the legacy paramReplace[] (BNC_RULES.md, decision B5). It is
+        // resolved here, in the driver JVM, because the finalize step runs on a worker.
+        BncConfig bnc = config.bncConfig;
+        if (bnc.isActive() && bnc.sourceQuery != null) {
+            Map<String, String> params = config.bqFetchConfig != null
+                ? config.bqFetchConfig.queryParams : config.queryConfig.paramMappings;
+            String resolvedBnc = QueryParameterResolver.resolve(
+                bnc.sourceQuery, params, options, dates, config.dateParams, DateParamConfig.BNC_QUERY);
+            LOG.info("Resolved BnC source query for source '{}' (period={}):\n{}",
+                config.datasourceName, dates.periodId, resolvedBnc);
+            builder.bncConfig(bnc.withSourceQuery(resolvedBnc));
+            changed = true;
+        }
+        // toBuilder() copies every existing field first, so swapping in the token-resolved queries
+        // here can never silently drop a field the way manually re-listing every field in a fresh
+        // SourceConfig.builder() call can (it once did, for runScheduleConfig).
+        return changed ? builder.build() : config;
     }
 
     /**
