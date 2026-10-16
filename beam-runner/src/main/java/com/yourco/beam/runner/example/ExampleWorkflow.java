@@ -1,8 +1,8 @@
 package com.yourco.beam.runner.example;
 
+import com.yourco.beam.io.bq.BigQueryJobService;
 import com.yourco.beam.io.params.BigQueryParameterAdapter;
 import com.yourco.beam.io.params.BigQueryParameterAdapterImpl;
-import com.yourco.beam.io.report.BigQueryJobService;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.slf4j.Logger;

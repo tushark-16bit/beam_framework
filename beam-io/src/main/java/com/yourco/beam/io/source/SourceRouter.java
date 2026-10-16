@@ -1,8 +1,11 @@
 package com.yourco.beam.io.source;
 
-import com.yourco.beam.model.BqFetchConfig;
-import com.yourco.beam.model.PipelineRunConfig;
-import com.yourco.beam.model.SourceConfig;
+import com.yourco.beam.io.source.api.ApiSourceTransform;
+import com.yourco.beam.io.source.bq.BigQuerySourceTransform;
+import com.yourco.beam.io.source.file.FileSourceTransform;
+import com.yourco.beam.model.bq.BqFetchConfig;
+import com.yourco.beam.model.pipeline.PipelineRunConfig;
+import com.yourco.beam.model.source.SourceConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.schemas.Schema;

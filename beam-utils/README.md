@@ -5,6 +5,19 @@ Contains no Beam pipeline graph code — no `PTransform`, no `DoFn`.
 
 ---
 
+## Package layout
+
+| Package | Classes |
+|---|---|
+| `utils.bq` | `BigQuerySchemaUtils` |
+| `utils.date` | `DateUtils`, `RunDateCalculator`, `BusinessCalendar`, `BusinessCalendarProvider`, `BigQueryBusinessCalendarProvider`, `CalendarUtils` |
+| `utils.query` | `QueryParameterResolver`, `JsonRowFlattener` |
+| `utils.validation` | `BncEvaluator`, `RowValidationUtils` |
+| `utils.gcp` | `GcsUtils`, `SecretManagerUtils` |
+| `utils.metrics` | `MetricsUtils` |
+
+Tests live in the same package as the class they test (several exercise package-private helpers).
+
 ## Utilities
 
 | Class | Purpose |

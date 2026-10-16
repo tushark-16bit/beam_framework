@@ -5,18 +5,45 @@ Also contains the `DeadLetterSinkTransform` for writing failed records.
 
 ---
 
+## Package layout
+
+Grouped by what a class is *for*, then by connector type — add a new class to the group it belongs
+to, not to a package root:
+
+| Package | What it holds |
+|---|---|
+| `io.source` | `SourceRouter` (source type → connector), plus the GCS and Pub/Sub readers |
+| `io.source.bq` | BigQuery reader (`BigQuerySourceTransform`) |
+| `io.source.file` | CSV/Excel reader (`FileSourceAdapter`, `FileSourceTransform`) and the Excel BnC-sheet reader (`FileBncSheetReader`) |
+| `io.source.api` | REST API reader (`ApiSourceAdapter`, `ApiSourceTransform`) |
+| `io.sink` | `SinkRouter` and the GCS / Pub/Sub / dead-letter writers |
+| `io.sink.bq` | BigQuery writers: `BigQuerySinkTransform` and `DataSourceRecordSinkTransform` (DaRec pages) |
+| `io.bq` | `BigQueryJobService` — BigQuery jobs (query→table, export, count, last row) |
+| `io.checkpoint` | DaRefer / RptRefer / RptDaMap / RptStageDa / RptOutput adapters |
+| `io.records` | DaRec reads for validation (`countRecords`, `countAndSum`, …) |
+| `io.config` | `parameter_store` repositories (source configs, report configs) |
+| `io.params` | key/value parameter adapter |
+| `io.email` | email contracts (`EmailSendUtility`, `ReportEmailAdapter`) |
+| `io.util` | `FileHeaderLegend`, `JsonUtils` |
+
 ## What lives here
 
 ```
 io/source/
     SourceRouter              — two modes: routeByOptions (REPORT_PROCESSING) + routeFromConfig (DATA_SOURCE_DOWNLOAD); overload with nullable Schema param passes pre-fetched schema to BigQuerySourceTransform. routeFromConfig takes the source's resolved RunDates.runDate from beam-runner (beam-io can't call RunDateCalculator itself); FILE {periodId} comes from SourceConfig.periodId, already set to RunDates.periodId
+    GcsSourceTransform        — reads newline-delimited JSON from GCS glob
+    PubSubSourceTransform     — reads from a Pub/Sub subscription (streaming)
+
+io/source/bq/
     BigQuerySourceTransform   — optional BQ job location (bq_settings.fetch_options.location) for the read and the preview query. Reads from BQ table or SQL query; typed mode uses a pre-fetched Schema (passed from beam-runner) with a custom TableRow→Row mapping; generic fallback when schema is null
                                 resolves real column names via a SELECT * LIMIT 1 preview query (no tables.get needed), all-STRING;
                                 falls back further to Schemas.RAW_JSON blob if even that query fails
-    GcsSourceTransform        — reads newline-delimited JSON from GCS glob
-    PubSubSourceTransform     — reads from a Pub/Sub subscription (streaming)
+
+io/source/api/
     ApiSourceAdapter          — pure HTTP adapter: auth, pagination (PAGE_NUMBER/CURSOR/OFFSET)
     ApiSourceTransform        — Beam wrapper for ApiSourceAdapter (@Setup/@Teardown for HttpClient)
+
+io/source/file/
     FileBncSheetReader        — downloads a FILE source's workbook from GCS and reads its Balance & Control sheet
                                 (used by PostDownloadFinalizeTransform on a worker; EXCEL only)
     FileSourceAdapter         — readBncSheet(bytes, bncSheetIndex) → BncSheet(count, amount): the sheet after the data
@@ -46,14 +73,30 @@ io/source/
                                 Row per data row, then (if present) one extra Row carrying the marker-wrapped
                                 header-legend JSON — both under the same Schemas.RAW_JSON schema.
                                 DataSourceRecordSinkTransform detects and unwraps the legend and handles it
-                                specially (see io/sink/).
+                                specially (see io/sink/bq/).
 
 io/sink/
     SinkRouter                — factory: picks the right sink from --sinkType
-    BigQuerySinkTransform     — writes to a BQ table (TRUNCATE or APPEND)
     GcsSinkTransform          — writes as newline-delimited JSON to GCS
     PubSubSinkTransform       — publishes each Row as a JSON message
     DeadLetterSinkTransform   — writes FailedRecords as JSON lines to GCS
+
+io/sink/bq/
+    BigQuerySinkTransform     — writes to a BQ table (TRUNCATE or APPEND)
+    DataSourceRecordSinkTransform   — page size = bq_settings.storage_options.page_size (default 250; the data_transform_query replace re-cuts at the same size). Collects ALL source rows, paginates at 250 rows/page, writes one
+                                      DaRec row per page with row_da_json_tx = JSON array of that page.
+                                      Uses streaming inserts (rows immediately queryable).
+                                      Returns PCollection<Long> = total source rows (not page count),
+                                      held until all inserts complete, for PostDownloadFinalizeTransform
+                                      to Wait.on(). DaRec schema gains a page_no INT64 column.
+                                      PaginateAndBuildDoFn detects a FILE-source header-legend element
+                                      (marker-wrapped via FileHeaderLegend.wrapLegend) among the incoming
+                                      rows, unwraps it, excludes it from totalRows and page-size accounting,
+                                      and builds each page for that source as
+                                      {"Data":[...rows...],"DataHeaders":[legend]} instead of a flat array —
+                                      appending a copy of the legend to EVERY page so each is independently
+                                      self-describing. Headerless FILE pages, and all BQ/API pages, keep the
+                                      original flat [{...},{...},...] shape.
 
 io/checkpoint/
     DataSourceCheckpointAdapter         — interface: createCheckpoint(), updateStatus(), isCompleted(), getLatest(), fetchLatestCompletedDaId(). perId is int.
@@ -102,22 +145,6 @@ io/records/
                                       statements could leave a partial delete, or a successful delete with a
                                       failed insert and nothing to restore the originals.
                                       Has a String-tableRef constructor for in-worker use (DoFn @Setup).
-
-io/sink/
-    DataSourceRecordSinkTransform   — page size = bq_settings.storage_options.page_size (default 250; the data_transform_query replace re-cuts at the same size). Collects ALL source rows, paginates at 250 rows/page, writes one
-                                      DaRec row per page with row_da_json_tx = JSON array of that page.
-                                      Uses streaming inserts (rows immediately queryable).
-                                      Returns PCollection<Long> = total source rows (not page count),
-                                      held until all inserts complete, for PostDownloadFinalizeTransform
-                                      to Wait.on(). DaRec schema gains a page_no INT64 column.
-                                      PaginateAndBuildDoFn detects a FILE-source header-legend element
-                                      (marker-wrapped via FileHeaderLegend.wrapLegend) among the incoming
-                                      rows, unwraps it, excludes it from totalRows and page-size accounting,
-                                      and builds each page for that source as
-                                      {"Data":[...rows...],"DataHeaders":[legend]} instead of a flat array —
-                                      appending a copy of the legend to EVERY page so each is independently
-                                      self-describing. Headerless FILE pages, and all BQ/API pages, keep the
-                                      original flat [{...},{...},...] shape.
 
 io/util/
     JsonUtils                 — shared type-aware Row → JSON serializer
@@ -183,7 +210,7 @@ io/email/
                                 sending is skipped with a warning if none is configured. EmailParams and (a differently-shaped) EmailAttachment live in beam-core's
                                 model/ package, not here.
 
-io/report/
+io/bq/
     BigQueryJobService        — queryLastRow(sql, location) → ResultRow (names + values of the LAST row, optional BQ job location; the BnC source query). BQ jobs: query→table, table→GCS export (CSV/JSON), countRows(tableRef), queryStrings(sql) (first column of a small result as text — used to list the JSON keys of staged data)
                                 (exact live SELECT COUNT(*), not table-metadata based), dropTableIfExists()
                                 (best-effort cleanup). No-arg constructor holds only a plain BigQuery client
@@ -374,11 +401,16 @@ Used by `GcsSinkTransform` and `PubSubSinkTransform`. Import it in your own sink
 directly, the same scenarios that were previously hand-verified with throwaway scripts:
 
 ```
-io/source/FileSourceAdapterTest.java   — columnLetter/columnIndexFromLetter round-trip at known
+io/source/file/FileSourceAdapterTest.java — columnLetter/columnIndexFromLetter round-trip at known
                                           Excel boundaries (Z→AA, AZ→BA, ZZ→AAA); parseCsv: data
                                           wider than header keeps every column, file_first_row
                                           skip (with and without a header), file_last_column
                                           truncation, empty-file edge case.
+io/source/file/BncSheetReaderTest.java —   the Excel BnC sheet: formula amount, text numbers, "1,234" parse
+                                          error, blank cell, missing sheet / row 2 (workbooks written as raw OOXML).
+io/config/SourceConfigStructureTest.java — query_details / file_details (exactly one populated), bq_settings,
+                                          bnc, legacy flat keys as a per-field fallback, schema_of_json lookup.
+io/records/DaRecColumnResolutionTest.java — BnC destination column matching (row keys; FILE header name then letter).
 io/util/FileHeaderLegendTest.java      — wrapLegend/unwrapLegend round-trip, isMarkerWrapped
                                           true/false, buildPage's exact {"Data":...,"DataHeaders":...}
                                           shape, dataArrayExpr's SQL fragment text.

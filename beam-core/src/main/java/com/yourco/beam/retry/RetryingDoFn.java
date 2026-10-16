@@ -1,6 +1,6 @@
 package com.yourco.beam.retry;
 
-import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.pipeline.FailedRecord;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.Row;

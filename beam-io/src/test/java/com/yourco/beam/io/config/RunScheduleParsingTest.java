@@ -2,7 +2,7 @@ package com.yourco.beam.io.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourco.beam.model.RunScheduleConfig;
+import com.yourco.beam.model.schedule.RunScheduleConfig;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

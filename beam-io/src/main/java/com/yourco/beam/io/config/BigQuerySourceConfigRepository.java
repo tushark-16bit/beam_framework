@@ -10,23 +10,23 @@ import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
-import com.yourco.beam.model.AggregationConfig;
-import com.yourco.beam.model.ApiSourceConfig;
-import com.yourco.beam.model.BncConfig;
-import com.yourco.beam.model.BncRule;
-import com.yourco.beam.model.BqSettings;
-import com.yourco.beam.model.BqFetchConfig;
-import com.yourco.beam.model.DataTransformConfig;
-import com.yourco.beam.model.DateParamConfig;
-import com.yourco.beam.model.FileSourceConfig;
-import com.yourco.beam.model.LookupConfig;
-import com.yourco.beam.model.QueryConfig;
-import com.yourco.beam.model.RunScheduleConfig;
-import com.yourco.beam.model.SourceConfig;
-import com.yourco.beam.model.SourceFailureEmailConfig;
-import com.yourco.beam.model.SourceSchemaField;
-import com.yourco.beam.model.SourceTransformConfig;
-import com.yourco.beam.model.ValidationConfig;
+import com.yourco.beam.model.api.ApiSourceConfig;
+import com.yourco.beam.model.bq.BqFetchConfig;
+import com.yourco.beam.model.bq.BqSettings;
+import com.yourco.beam.model.bq.SourceSchemaField;
+import com.yourco.beam.model.datatransform.AggregationConfig;
+import com.yourco.beam.model.datatransform.DataTransformConfig;
+import com.yourco.beam.model.datatransform.LookupConfig;
+import com.yourco.beam.model.datatransform.SourceTransformConfig;
+import com.yourco.beam.model.email.SourceFailureEmailConfig;
+import com.yourco.beam.model.file.FileSourceConfig;
+import com.yourco.beam.model.query.DateParamConfig;
+import com.yourco.beam.model.query.QueryConfig;
+import com.yourco.beam.model.schedule.RunScheduleConfig;
+import com.yourco.beam.model.source.SourceConfig;
+import com.yourco.beam.model.validation.BncConfig;
+import com.yourco.beam.model.validation.BncRule;
+import com.yourco.beam.model.validation.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.SourceType;
 import org.slf4j.Logger;
@@ -116,7 +116,7 @@ import java.util.Map;
  * present, {@code DataSourcePipelineFactory.fetchBqSchema()} uses it directly instead of
  * calling {@code BigQuerySchemaUtils.fetchBeamSchema()} — no {@code bigquery.tables.get}
  * permission is needed, and the fetched rows are converted strictly against the declared
- * types (see {@link com.yourco.beam.model.SourceSchemaField}). {@code type} must be one of
+ * types (see {@link com.yourco.beam.model.bq.SourceSchemaField}). {@code type} must be one of
  * the real BigQuery SQL type names: {@code STRING}, {@code INT64}, {@code FLOAT64},
  * {@code BOOLEAN}, {@code BYTES}, {@code DATE}, {@code DATETIME}, {@code TIME},
  * {@code TIMESTAMP}, {@code NUMERIC}, {@code BIGNUMERIC}. When absent, schema resolution
@@ -127,7 +127,7 @@ import java.util.Map;
  * <p>Real BigQuery Standard SQL, run by {@code PostDownloadFinalizeTransform} after this run's
  * rows are written to {@code DaRec} and the row-count/BnC storage-integrity checks pass, but
  * before the checkpoint is marked {@code COMPLETED} — see
- * {@link com.yourco.beam.model.DataTransformConfig}. A {@code WITH data AS (...)} CTE reunifying
+ * {@link com.yourco.beam.model.datatransform.DataTransformConfig}. A {@code WITH data AS (...)} CTE reunifying
  * every paginated {@code DaRec} page for this run into one flat rowset of JSON row strings is
  * always prepended before this query runs — unconditionally, not contingent on the query text
  * referencing any placeholder — so pagination is invisible to the query and unnesting can never
@@ -140,7 +140,7 @@ import java.util.Map;
  * <p>A single nested JSON object (unlike this framework's other {@code *_json} keys, which hold
  * arrays or flat maps) carrying {@code frequency}/{@code freqRunDay}/
  * {@code maxFreqRunDay}/{@code dayLag}/{@code dateType}/{@code calendarKey} — see
- * {@link com.yourco.beam.model.RunScheduleConfig} for what each means. This repository only
+ * {@link com.yourco.beam.model.schedule.RunScheduleConfig} for what each means. This repository only
  * retrieves the values; the Finance Automation scheduling rules that interpret them are in
  * {@code RunDateCalculator} (beam-utils).
  *

@@ -1,6 +1,7 @@
 package com.yourco.beam.io.sink;
 
-import com.yourco.beam.model.PipelineRunConfig;
+import com.yourco.beam.io.sink.bq.BigQuerySinkTransform;
+import com.yourco.beam.model.pipeline.PipelineRunConfig;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 

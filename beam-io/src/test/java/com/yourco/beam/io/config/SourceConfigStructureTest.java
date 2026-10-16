@@ -1,7 +1,7 @@
 package com.yourco.beam.io.config;
 
-import com.yourco.beam.model.BncConfig;
-import com.yourco.beam.model.SourceConfig;
+import com.yourco.beam.model.source.SourceConfig;
+import com.yourco.beam.model.validation.BncConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.junit.jupiter.api.Test;

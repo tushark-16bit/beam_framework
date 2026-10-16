@@ -35,7 +35,7 @@ import org.apache.beam.sdk.options.Validation;
  * </ul>
  *
  * <p>Source, transform chain, sink, retry/DLQ, calendar, and email configuration are loaded
- * per-datasource from {@code parameter_store} via {@link com.yourco.beam.model.PipelineRunConfig}.
+ * per-datasource from {@code parameter_store} via {@link com.yourco.beam.model.pipeline.PipelineRunConfig}.
  */
 public interface FrameworkOptions extends DataflowPipelineOptions {
 

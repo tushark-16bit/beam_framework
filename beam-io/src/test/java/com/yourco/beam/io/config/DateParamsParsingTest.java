@@ -1,7 +1,7 @@
 package com.yourco.beam.io.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourco.beam.model.DateParamConfig;
+import com.yourco.beam.model.query.DateParamConfig;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

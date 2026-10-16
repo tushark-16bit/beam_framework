@@ -6,7 +6,7 @@ import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
 import com.yourco.beam.io.util.FileHeaderLegend;
-import com.yourco.beam.model.ReportCheckpoint;
+import com.yourco.beam.model.checkpoint.ReportCheckpoint;
 import com.yourco.beam.options.FrameworkOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

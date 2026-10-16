@@ -5,7 +5,7 @@ import java.math.BigDecimal;
 /**
  * Queries the {@code DaRec} record table for post-pipeline validation.
  *
- * <p>Used by {@link com.yourco.beam.runner.DataSourcePipelineFactory} after
+ * <p>Used by {@link com.yourco.beam.runner.datasource.DataSourcePipelineFactory} after
  * {@code pipeline.run()} to perform row-count and Balance &amp; Control (BnC) checks
  * against rows written to DaRec for a given run.
  *

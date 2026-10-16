@@ -1,6 +1,6 @@
 package com.yourco.beam.io.config;
 
-import com.yourco.beam.model.ReportDatasourceRef;
+import com.yourco.beam.model.report.ReportDatasourceRef;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

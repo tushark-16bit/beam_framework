@@ -579,12 +579,12 @@ column, as JSON.
 
 | Piece | Class |
 |---|---|
-| config model (`bnc` object) | `beam-core/.../model/BncConfig.java` |
-| default BigQuery settings (`bq_settings`: `fetch_options`, `storage_options`) | `beam-core/.../model/BqSettings.java` |
+| config model (`bnc` object) | `beam-core/.../model/validation/BncConfig.java` |
+| default BigQuery settings (`bq_settings`: `fetch_options`, `storage_options`) | `beam-core/.../model/bq/BqSettings.java` |
 | pure comparison logic (all of K and the F matrix) | `beam-utils/.../BncEvaluator.java` (tests: `BncEvaluatorTest`, covering regression rows 1, 4, 5 and the boundaries of 2, 3; rows 6–8 are config-level and covered by `SourceConfigStructureTest`) |
 | count + sum over stored rows, destination-column resolution | `beam-io/.../records/BigQueryDataSourceRecordAdapter.java` (`countAndSum`, `resolveColumnKey`) |
-| source query: last row, location | `beam-io/.../report/BigQueryJobService.java` (`queryLastRow`) |
-| Excel BnC sheet cells | `beam-io/.../source/FileSourceAdapter.java` (`readBncSheet`), `FileBncSheetReader.java` |
+| source query: last row, location | `beam-io/.../bq/BigQueryJobService.java` (`queryLastRow`) |
+| Excel BnC sheet cells | `beam-io/.../source/file/FileSourceAdapter.java` (`readBncSheet`), `FileBncSheetReader.java` |
 | token resolution of `source_query` | `beam-runner/.../DataSourcePipelineFactory.java` (`resolveQueryTokens`) |
 | orchestration, persistence, notification | `beam-runner/.../PostDownloadFinalizeTransform.java` (`evaluateBnc`) |
 

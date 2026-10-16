@@ -35,11 +35,15 @@ behind how the framework is built — open it directly in a browser.
 
 ```
 beam-pipeline-framework/
-├── beam-core/        Pure contracts — options, transform SPI, retry, models
-├── beam-io/          Source/sink connectors — BQ, GCS, Pub/Sub, DLQ
-├── beam-utils/       Shared utilities — schema, calendar, date, secrets, metrics
+├── beam-core/        Pure contracts — options, transform SPI, retry, models (model.bq/file/api/query/source/
+│                     datatransform/validation/schedule/checkpoint/report/email/pipeline)
+├── beam-io/          Source/sink connectors — BQ, GCS, Pub/Sub, DLQ (io.source.bq/file/api, io.sink.bq, io.bq, …)
+├── beam-utils/       Shared utilities — utils.bq/date/query/validation/gcp/metrics
 ├── beam-transforms/  Built-in transform library + extension point
-└── beam-runner/      Entry point — wires everything, produces fat JAR
+└── beam-runner/      Entry point — Main + runner.datasource/report/pipeline/notification; produces fat JAR
+
+Classes are grouped by what they are *for*, inside each module — a new class goes in the functional package
+it belongs to, never in a package root. The full class-by-class map is in `CLAUDE.md` §4.
 ```
 
 Dependency direction (one-way only):
@@ -203,7 +207,7 @@ See `beam-transforms/README.md` for a complete step-by-step example with code.
 The calendar utilities in `beam-utils` are stubs — implement them for your environment:
 
 ```java
-// beam-utils/src/main/java/com/yourco/beam/utils/CalendarUtils.java
+// beam-utils/src/main/java/com/yourco/beam/utils/date/CalendarUtils.java
 public static boolean isBusinessDay(LocalDate date, String calendarName) {
     // TODO: integrate with your holiday service / BQ holiday table
     throw new UnsupportedOperationException("Not yet implemented");

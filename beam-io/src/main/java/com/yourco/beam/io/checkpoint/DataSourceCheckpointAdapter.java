@@ -1,6 +1,6 @@
 package com.yourco.beam.io.checkpoint;
 
-import com.yourco.beam.model.DataSourceCheckpoint;
+import com.yourco.beam.model.checkpoint.DataSourceCheckpoint;
 
 import java.util.Optional;
 

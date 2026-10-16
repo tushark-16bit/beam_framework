@@ -1,6 +1,6 @@
 package com.yourco.beam.io.source;
 
-import com.yourco.beam.model.Schemas;
+import com.yourco.beam.model.pipeline.Schemas;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;

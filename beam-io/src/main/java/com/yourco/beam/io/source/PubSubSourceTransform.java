@@ -1,6 +1,6 @@
 package com.yourco.beam.io.source;
 
-import com.yourco.beam.model.Schemas;
+import com.yourco.beam.model.pipeline.Schemas;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.transforms.MapElements;

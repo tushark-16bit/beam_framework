@@ -1,7 +1,7 @@
 package com.yourco.beam.transform;
 
-import com.yourco.beam.model.FailedRecord;
-import com.yourco.beam.model.PipelineRunConfig;
+import com.yourco.beam.model.pipeline.FailedRecord;
+import com.yourco.beam.model.pipeline.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PCollection;
@@ -20,7 +20,7 @@ import java.io.Serializable;
  *   <li>{@link #SUCCESS_TAG} — rows that were processed successfully</li>
  *   <li>{@link #DEAD_LETTER_TAG} — rows that failed after all retries</li>
  * </ul>
- * {@link com.yourco.beam.runner.PipelineFactory} collects all dead-letter
+ * {@link com.yourco.beam.runner.pipeline.PipelineFactory} collects all dead-letter
  * outputs, flattens them, and routes them to the configured DLQ sink.
  *
  * <h2>Serialization rules (MUST follow)</h2>
@@ -46,7 +46,7 @@ public interface BeamTransform extends Serializable {
 
     /**
      * Shared output tag for rows that could not be processed.
-     * Collected by {@link com.yourco.beam.runner.PipelineFactory} and written to the DLQ sink.
+     * Collected by {@link com.yourco.beam.runner.pipeline.PipelineFactory} and written to the DLQ sink.
      */
     TupleTag<FailedRecord> DEAD_LETTER_TAG = new TupleTag<FailedRecord>("dead-letter") {};
 

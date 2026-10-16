@@ -1,7 +1,7 @@
 package com.yourco.beam.transforms;
 
-import com.yourco.beam.model.FailedRecord;
-import com.yourco.beam.model.PipelineRunConfig;
+import com.yourco.beam.model.pipeline.FailedRecord;
+import com.yourco.beam.model.pipeline.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.transform.BeamTransform;
 import org.apache.beam.sdk.metrics.Counter;

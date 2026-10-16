@@ -876,30 +876,30 @@ Where to find things in the source tree:
 |---|---|
 | All CLI flags | [`beam-core/.../options/FrameworkOptions.java`](beam-core/src/main/java/com/yourco/beam/options/FrameworkOptions.java) |
 | Entry point | [`beam-runner/.../runner/Main.java`](beam-runner/src/main/java/com/yourco/beam/runner/Main.java) |
-| DATA_SOURCE_DOWNLOAD orchestration | [`beam-runner/.../runner/DataSourcePipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourcePipelineFactory.java) |
-| REPORT_PROCESSING orchestration | [`beam-runner/.../runner/ReportPipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/ReportPipelineFactory.java) |
-| PIPELINE orchestration (batches DATA_SOURCE_DOWNLOAD's job + a Wait.on()-gated report step into ONE pipeline, reuses ReportConfig.datasources[]) | [`beam-runner/.../runner/PipelineSequenceFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/PipelineSequenceFactory.java) |
-| Worker-side report step for PIPELINE (Wait.on() gate → verify required datasources → run the report → FailureNotifier) | [`beam-runner/.../runner/ReportFinalizeTransform.java`](beam-runner/src/main/java/com/yourco/beam/runner/ReportFinalizeTransform.java) |
-| Pipeline + per-source finalize signals holder, returned by DataSourcePipelineFactory.assembleForConfigs() | [`beam-runner/.../runner/DataSourceAssembly.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourceAssembly.java) |
-| STATUS_CHECK readiness poll — optional, non-blocking diagnostic only (DATA_SOURCE_DOWNLOAD/PIPELINE no longer poll) | [`beam-runner/.../runner/DataSourceStatusChecker.java`](beam-runner/src/main/java/com/yourco/beam/runner/DataSourceStatusChecker.java) |
+| DATA_SOURCE_DOWNLOAD orchestration | [`beam-runner/.../runner/datasource/DataSourcePipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/datasource/DataSourcePipelineFactory.java) |
+| REPORT_PROCESSING orchestration | [`beam-runner/.../runner/report/ReportPipelineFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/report/ReportPipelineFactory.java) |
+| PIPELINE orchestration (batches DATA_SOURCE_DOWNLOAD's job + a Wait.on()-gated report step into ONE pipeline, reuses ReportConfig.datasources[]) | [`beam-runner/.../runner/pipeline/PipelineSequenceFactory.java`](beam-runner/src/main/java/com/yourco/beam/runner/pipeline/PipelineSequenceFactory.java) |
+| Worker-side report step for PIPELINE (Wait.on() gate → verify required datasources → run the report → FailureNotifier) | [`beam-runner/.../runner/report/ReportFinalizeTransform.java`](beam-runner/src/main/java/com/yourco/beam/runner/report/ReportFinalizeTransform.java) |
+| Pipeline + per-source finalize signals holder, returned by DataSourcePipelineFactory.assembleForConfigs() | [`beam-runner/.../runner/datasource/DataSourceAssembly.java`](beam-runner/src/main/java/com/yourco/beam/runner/datasource/DataSourceAssembly.java) |
+| STATUS_CHECK readiness poll — optional, non-blocking diagnostic only (DATA_SOURCE_DOWNLOAD/PIPELINE no longer poll) | [`beam-runner/.../runner/datasource/DataSourceStatusChecker.java`](beam-runner/src/main/java/com/yourco/beam/runner/datasource/DataSourceStatusChecker.java) |
 | Source routing | [`beam-io/.../io/source/SourceRouter.java`](beam-io/src/main/java/com/yourco/beam/io/source/SourceRouter.java) |
-| Per-source transform chain | [`beam-runner/.../runner/SourceTransformChainAssembler.java`](beam-runner/src/main/java/com/yourco/beam/runner/SourceTransformChainAssembler.java) |
+| Per-source transform chain | [`beam-runner/.../runner/datasource/SourceTransformChainAssembler.java`](beam-runner/src/main/java/com/yourco/beam/runner/datasource/SourceTransformChainAssembler.java) |
 | Lookup transform (side input) | [`beam-transforms/.../transforms/source/LookupEnrichTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/LookupEnrichTransform.java) |
 | Group-by transform | [`beam-transforms/.../transforms/source/GroupByTransform.java`](beam-transforms/src/main/java/com/yourco/beam/transforms/source/GroupByTransform.java) |
-| Query token resolution | [`beam-utils/.../utils/QueryParameterResolver.java`](beam-utils/src/main/java/com/yourco/beam/utils/QueryParameterResolver.java) |
+| Query token resolution | [`beam-utils/.../utils/query/QueryParameterResolver.java`](beam-utils/src/main/java/com/yourco/beam/utils/query/QueryParameterResolver.java) |
 | Source config loading (DATA_SOURCE_DOWNLOAD, BQ) | [`beam-io/.../io/config/BigQuerySourceConfigRepository.java`](beam-io/src/main/java/com/yourco/beam/io/config/BigQuerySourceConfigRepository.java) |
 | Report config loading (REPORT_PROCESSING, BQ) | [`beam-io/.../io/config/BigQueryReportRepository.java`](beam-io/src/main/java/com/yourco/beam/io/config/BigQueryReportRepository.java) |
 | Key-value BQ parameter store | [`beam-io/.../io/params/BigQueryParameterAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/params/BigQueryParameterAdapter.java) |
-| BQ job execution | [`beam-io/.../io/report/BigQueryJobService.java`](beam-io/src/main/java/com/yourco/beam/io/report/BigQueryJobService.java) |
+| BQ job execution | [`beam-io/.../io/bq/BigQueryJobService.java`](beam-io/src/main/java/com/yourco/beam/io/bq/BigQueryJobService.java) |
 | End-to-end BQ param example | [`beam-runner/.../runner/example/ExampleWorkflow.java`](beam-runner/src/main/java/com/yourco/beam/runner/example/ExampleWorkflow.java) |
 | Checkpoint lifecycle (LOADING→COMPLETED/FAILED) | [`beam-io/.../io/checkpoint/BigQueryDataSourceCheckpointAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/checkpoint/BigQueryDataSourceCheckpointAdapter.java) |
-| Record table sink (all sources → JSON blobs) | [`beam-io/.../io/sink/DataSourceRecordSinkTransform.java`](beam-io/src/main/java/com/yourco/beam/io/sink/DataSourceRecordSinkTransform.java) |
+| Record table sink (all sources → JSON blobs) | [`beam-io/.../io/sink/bq/DataSourceRecordSinkTransform.java`](beam-io/src/main/java/com/yourco/beam/io/sink/bq/DataSourceRecordSinkTransform.java) |
 | Record validation (BnC via JSON_VALUE) | [`beam-io/.../io/records/BigQueryDataSourceRecordAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/records/BigQueryDataSourceRecordAdapter.java) |
 | Email interface (DATA_SOURCE_DOWNLOAD failure email) | [`beam-io/.../io/email/ReportEmailAdapter.java`](beam-io/src/main/java/com/yourco/beam/io/email/ReportEmailAdapter.java) |
-| Email SMTP implementation | [`beam-runner/.../runner/SmtpReportEmailAdapter.java`](beam-runner/src/main/java/com/yourco/beam/runner/SmtpReportEmailAdapter.java) |
+| Email SMTP implementation | [`beam-runner/.../runner/notification/SmtpReportEmailAdapter.java`](beam-runner/src/main/java/com/yourco/beam/runner/notification/SmtpReportEmailAdapter.java) |
 | Email interface (REPORT_PROCESSING/PIPELINE completion email) | [`beam-io/.../io/email/EmailSendUtility.java`](beam-io/src/main/java/com/yourco/beam/io/email/EmailSendUtility.java) |
 | Exception hierarchy (one per process type) | [`beam-core/.../exception/`](beam-core/src/main/java/com/yourco/beam/exception/) |
-| Failure notification entry point | [`beam-runner/.../runner/FailureNotifier.java`](beam-runner/src/main/java/com/yourco/beam/runner/FailureNotifier.java) |
+| Failure notification entry point | [`beam-runner/.../runner/notification/FailureNotifier.java`](beam-runner/src/main/java/com/yourco/beam/runner/notification/FailureNotifier.java) |
 
 ---
 

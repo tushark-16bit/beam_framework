@@ -3,8 +3,8 @@ package com.yourco.beam.io.email;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
-import com.yourco.beam.model.EmailAttachment;
-import com.yourco.beam.model.EmailParams;
+import com.yourco.beam.model.email.EmailAttachment;
+import com.yourco.beam.model.email.EmailParams;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;

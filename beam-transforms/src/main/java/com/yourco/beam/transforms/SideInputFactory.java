@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
  *
  * <p>Common use cases in this framework:
  * <ul>
- *   <li>Passing the list of {@link com.yourco.beam.model.SourceConfig}s so a transform
+ *   <li>Passing the list of {@link com.yourco.beam.model.source.SourceConfig}s so a transform
  *       can look up metadata for each Row it receives.</li>
  *   <li>Providing a reference lookup table (e.g., instrument→currency mappings) fetched
  *       from BigQuery at pipeline-assembly time.</li>

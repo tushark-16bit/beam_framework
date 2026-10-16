@@ -1,6 +1,6 @@
 package com.yourco.beam.transforms.side;
 
-import com.yourco.beam.utils.SecretManagerUtils;
+import com.yourco.beam.utils.gcp.SecretManagerUtils;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
 import jakarta.mail.Session;
