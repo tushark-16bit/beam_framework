@@ -1,7 +1,6 @@
 package com.yourco.beam.io.sink;
 
-import com.yourco.beam.model.FailedRecord;
-import com.yourco.beam.options.FrameworkOptions;
+import com.yourco.beam.model.pipeline.FailedRecord;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -21,7 +20,7 @@ import java.util.Objects;
  * <p>Configured by {@code --deadLetterSink=gs://bucket/dlq/}.
  *
  * <h2>C2 fix</h2>
- * This transform is applied by {@link com.yourco.beam.runner.PipelineFactory}
+ * This transform is applied by {@link com.yourco.beam.runner.pipeline.PipelineFactory}
  * to the flattened collection of all dead-letter outputs from every transform
  * in the chain, completing the end-to-end DLQ path.
  */
@@ -31,11 +30,9 @@ public final class DeadLetterSinkTransform extends PTransform<PCollection<Failed
 
     private final String dlqPath;
 
-    public DeadLetterSinkTransform(FrameworkOptions options) {
-        Objects.requireNonNull(options, "options must not be null");
-        this.dlqPath = Objects.requireNonNull(
-                options.getDeadLetterSink(),
-                "--deadLetterSink is required when retryPolicy != NONE");
+    public DeadLetterSinkTransform(String dlqPath) {
+        this.dlqPath = Objects.requireNonNull(dlqPath,
+                "dead_letter_sink is required in parameter_store when retry policy is configured");
     }
 
     @Override
