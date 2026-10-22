@@ -8,20 +8,20 @@ import java.util.Map;
  *
  * <h2>Table schema</h2>
  * <pre>{@code
- * CREATE TABLE pipeline_config.parameter_store (
- *   ParameterName       STRING NOT NULL,   -- parameter / report name, e.g. "daily_trades_summary"
- *   ParameterGroupName  STRING NOT NULL,   -- top-level business group (--parentId), e.g. "TRADING"
- *   ParameterDataSource STRING NOT NULL,   -- subprocess variant (--reportSubprocess), e.g. "eod"
- *   SchemaOfJson        STRING,            -- JSON object: {"field": {"required": true, "type": "string"}, ...}
- *   ParametersValJson   STRING,            -- JSON object: {"field": "value", ...}
+ * CREATE TABLE dw.parameter_store (
+ *   parameter_name       STRING NOT NULL,   -- parameter / report name, e.g. "daily_trades_summary"
+ *   parameter_group_name  STRING NOT NULL,   -- top-level business group (--parentId), e.g. "TRADING"
+ *   parameter_data_source STRING NOT NULL,   -- subprocess variant (--reportSubprocess), e.g. "eod"
+ *   schema_of_json        STRING,            -- JSON object: {"field": {"required": true, "type": "string"}, ...}
+ *   parameters_val_json   STRING,            -- JSON object: {"field": "value", ...}
  *   EditGrpNm           STRING,
  *   LastUpdtTs          TIMESTAMP,
  *   LstUpdateUserId     STRING
  * );
  * }</pre>
  *
- * <h2>How SchemaOfJson drives validation</h2>
- * {@code SchemaOfJson} declares which fields are required:
+ * <h2>How schema_of_json drives validation</h2>
+ * {@code schema_of_json} declares which fields are required:
  * <pre>{@code
  * {
  *   "source_bq_table":   {"required": true,  "type": "string"},
@@ -31,15 +31,15 @@ import java.util.Map;
  * }
  * }</pre>
  * {@link #fetchRequiredParameters} uses this to validate that every {@code required=true}
- * field is present in {@code ParametersValJson} before returning.
+ * field is present in {@code parameters_val_json} before returning.
  *
  * <h2>Typical call sequence</h2>
  * <pre>{@code
  * BigQueryParameterAdapter adapter = new BigQueryParameterAdapterImpl(options);
  *
- * // Fetch, validate (via SchemaOfJson), and return all parameters in one call.
- * // Three-identifier key: ParameterGroupName=--parentId, ParameterDataSource=--reportSubprocess,
- * //                       ParameterName=--reportName
+ * // Fetch, validate (via schema_of_json), and return all parameters in one call.
+ * // Three-identifier key: parameter_group_name=--parentId, parameter_data_source=--reportSubprocess,
+ * //                       parameter_name=--reportName
  * Map<String, String> params = adapter.fetchRequiredParameters(
  *     "TRADING", "eod", "daily_trades_summary");
  *
@@ -51,36 +51,36 @@ public interface BigQueryParameterAdapter {
 
     /**
      * Returns the names of all fields marked {@code "required": true} in
-     * {@code SchemaOfJson} for the given parameter group.
+     * {@code schema_of_json} for the given parameter group.
      *
-     * @param parameterGroupName  value of the {@code ParameterGroupName} column
-     * @param parameterDataSource value of the {@code ParameterDataSource} column
-     * @param parameterName       value of the {@code ParameterName} column
+     * @param parameterGroupName  value of the {@code parameter_group_name} column
+     * @param parameterDataSource value of the {@code parameter_data_source} column
+     * @param parameterName       value of the {@code parameter_name} column
      * @return list of field names; empty if no schema is defined or no required fields
      */
     List<String> fetchRequiredKeys(String parameterGroupName, String parameterDataSource,
                                    String parameterName);
 
     /**
-     * Fetches all parameters from {@code ParametersValJson} for the given group.
+     * Fetches all parameters from {@code parameters_val_json} for the given group.
      * Returns the full key-value map without any validation.
      *
-     * @param parameterGroupName  value of the {@code ParameterGroupName} column
-     * @param parameterDataSource value of the {@code ParameterDataSource} column
-     * @param parameterName       value of the {@code ParameterName} column
-     * @return all key-value pairs from {@code ParametersValJson}; empty map if row not found
+     * @param parameterGroupName  value of the {@code parameter_group_name} column
+     * @param parameterDataSource value of the {@code parameter_data_source} column
+     * @param parameterName       value of the {@code parameter_name} column
+     * @return all key-value pairs from {@code parameters_val_json}; empty map if row not found
      */
     Map<String, String> fetchParameters(String parameterGroupName, String parameterDataSource,
                                         String parameterName);
 
     /**
      * Convenience: fetches parameters and validates that every field declared as
-     * {@code "required": true} in {@code SchemaOfJson} is present and non-null.
+     * {@code "required": true} in {@code schema_of_json} is present and non-null.
      *
-     * @param parameterGroupName  value of the {@code ParameterGroupName} column
-     * @param parameterDataSource value of the {@code ParameterDataSource} column
-     * @param parameterName       value of the {@code ParameterName} column
-     * @return validated key-value map from {@code ParametersValJson}
+     * @param parameterGroupName  value of the {@code parameter_group_name} column
+     * @param parameterDataSource value of the {@code parameter_data_source} column
+     * @param parameterName       value of the {@code parameter_name} column
+     * @return validated key-value map from {@code parameters_val_json}
      * @throws IllegalStateException if any required field is absent
      * @throws IllegalStateException if no parameter row is found for the given identifiers
      */

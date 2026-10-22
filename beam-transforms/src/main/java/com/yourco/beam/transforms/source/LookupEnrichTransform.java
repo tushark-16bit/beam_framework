@@ -2,7 +2,7 @@ package com.yourco.beam.transforms.source;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourco.beam.model.LookupConfig;
+import com.yourco.beam.model.datatransform.LookupConfig;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -32,7 +32,7 @@ import java.util.Map;
  * <h2>Responsibility split</h2>
  * This transform is purely a Beam graph node. Loading the lookup data (from BQ or JDBC),
  * serialising it to JSON, and building the {@code PCollectionView} is the responsibility
- * of {@link com.yourco.beam.runner.SourceTransformChainAssembler} in beam-runner.
+ * of {@link com.yourco.beam.runner.datasource.SourceTransformChainAssembler} in beam-runner.
  *
  * <h2>Join semantics</h2>
  * Left join: rows without a matching key pass through unchanged.

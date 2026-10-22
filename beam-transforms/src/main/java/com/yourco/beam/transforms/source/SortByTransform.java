@@ -1,6 +1,6 @@
 package com.yourco.beam.transforms.source;
 
-import com.yourco.beam.model.SourceTransformConfig;
+import com.yourco.beam.model.datatransform.SourceTransformConfig;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
