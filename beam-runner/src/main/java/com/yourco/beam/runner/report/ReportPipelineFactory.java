@@ -379,7 +379,7 @@ public final class ReportPipelineFactory {
                 List<ExportedFile> attachments = outputResults.stream()
                     .filter(ReportOutputSinkRouter.OutputResult::hasAttachment)
                     .map(r -> new ExportedFile(r.destination(), r.fileName(), r.contentType(),
-                        config.reportName + "_" + dates.periodId + "_" + dates.runDateIso()))
+                        config.reportName + "_" + dates.periodId))
                     .toList();
                 sendEmail(config, dates, attachments);
             }
@@ -622,7 +622,7 @@ public final class ReportPipelineFactory {
         List<EmailAttachment> attachments = new ArrayList<>();
         for (ExportedFile file : exportedFiles) {
             // The stored object's name may carry an extra prefix, so locate it by the stem
-            // (reportName_periodId_runDate) in the output directory instead of the exact URI.
+            // (reportName_periodId) in the output directory instead of the exact URI.
             String uri = file.gcsUri();
             String dir = uri.substring(0, uri.lastIndexOf('/') + 1);
             String ext = file.fileName().contains(".")

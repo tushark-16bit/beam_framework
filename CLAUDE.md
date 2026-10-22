@@ -891,7 +891,7 @@ Main.runReportProcessing(options)
     │
     ├─ Phase 7: Email (optional; skipped with a warning if no EmailSendUtility is available)
     │   ├─ resolve subject/body templates ({reportName}, {periodId}, etc.)
-    │   ├─ emailUtility.FetchFileFromGcsByPrefix(outputDir, fileName, stem=reportName_periodId_runDate, ext) for each exported file (finds the file even when its stored name has an extra prefix) → EmailAttachment
+    │   ├─ emailUtility.FetchFileFromGcsByPrefix(outputDir, fileName, stem=reportName_periodId, ext) for each exported file (finds the file even when its stored name has an extra prefix) → EmailAttachment
     │   ├─ emailUtility.SetEmailParams(fromAddress, subject, toList, ccList, encrypted) → EmailParams
     │   └─ emailUtility.CreateEmailRequest(emailParams, body, attachments)
     │

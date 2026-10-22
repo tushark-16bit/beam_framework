@@ -479,4 +479,4 @@ The shade plugin will include it automatically. No other changes needed.
 
 ### Email attachments
 
-`ReportPipelineFactory.sendEmail` no longer fetches the exact computed `gs://` URI: it passes the output directory plus the stored stem (`reportName_periodId_runDate`) to `EmailSendUtility.FetchFileFromGcsByPrefix`, which finds the real object (possibly with an extra prefix) and streams it as the attachment.
+`ReportPipelineFactory.sendEmail` no longer fetches the exact computed `gs://` URI: it passes the output directory plus the stored stem (`reportName_periodId`) to `EmailSendUtility.FetchFileFromGcsByPrefix`, which finds the real object (possibly with an extra prefix) and streams it as the attachment.

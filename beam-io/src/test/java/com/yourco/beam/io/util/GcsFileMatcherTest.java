@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class GcsFileMatcherTest {
 
-    private static final String STEM = "rpt_202401_2024-02-05";
+    private static final String STEM = "rpt_202401";
 
     @Test
     void exactNameWins() {
@@ -32,7 +32,7 @@ class GcsFileMatcherTest {
     @Test
     void wrongExtensionOrStemIsIgnored() {
         var files = List.of(new Candidate("P_rpt_202401_2024-02-05.json", 1),
-                            new Candidate("P_rpt_202401_2024-02-06.csv", 2));
+                            new Candidate("P_rpt_202402_2024-02-06.csv", 2));
         assertNull(GcsFileMatcher.pick(files, "rpt_202401_2024-02-05.csv", STEM, ".csv"));
     }
 }
