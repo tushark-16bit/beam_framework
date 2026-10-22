@@ -421,3 +421,8 @@ Run with `mvn -pl beam-io -am test`. This is the starting point, not full covera
 `dependencyManagement` entry in the root `pom.xml`, unused until now).
 
 > **Config value flattening:** `BigQuerySourceConfigRepository.flattenParams()` keeps a native JSON array/object value in `parameters_val_json` (e.g. `"date_params": [...]` written unquoted) as its JSON text. Previously such a value became an empty string, so `date_params` was silently ignored and `{periodLabel}` stayed unresolved.
+
+
+### Report output lookup for email attachments
+
+`io/util/GcsFileMatcher` — pure matching: exact expected file name first, otherwise the newest file in the output directory whose name contains the stored stem (`reportName_periodId_runDate`) and ends with the extension. `EmailSendUtility.FetchFileFromGcsByPrefix(dir, expectedName, stem, ext)` lists the directory with the GCS client and returns an InputStream of the match; it throws if nothing matches. Used by `ReportPipelineFactory` so attachments are found even when the stored object has an extra prefix.

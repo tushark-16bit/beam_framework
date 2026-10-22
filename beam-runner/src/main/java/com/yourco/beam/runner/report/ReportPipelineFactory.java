@@ -378,7 +378,8 @@ public final class ReportPipelineFactory {
             if (config.hasEmail()) {
                 List<ExportedFile> attachments = outputResults.stream()
                     .filter(ReportOutputSinkRouter.OutputResult::hasAttachment)
-                    .map(r -> new ExportedFile(r.destination(), r.fileName(), r.contentType()))
+                    .map(r -> new ExportedFile(r.destination(), r.fileName(), r.contentType(),
+                        config.reportName + "_" + dates.periodId + "_" + dates.runDateIso()))
                     .toList();
                 sendEmail(config, dates, attachments);
             }
@@ -620,8 +621,15 @@ public final class ReportPipelineFactory {
 
         List<EmailAttachment> attachments = new ArrayList<>();
         for (ExportedFile file : exportedFiles) {
-            attachments.add(new EmailAttachment(
-                file.fileName(), emailUtility.FetchFileFromGcs(file.gcsUri()), file.contentType()));
+            // The stored object's name may carry an extra prefix, so locate it by the stem
+            // (reportName_periodId_runDate) in the output directory instead of the exact URI.
+            String uri = file.gcsUri();
+            String dir = uri.substring(0, uri.lastIndexOf('/') + 1);
+            String ext = file.fileName().contains(".")
+                ? file.fileName().substring(file.fileName().lastIndexOf('.')) : "";
+            attachments.add(new EmailAttachment(file.fileName(),
+                emailUtility.FetchFileFromGcsByPrefix(dir, file.fileName(), file.stem(), ext),
+                file.contentType()));
         }
 
         EmailParams emailParams = emailUtility.SetEmailParams(
@@ -664,5 +672,5 @@ public final class ReportPipelineFactory {
 
     // ── Inner types ───────────────────────────────────────────────────────────
 
-    private record ExportedFile(String gcsUri, String fileName, String contentType) {}
+    private record ExportedFile(String gcsUri, String fileName, String contentType, String stem) {}
 }

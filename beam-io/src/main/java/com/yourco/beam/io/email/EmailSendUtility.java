@@ -1,13 +1,17 @@
 package com.yourco.beam.io.email;
 
+import com.google.api.gax.paging.Page;
+import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import com.yourco.beam.model.email.EmailAttachment;
+import com.yourco.beam.io.util.GcsFileMatcher;
 import com.yourco.beam.model.email.EmailParams;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -95,5 +99,45 @@ public interface EmailSendUtility {
             throw new IllegalStateException("File not found in GCS: " + fileLocation);
         }
         return new ByteArrayInputStream(bytes);
+    }
+
+    /**
+     * Finds a report output in a GCS directory by the stored name stem and returns its content,
+     * for when the object's real name is not exactly the one computed (extra prefix added, etc.).
+     * An exact {@code expectedName} wins; otherwise the newest file in the directory whose name
+     * contains {@code stem} and ends with {@code extension} (see {@link GcsFileMatcher}).
+     *
+     * @param directoryUri {@code gs://bucket/dir/} the output was written to
+     * @throws IllegalStateException if no file in the directory matches
+     */
+    default InputStream FetchFileFromGcsByPrefix(String directoryUri, String expectedName,
+                                                 String stem, String extension) {
+        if (directoryUri == null || !directoryUri.startsWith("gs://")) {
+            throw new IllegalArgumentException(
+                "Expected a GCS URI starting with gs://, got: " + directoryUri);
+        }
+        String withoutScheme = directoryUri.substring(5);
+        int slash = withoutScheme.indexOf('/');
+        String bucket = slash < 0 ? withoutScheme : withoutScheme.substring(0, slash);
+        String dir = slash < 0 ? "" : withoutScheme.substring(slash + 1);
+        if (!dir.isEmpty() && !dir.endsWith("/")) dir += "/";
+
+        Storage storage = StorageOptions.getDefaultInstance().getService();
+        Page<Blob> page = storage.list(bucket,
+            Storage.BlobListOption.prefix(dir), Storage.BlobListOption.currentDirectory());
+        List<GcsFileMatcher.Candidate> candidates = new ArrayList<>();
+        for (Blob b : page.iterateAll()) {
+            String name = b.getName().substring(dir.length());
+            if (name.isEmpty() || name.endsWith("/")) continue;
+            candidates.add(new GcsFileMatcher.Candidate(
+                name, b.getUpdateTimeOffsetDateTime() != null
+                    ? b.getUpdateTimeOffsetDateTime().toInstant().toEpochMilli() : 0L));
+        }
+        String chosen = GcsFileMatcher.pick(candidates, expectedName, stem, extension);
+        if (chosen == null) {
+            throw new IllegalStateException("No file containing '" + stem + "' (" + extension
+                + ") found in " + directoryUri);
+        }
+        return new ByteArrayInputStream(storage.readAllBytes(BlobId.of(bucket, dir + chosen)));
     }
 }

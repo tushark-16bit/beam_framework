@@ -328,8 +328,8 @@ email/ReportEmailAdapter.java         Interface: send(subject, body, to, cc, Lis
                                        PostDownloadFinalizeTransform's DATA_SOURCE_DOWNLOAD failure email now — see
                                        EmailSendUtility below for ReportPipelineFactory's report-completion email.
 email/EmailSendUtility.java           Interface: SetEmailParams(fromAddress, subject, toList, ccList, encryptedOrNot) → EmailParams;
-                                       CreateEmailRequest(EmailParams, bodyHtml, List<model.EmailAttachment>); default method
-                                       FetchFileFromGcs(fileLocation) fetches a GCS object as an InputStream via the GCS client
+                                       CreateEmailRequest(EmailParams, bodyHtml, List<model.EmailAttachment>); default methods
+                                       FetchFileFromGcs(fileLocation) (exact gs:// object) and FetchFileFromGcsByPrefix(dir, expectedName, stem, ext) (lists the output directory, finds the file whose real name carries an extra prefix, via GcsFileMatcher) fetch a GCS object as an InputStream via the GCS client
                                        directly (beam-io can't depend on beam-utils' GcsUtils). No implementation ships in this
                                        repo — beam-runner's EmailSendUtilities.create() is the one place an implementation is declared and
                                        constructed (or accepted via ReportPipelineFactory's constructor); if none
@@ -355,6 +355,7 @@ config/BigQuerySourceConfigRepository.java Queries parameter_store for DATA_SOUR
                                            toFileConfig() also parses file_date_pattern into FileSourceConfig.fileDatePattern.
 
 util/JsonUtils.java                   Row → JSON with correct type handling.
+util/GcsFileMatcher.java              Pure name matching for report output lookup: pick(candidates, expectedName, stem, extension) → exact name, else newest file containing the stem and ending in the extension; null if none. 3 tests in GcsFileMatcherTest.
 util/FileHeaderLegend.java            Helpers for the FILE-source column-letter storage convention: wrapLegend()/isMarkerWrapped()/
                                        unwrapLegend() thread a header-legend content object through the same PCollection<Row> as
                                        data rows; buildPage() builds a FILE-with-header DaRec page as {"Data":[...],"DataHeaders":[...]};
@@ -890,7 +891,7 @@ Main.runReportProcessing(options)
     │
     ├─ Phase 7: Email (optional; skipped with a warning if no EmailSendUtility is available)
     │   ├─ resolve subject/body templates ({reportName}, {periodId}, etc.)
-    │   ├─ emailUtility.FetchFileFromGcs(gcsUri) for each exported file → EmailAttachment
+    │   ├─ emailUtility.FetchFileFromGcsByPrefix(outputDir, fileName, stem=reportName_periodId_runDate, ext) for each exported file (finds the file even when its stored name has an extra prefix) → EmailAttachment
     │   ├─ emailUtility.SetEmailParams(fromAddress, subject, toList, ccList, encrypted) → EmailParams
     │   └─ emailUtility.CreateEmailRequest(emailParams, body, attachments)
     │
@@ -1298,7 +1299,7 @@ EmailParams params = emailUtility.SetEmailParams(fromAddress, subject, toList, c
 
 // model/email/EmailAttachment — a different type from io/email/EmailAttachment above
 List<EmailAttachment> attachments = files.stream()
-    .map(f -> new EmailAttachment(f.fileName(), emailUtility.FetchFileFromGcs(f.gcsUri()), f.contentType()))
+    .map(f -> new EmailAttachment(f.fileName(), emailUtility.FetchFileFromGcsByPrefix(dir, f.fileName(), f.stem(), ext), f.contentType()))
     .toList();
 
 emailUtility.CreateEmailRequest(params, bodyHtml, attachments);
