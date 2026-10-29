@@ -139,7 +139,11 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         }
 
         @ProcessElement
-        public void processElement(@Element Long pipelineRowCount, OutputReceiver<Long> out) {
+        public void processElement(@Element Long pipelineRowCount, OutputReceiver<Long> out,
+                                   org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            // Request id travels in the serialized pipeline options — make it current on this worker.
+            com.yourco.beam.context.RequestContext.attach(
+                pipelineOptions.as(com.yourco.beam.options.FrameworkOptions.class));
             LOG.info("Finalizing da_id={} datasource='{}' (pipeline row count: {})",
                      daId, sourceConfig.datasourceName, pipelineRowCount);
             Throwable fatal = null;

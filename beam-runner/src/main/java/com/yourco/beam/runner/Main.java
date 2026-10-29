@@ -1,5 +1,6 @@
 package com.yourco.beam.runner;
 
+import com.yourco.beam.context.RequestContext;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.runner.datasource.DataSourceAssembly;
 import com.yourco.beam.runner.datasource.DataSourcePipelineFactory;
@@ -13,6 +14,7 @@ import com.yourco.beam.runner.report.ReportPipelineFactory;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -130,8 +132,13 @@ public final class Main {
                 .withValidation()
                 .as(FrameworkOptions.class);
 
+        // One request id for every channel: generated here (or taken from --jobRunId), written back
+        // into the options so it reaches the workers, set in the log MDC, and put on the Dataflow job.
+        String requestId = RequestContext.init(options);
+        options.as(DataflowPipelineOptions.class).getLabels().putAll(RequestContext.labels());
+
         LOG.info("Process type: {}", options.getProcessType());
-        LOG.info("Job run ID:   {}", options.getJobRunId());
+        LOG.info("Job run ID:   {}", requestId);
 
         try {
             switch (options.getProcessType()) {

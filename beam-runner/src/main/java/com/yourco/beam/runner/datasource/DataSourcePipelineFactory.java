@@ -29,7 +29,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
@@ -121,11 +120,7 @@ public final class DataSourcePipelineFactory {
     }
 
     private DataSourceAssembly doAssembleForConfigs(FrameworkOptions options, List<SourceConfig> sourceConfigs) {
-        String jobRunId = options.getJobRunId();
-        if (jobRunId == null || jobRunId.isBlank()) {
-            jobRunId = UUID.randomUUID().toString();
-            options.setJobRunId(jobRunId);
-        }
+        String jobRunId = com.yourco.beam.context.RequestContext.init(options);
         LOG.info("Assembling {} source config(s) | jobRunId={}", sourceConfigs.size(), jobRunId);
 
         // Each source gets its own run dates, resolved before the COMPLETED skip-check and

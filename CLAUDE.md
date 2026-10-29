@@ -140,7 +140,7 @@ Every source file, one line each. Classes are grouped by **what they are for**, 
 (`bq` / `file` / `api` …). Package layout (all under `com.yourco.beam`):
 
 ```
-beam-core        options  transform  retry  exception
+beam-core        options  context  transform  retry  exception
                  model.source          SourceConfig (aggregates the rest)
                  model.bq              BqFetchConfig  BqSettings  SourceSchemaField
                  model.file            FileSourceConfig            model.api    ApiSourceConfig
@@ -178,6 +178,7 @@ options/ProcessType.java              Enum: DATA_SOURCE_DOWNLOAD | REPORT_PROCES
                                        invocation, all the way through email. STATUS_CHECK is an optional,
                                        non-blocking, single-check diagnostic — not part of the normal flow anymore.
                                        See PipelineSequenceFactory and DataSourceStatusChecker.
+context/RequestContext.java          The request id that follows one run through every channel. It is --jobRunId: init(options) (Main, first thing) keeps a supplied id or generates a UUID and writes it back into the options, so it reaches the workers in the serialized pipeline options; attach(id | options) makes it current (process-wide current() + log MDC key `jobRunId`) — called by FinalizeDoFn and ReportRunDoFn on the worker; labels() → {job_run_id: <id>} in GCP label form (lowercase, [a-z0-9_-], ≤63) used on BigQuery jobs (BigQueryJobService) and the Dataflow job, so a run can be found in INFORMATION_SCHEMA.JOBS / the Dataflow console without worker logs. FailureNotifier prints it in every template. Add %X{jobRunId} to the log pattern. 4 tests in RequestContextTest.
 options/SourceType.java               Enum: GCS | BQ | PUBSUB | API | FILE
 options/SinkType.java                 Enum: GCS | BQ | PUBSUB
 options/RetryPolicyType.java          Enum: NONE | FIXED | EXPONENTIAL
@@ -335,7 +336,7 @@ email/EmailSendUtility.java           Interface: SetEmailParams(fromAddress, sub
                                        constructed (or accepted via ReportPipelineFactory's constructor); if none
                                        is available, report-completion email is skipped with a warning, not a failure.
 
-bq/BigQueryJobService.java        BQ jobs: runQueryToTable(), queryLastRow(sql, location) → ResultRow (names + values of the LAST row; BnC source query), queryStrings() (first column of a small result as text — used to list the JSON keys of staged data), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
+bq/BigQueryJobService.java        BQ jobs (every query/extract job carries the label job_run_id = RequestContext, so a run's jobs can be listed in INFORMATION_SCHEMA.JOBS by label): runQueryToTable(), queryLastRow(sql, location) → ResultRow (names + values of the LAST row; BnC source query), queryStrings() (first column of a small result as text — used to list the JSON keys of staged data), exportToCsv(), exportToJson(), countRows() (live COUNT(*), not metadata-based), dropTableIfExists() (best-effort). No-arg constructor holds no FrameworkOptions, so also safe inside a Beam worker DoFn (PostDownloadFinalizeTransform uses it this way).
 
 params/BigQueryParameterAdapter.java     Interface: fetchRequiredKeys(), fetchParameters(), fetchRequiredParameters().
 params/BigQueryParameterAdapterImpl.java BQ client impl. Named query params (@key). Reads --paramBqProject/Dataset/StoreTable/RequiredTable.
@@ -1097,6 +1098,7 @@ List<SourceConfig> configs = repo.fetchSourceConfigs(parentId, datasourceName, s
 
 | Flag | Default | Purpose |
 |---|---|---|
+| `--jobRunId` | generated UUID | Request id for the whole run (logs, workers, BigQuery job label `job_run_id`, Dataflow job label, failure emails). Set by `Main` via `RequestContext.init()` if not passed |
 | `--paramBqProject` | `--project` | GCP project for all config BQ tables |
 | `--paramBqDataset` | `dw` | BQ dataset |
 | `--paramStoreTable` | `parameter_store` | Used by DATA_SOURCE_DOWNLOAD, REPORT_PROCESSING, and PIPELINE |

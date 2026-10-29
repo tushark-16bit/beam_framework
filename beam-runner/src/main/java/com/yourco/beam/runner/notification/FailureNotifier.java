@@ -76,6 +76,7 @@ public final class FailureNotifier {
                  + "\nMessage      : " + failure.getMessage();
         }
 
+        body = "Job run ID   : " + options.getJobRunId() + "\n" + body;
         LOG.error("FAILURE NOTIFICATION\nSubject: {}\nBody:\n{}", subject, body, failure);
         sendBestEffort(options, subject, body);
     }

@@ -724,3 +724,8 @@ hierarchy.
 | Class | Produces | Use for |
 |---|---|---|
 | `SideEffectEmailTransform` | `PDone` | SMTP notifications (success/failure summary emails) |
+
+
+### Request id
+
+Every run has one id, `--jobRunId` (a UUID is generated if not passed), available in logs (`jobRunId` MDC key), on workers, as the `job_run_id` label on the Dataflow job and BigQuery jobs, and in failure emails. See `beam-core/README.md`.

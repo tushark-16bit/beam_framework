@@ -4,6 +4,7 @@ import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryException;
 import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.ExtractJobConfiguration;
+import com.yourco.beam.context.RequestContext;
 import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.Job;
 import com.google.cloud.bigquery.JobId;
@@ -71,6 +72,7 @@ public final class BigQueryJobService {
         LOG.info("Running BQ query → {}", destinationTable);
         TableId dest = parseTableId(destinationTable);
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setLabels(RequestContext.labels())
             .setUseLegacySql(false)
             .setDestinationTable(dest)
             .setWriteDisposition(JobInfo.WriteDisposition.WRITE_TRUNCATE)
@@ -88,6 +90,7 @@ public final class BigQueryJobService {
     public void runQuery(String sql) {
         LOG.info("Running BQ query (no destination)");
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setLabels(RequestContext.labels())
             .setUseLegacySql(false)
             .build();
         awaitJob(bigquery.create(JobInfo.of(config)), "query");
@@ -107,6 +110,7 @@ public final class BigQueryJobService {
     public long countRows(String tableRef) {
         String sql = "SELECT COUNT(*) AS cnt FROM `" + tableRef + "`";
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setLabels(RequestContext.labels())
             .setUseLegacySql(false)
             .build();
         try {
@@ -129,6 +133,7 @@ public final class BigQueryJobService {
      */
     public List<String> queryStrings(String sql) {
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setLabels(RequestContext.labels())
             .setUseLegacySql(false)
             .build();
         List<String> values = new ArrayList<>();
@@ -167,6 +172,7 @@ public final class BigQueryJobService {
      */
     public ResultRow queryLastRow(String sql, String location) {
         QueryJobConfiguration config = QueryJobConfiguration.newBuilder(sql)
+            .setLabels(RequestContext.labels())
             .setUseLegacySql(false)
             .build();
         try {
@@ -254,6 +260,7 @@ public final class BigQueryJobService {
     private void doExport(String sourceTable, String gcsUri, String format, boolean printHeader) {
         TableId tableId = parseTableId(sourceTable);
         ExtractJobConfiguration config = ExtractJobConfiguration.newBuilder(tableId, gcsUri)
+            .setLabels(RequestContext.labels())
             .setFormat(format)
             .setPrintHeader(printHeader)
             .build();

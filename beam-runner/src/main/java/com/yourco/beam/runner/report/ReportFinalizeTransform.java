@@ -120,6 +120,7 @@ public final class ReportFinalizeTransform {
             // FrameworkOptions view this way avoids needing FrameworkOptions (not Serializable)
             // as a DoFn field, and avoids re-parsing raw CLI args.
             FrameworkOptions options = pipelineOptions.as(FrameworkOptions.class);
+            com.yourco.beam.context.RequestContext.attach(options);
             LOG.info("Running report '{}' (subprocess={} period={}) — all batched datasource "
                      + "branch(es) have reached a terminal state",
                      config.reportName, config.reportSubprocess, dates.periodId);

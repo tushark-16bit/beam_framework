@@ -426,3 +426,8 @@ Run with `mvn -pl beam-io -am test`. This is the starting point, not full covera
 ### Report output lookup for email attachments
 
 `io/util/GcsFileMatcher` — pure matching: exact expected file name first, otherwise the newest file in the output directory whose name contains the stored stem (`reportName_periodId`) and ends with the extension. `EmailSendUtility.FetchFileFromGcsByPrefix(dir, expectedName, stem, ext)` lists the directory with the GCS client and returns an InputStream of the match; it throws if nothing matches. Used by `ReportPipelineFactory` so attachments are found even when the stored object has an extra prefix.
+
+
+### Request id on BigQuery jobs
+
+`BigQueryJobService` labels every query and extract job it creates with `job_run_id` (`RequestContext.labels()`), so all BigQuery work of one run can be found with `INFORMATION_SCHEMA.JOBS` (`WHERE labels` contains `job_run_id`) without worker logs. Queries issued through the checkpoint/record adapters are not labelled yet.
