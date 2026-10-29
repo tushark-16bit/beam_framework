@@ -90,24 +90,29 @@ public final class MaskPiiTransform implements BeamTransform {
         }
 
         @ProcessElement
-        public void processElement(@Element Row row, MultiOutputReceiver out) {
+        public void processElement(@Element Row row, MultiOutputReceiver out, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                Schema schema = row.getSchema();
-                Row.Builder builder = Row.withSchema(schema);
-
-                for (Schema.Field field : schema.getFields()) {
-                    Object value = row.getValue(field.getName());
-                    if (piiFields.contains(field.getName()) && value != null) {
-                        builder.addValue(sha256(value.toString()));
-                        fieldsHashed.inc();
-                    } else {
-                        builder.addValue(value);
+                try {
+                    Schema schema = row.getSchema();
+                    Row.Builder builder = Row.withSchema(schema);
+    
+                    for (Schema.Field field : schema.getFields()) {
+                        Object value = row.getValue(field.getName());
+                        if (piiFields.contains(field.getName()) && value != null) {
+                            builder.addValue(sha256(value.toString()));
+                            fieldsHashed.inc();
+                        } else {
+                            builder.addValue(value);
+                        }
                     }
+    
+                    out.get(SUCCESS_TAG).output(builder.build());
+                } catch (Exception e) {
+                    out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row, e, 1));
                 }
-
-                out.get(SUCCESS_TAG).output(builder.build());
-            } catch (Exception e) {
-                out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row, e, 1));
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

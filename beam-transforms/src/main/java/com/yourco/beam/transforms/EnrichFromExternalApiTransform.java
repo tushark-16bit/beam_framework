@@ -193,29 +193,34 @@ public final class EnrichFromExternalApiTransform implements BeamTransform {
          * because {@code @Setup} has already run.
          */
         @ProcessElement
-        public void processElement(@Element Row row, MultiOutputReceiver out) {
-            Object lookupKey = row.getValue(lookupFieldName);
-            if (lookupKey == null) {
-                // Can't enrich without a key — route to DLQ
-                out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row,
-                        new IllegalArgumentException(
-                            "Lookup field '" + lookupFieldName + "' is null — cannot enrich"),
-                        0));
-                return;
-            }
-
+        public void processElement(@Element Row row, MultiOutputReceiver out, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                // Call the external API with the lookup key
-                String enrichmentJson = callApi(lookupKey.toString());
-
-                // Merge the API response fields into a new Row with the output schema
-                Row enriched = mergeEnrichment(row, enrichmentJson, outputSchema);
-                out.get(SUCCESS_TAG).output(enriched);
-
-            } catch (Exception e) {
-                // API call failed — route to DLQ for inspection and possible replay
-                LOG.warn("API enrichment failed for key '{}': {}", lookupKey, e.getMessage());
-                out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row, e, 1));
+                Object lookupKey = row.getValue(lookupFieldName);
+                if (lookupKey == null) {
+                    // Can't enrich without a key — route to DLQ
+                    out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row,
+                            new IllegalArgumentException(
+                                "Lookup field '" + lookupFieldName + "' is null — cannot enrich"),
+                            0));
+                    return;
+                }
+    
+                try {
+                    // Call the external API with the lookup key
+                    String enrichmentJson = callApi(lookupKey.toString());
+    
+                    // Merge the API response fields into a new Row with the output schema
+                    Row enriched = mergeEnrichment(row, enrichmentJson, outputSchema);
+                    out.get(SUCCESS_TAG).output(enriched);
+    
+                } catch (Exception e) {
+                    // API call failed — route to DLQ for inspection and possible replay
+                    LOG.warn("API enrichment failed for key '{}': {}", lookupKey, e.getMessage());
+                    out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row, e, 1));
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

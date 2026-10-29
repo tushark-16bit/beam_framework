@@ -257,3 +257,8 @@ beam-runner → beam-core, beam-io, beam-transforms, beam-utils
 ### Request id (`context/RequestContext`)
 
 `--jobRunId` is the one id for a run. `Main` calls `RequestContext.init(options)` first: a supplied id is kept, otherwise a UUID is generated and written back into the options, which Beam serializes to the workers. Worker entry points (`FinalizeDoFn`, `ReportRunDoFn`) call `RequestContext.attach(options)`; any code can read `RequestContext.current()`; logs get the `jobRunId` MDC key (add `%X{jobRunId}` to the log pattern); `RequestContext.labels()` gives the `job_run_id` label (lowercased/sanitised to GCP label rules) put on the Dataflow job and on BigQuery jobs. Flag: `--jobRunId`.
+
+
+### Worker logging wrapper
+
+Every DoFn `@ProcessElement` in this module calls `WorkerLogging.open(pipelineOptions)` first and `WorkerLogging.close()` in a `finally` (beam-core `context/WorkerLogging`, which attaches/clears the request id and is the single hook for a deployment's own worker-logging setup/teardown). New DoFns must follow the same shape.

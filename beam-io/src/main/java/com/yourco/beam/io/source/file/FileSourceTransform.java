@@ -94,33 +94,38 @@ public final class FileSourceTransform extends PTransform<PBegin, PCollection<Ro
         }
 
         @ProcessElement
-        public void processElement(@Element String datasourceName, OutputReceiver<Row> out) {
-            LocalDate runDate = LocalDate.parse(runDateIso);
-            String gcsPath = FileSourceAdapter.resolvePath(fileConfig, periodId, runDate);
-            LOG.info("Downloading file: {}", gcsPath);
-
-            byte[] fileBytes = downloadFromGcs(gcsPath);
-            LOG.info("Downloaded {} bytes from {}", fileBytes.length, gcsPath);
-
-            FileSourceAdapter.FileParseResult result = switch (fileConfig.fileType) {
-                case "CSV"   -> FileSourceAdapter.parseCsv(fileBytes, fileConfig);
-                case "EXCEL" -> FileSourceAdapter.parseExcel(fileBytes, fileConfig);
-                default -> throw new IllegalArgumentException(
-                    "Unsupported file type: " + fileConfig.fileType + ". Supported: CSV, EXCEL");
-            };
-
-            LOG.info("Parsed {} rows from {} ({}, header legend: {})",
-                     result.rows().size(), gcsPath, fileConfig.fileType,
-                     result.headerLegendJson() != null ? "present" : "none");
-            for (String json : result.rows()) {
-                out.output(Row.withSchema(Schemas.RAW_JSON).addValue(json).build());
-            }
-            // Emitted as one extra element alongside the data rows — DataSourceRecordSinkTransform
-            // detects it (marker-wrapped via FileHeaderLegend.wrapLegend), unwraps it, and builds
-            // each DaRec page for this source as {"Data":[...],"DataHeaders":[legend]} instead of
-            // a flat array, rather than treating it as one more data row.
-            if (result.headerLegendJson() != null) {
-                out.output(Row.withSchema(Schemas.RAW_JSON).addValue(result.headerLegendJson()).build());
+        public void processElement(@Element String datasourceName, OutputReceiver<Row> out, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+            try {
+                LocalDate runDate = LocalDate.parse(runDateIso);
+                String gcsPath = FileSourceAdapter.resolvePath(fileConfig, periodId, runDate);
+                LOG.info("Downloading file: {}", gcsPath);
+    
+                byte[] fileBytes = downloadFromGcs(gcsPath);
+                LOG.info("Downloaded {} bytes from {}", fileBytes.length, gcsPath);
+    
+                FileSourceAdapter.FileParseResult result = switch (fileConfig.fileType) {
+                    case "CSV"   -> FileSourceAdapter.parseCsv(fileBytes, fileConfig);
+                    case "EXCEL" -> FileSourceAdapter.parseExcel(fileBytes, fileConfig);
+                    default -> throw new IllegalArgumentException(
+                        "Unsupported file type: " + fileConfig.fileType + ". Supported: CSV, EXCEL");
+                };
+    
+                LOG.info("Parsed {} rows from {} ({}, header legend: {})",
+                         result.rows().size(), gcsPath, fileConfig.fileType,
+                         result.headerLegendJson() != null ? "present" : "none");
+                for (String json : result.rows()) {
+                    out.output(Row.withSchema(Schemas.RAW_JSON).addValue(json).build());
+                }
+                // Emitted as one extra element alongside the data rows — DataSourceRecordSinkTransform
+                // detects it (marker-wrapped via FileHeaderLegend.wrapLegend), unwraps it, and builds
+                // each DaRec page for this source as {"Data":[...],"DataHeaders":[legend]} instead of
+                // a flat array, rather than treating it as one more data row.
+                if (result.headerLegendJson() != null) {
+                    out.output(Row.withSchema(Schemas.RAW_JSON).addValue(result.headerLegendJson()).build());
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

@@ -485,3 +485,8 @@ The shade plugin will include it automatically. No other changes needed.
 ### Request id
 
 `Main` initialises `RequestContext` (generates or keeps `--jobRunId`) and labels the Dataflow job with it; `PostDownloadFinalizeTransform` and `ReportFinalizeTransform` attach it on the worker from the pipeline options; `FailureNotifier` prints it in every failure email.
+
+
+### Worker logging wrapper
+
+Every DoFn `@ProcessElement` in this module calls `WorkerLogging.open(pipelineOptions)` first and `WorkerLogging.close()` in a `finally` (beam-core `context/WorkerLogging`, which attaches/clears the request id and is the single hook for a deployment's own worker-logging setup/teardown). New DoFns must follow the same shape.

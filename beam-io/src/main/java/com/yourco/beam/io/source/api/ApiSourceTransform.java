@@ -99,13 +99,18 @@ public final class ApiSourceTransform extends PTransform<PBegin, PCollection<Row
         }
 
         @ProcessElement
-        public void processElement(@Element String datasourceName, OutputReceiver<Row> out) {
-            LOG.info("Fetching API data for datasource: {}", datasourceName);
-            List<String> records = adapter.fetchAll(apiConfig, authToken);
-            LOG.info("Fetched {} records from API for datasource: {}", records.size(), datasourceName);
-
-            for (String jsonRecord : records) {
-                out.output(Row.withSchema(Schemas.RAW_JSON).addValue(jsonRecord).build());
+        public void processElement(@Element String datasourceName, OutputReceiver<Row> out, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+            try {
+                LOG.info("Fetching API data for datasource: {}", datasourceName);
+                List<String> records = adapter.fetchAll(apiConfig, authToken);
+                LOG.info("Fetched {} records from API for datasource: {}", records.size(), datasourceName);
+    
+                for (String jsonRecord : records) {
+                    out.output(Row.withSchema(Schemas.RAW_JSON).addValue(jsonRecord).build());
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

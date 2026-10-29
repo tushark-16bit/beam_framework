@@ -116,21 +116,25 @@ public final class ReportFinalizeTransform {
 
         @ProcessElement
         public void processElement(@Element Integer trigger, PipelineOptions pipelineOptions) {
-            // Beam injects the worker's own PipelineOptions here — reconstructing the
-            // FrameworkOptions view this way avoids needing FrameworkOptions (not Serializable)
-            // as a DoFn field, and avoids re-parsing raw CLI args.
-            FrameworkOptions options = pipelineOptions.as(FrameworkOptions.class);
-            com.yourco.beam.context.RequestContext.attach(options);
-            LOG.info("Running report '{}' (subprocess={} period={}) — all batched datasource "
-                     + "branch(es) have reached a terminal state",
-                     config.reportName, config.reportSubprocess, dates.periodId);
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                verifyRequiredDatasources(options);
-                new ReportPipelineFactory().execute(options, config, dates, plan);
-                LOG.info("Report '{}' completed", config.reportName);
-            } catch (Exception e) {
-                LOG.error("Report '{}' failed: {}", config.reportName, e.getMessage(), e);
-                FailureNotifier.notify(options, e);
+                // Beam injects the worker's own PipelineOptions here — reconstructing the
+                // FrameworkOptions view this way avoids needing FrameworkOptions (not Serializable)
+                // as a DoFn field, and avoids re-parsing raw CLI args.
+                FrameworkOptions options = pipelineOptions.as(FrameworkOptions.class);
+                LOG.info("Running report '{}' (subprocess={} period={}) — all batched datasource "
+                         + "branch(es) have reached a terminal state",
+                         config.reportName, config.reportSubprocess, dates.periodId);
+                try {
+                    verifyRequiredDatasources(options);
+                    new ReportPipelineFactory().execute(options, config, dates, plan);
+                    LOG.info("Report '{}' completed", config.reportName);
+                } catch (Exception e) {
+                    LOG.error("Report '{}' failed: {}", config.reportName, e.getMessage(), e);
+                    FailureNotifier.notify(options, e);
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

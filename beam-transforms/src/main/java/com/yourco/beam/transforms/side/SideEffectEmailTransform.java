@@ -121,34 +121,39 @@ public final class SideEffectEmailTransform extends PTransform<PCollection<Row>,
         }
 
         @ProcessElement
-        public void processElement(@Element Row row) {
-            String to      = row.getString("to");
-            String subject = row.getString("subject");
-            String body    = row.getString("body");
-            String cc      = row.getSchema().hasField("cc") ? row.getString("cc") : null;
-
-            if (to == null || to.isBlank()) {
-                LOG.warn("Skipping email — 'to' field is blank");
-                return;
-            }
-
+        public void processElement(@Element Row row, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                MimeMessage message = new MimeMessage(mailSession);
-                message.setFrom(new InternetAddress(fromAddress));
-                message.addRecipient(Message.RecipientType.TO, new InternetAddress(to));
-                if (cc != null && !cc.isBlank()) {
-                    for (String ccAddr : cc.split(",")) {
-                        message.addRecipient(Message.RecipientType.CC,
-                            new InternetAddress(ccAddr.trim()));
-                    }
+                String to      = row.getString("to");
+                String subject = row.getString("subject");
+                String body    = row.getString("body");
+                String cc      = row.getSchema().hasField("cc") ? row.getString("cc") : null;
+    
+                if (to == null || to.isBlank()) {
+                    LOG.warn("Skipping email — 'to' field is blank");
+                    return;
                 }
-                message.setSubject(subject);
-                message.setText(body);
-                Transport.send(message);
-                LOG.info("Email sent to '{}' with subject '{}'", to, subject);
-            } catch (MessagingException e) {
-                // Log but don't fail the pipeline — email is best-effort
-                LOG.error("Failed to send email to '{}': {}", to, e.getMessage(), e);
+    
+                try {
+                    MimeMessage message = new MimeMessage(mailSession);
+                    message.setFrom(new InternetAddress(fromAddress));
+                    message.addRecipient(Message.RecipientType.TO, new InternetAddress(to));
+                    if (cc != null && !cc.isBlank()) {
+                        for (String ccAddr : cc.split(",")) {
+                            message.addRecipient(Message.RecipientType.CC,
+                                new InternetAddress(ccAddr.trim()));
+                        }
+                    }
+                    message.setSubject(subject);
+                    message.setText(body);
+                    Transport.send(message);
+                    LOG.info("Email sent to '{}' with subject '{}'", to, subject);
+                } catch (MessagingException e) {
+                    // Log but don't fail the pipeline — email is best-effort
+                    LOG.error("Failed to send email to '{}': {}", to, e.getMessage(), e);
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

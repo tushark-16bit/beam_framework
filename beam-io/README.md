@@ -431,3 +431,8 @@ Run with `mvn -pl beam-io -am test`. This is the starting point, not full covera
 ### Request id on BigQuery jobs
 
 `BigQueryJobService` labels every query and extract job it creates with `job_run_id` (`RequestContext.labels()`), so all BigQuery work of one run can be found with `INFORMATION_SCHEMA.JOBS` (`WHERE labels` contains `job_run_id`) without worker logs. Queries issued through the checkpoint/record adapters are not labelled yet.
+
+
+### Worker logging wrapper
+
+Every DoFn `@ProcessElement` in this module calls `WorkerLogging.open(pipelineOptions)` first and `WorkerLogging.close()` in a `finally` (beam-core `context/WorkerLogging`, which attaches/clears the request id and is the single hook for a deployment's own worker-logging setup/teardown). New DoFns must follow the same shape.

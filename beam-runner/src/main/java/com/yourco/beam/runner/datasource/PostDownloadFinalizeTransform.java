@@ -141,34 +141,36 @@ public final class PostDownloadFinalizeTransform extends PTransform<PCollection<
         @ProcessElement
         public void processElement(@Element Long pipelineRowCount, OutputReceiver<Long> out,
                                    org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
-            // Request id travels in the serialized pipeline options — make it current on this worker.
-            com.yourco.beam.context.RequestContext.attach(
-                pipelineOptions.as(com.yourco.beam.options.FrameworkOptions.class));
-            LOG.info("Finalizing da_id={} datasource='{}' (pipeline row count: {})",
-                     daId, sourceConfig.datasourceName, pipelineRowCount);
-            Throwable fatal = null;
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                breadcrumb("start", "pipelineRowCount=" + pipelineRowCount);
-                runValidation(pipelineRowCount);
-                breadcrumb("done", null);
-            } catch (Throwable t) {
-                LOG.error("Finalize failed for '{}' (da_id={}): {}",
-                          sourceConfig.datasourceName, daId, t.getMessage(), t);
-                breadcrumb("ERROR", t.getClass().getName() + ": " + t.getMessage());
-                // Records the failure; retried, and if it still cannot be written the exception
-                // propagates so the job fails visibly instead of leaving the row at LOADING.
-                updateStatusWithRetry(DataSourceCheckpoint.STA_FAILED, null);
-                sendFailureEmail(DataSourceCheckpoint.STA_FAILED, t.getMessage(), null);
-                if (t instanceof Error) {
-                    fatal = t;  // VM-level errors (OOM, linkage) are still rethrown after recording
+                LOG.info("Finalizing da_id={} datasource='{}' (pipeline row count: {})",
+                         daId, sourceConfig.datasourceName, pipelineRowCount);
+                Throwable fatal = null;
+                try {
+                    breadcrumb("start", "pipelineRowCount=" + pipelineRowCount);
+                    runValidation(pipelineRowCount);
+                    breadcrumb("done", null);
+                } catch (Throwable t) {
+                    LOG.error("Finalize failed for '{}' (da_id={}): {}",
+                              sourceConfig.datasourceName, daId, t.getMessage(), t);
+                    breadcrumb("ERROR", t.getClass().getName() + ": " + t.getMessage());
+                    // Records the failure; retried, and if it still cannot be written the exception
+                    // propagates so the job fails visibly instead of leaving the row at LOADING.
+                    updateStatusWithRetry(DataSourceCheckpoint.STA_FAILED, null);
+                    sendFailureEmail(DataSourceCheckpoint.STA_FAILED, t.getMessage(), null);
+                    if (t instanceof Error) {
+                        fatal = t;  // VM-level errors (OOM, linkage) are still rethrown after recording
+                    }
+                } finally {
+                    // Always emit a signal element — success or failure — so this transform's output
+                    // can gate a downstream Wait.on() step regardless of how this source finished.
+                    out.output(daId);
+                }
+                if (fatal instanceof Error) {
+                    throw (Error) fatal;
                 }
             } finally {
-                // Always emit a signal element — success or failure — so this transform's output
-                // can gate a downstream Wait.on() step regardless of how this source finished.
-                out.output(daId);
-            }
-            if (fatal instanceof Error) {
-                throw (Error) fatal;
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

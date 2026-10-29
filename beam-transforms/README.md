@@ -187,3 +187,8 @@ PCollection<FailedRecord> emptyDlq = input.getPipeline()
     .apply(Create.empty(SerializableCoder.of(FailedRecord.class)));
 return PCollectionTuple.of(SUCCESS_TAG, ...).and(DEAD_LETTER_TAG, emptyDlq);
 ```
+
+
+### Worker logging wrapper
+
+Every DoFn `@ProcessElement` in this module calls `WorkerLogging.open(pipelineOptions)` first and `WorkerLogging.close()` in a `finally` (beam-core `context/WorkerLogging`, which attaches/clears the request id and is the single hook for a deployment's own worker-logging setup/teardown). New DoFns must follow the same shape.

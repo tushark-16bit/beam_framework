@@ -206,56 +206,62 @@ public final class DataSourceRecordSinkTransform extends PTransform<PCollection<
         @ProcessElement
         public void processElement(
                 @Element KV<String, Iterable<String>> element,
-                MultiOutputReceiver out) {
-
-            // Materialize all JSON strings — required to paginate. Pull out the FILE-source
-            // header legend (if any) rather than treating it as one more data row.
-            List<String> allJsonRows = new ArrayList<>();
-            String headerLegendContent = null;
-            for (String json : element.getValue()) {
-                if (FileHeaderLegend.isMarkerWrapped(json)) {
-                    if (headerLegendContent == null) {
-                        headerLegendContent = FileHeaderLegend.unwrapLegend(json);
+                MultiOutputReceiver out,
+                org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+            try {
+    
+                // Materialize all JSON strings — required to paginate. Pull out the FILE-source
+                // header legend (if any) rather than treating it as one more data row.
+                List<String> allJsonRows = new ArrayList<>();
+                String headerLegendContent = null;
+                for (String json : element.getValue()) {
+                    if (FileHeaderLegend.isMarkerWrapped(json)) {
+                        if (headerLegendContent == null) {
+                            headerLegendContent = FileHeaderLegend.unwrapLegend(json);
+                        } else {
+                            // Defensive: one FILE source emits at most one legend. Never expected in
+                            // practice, but don't silently drop data if it somehow happens.
+                            LOG.warn("Multiple header-legend rows found for da_id={} — keeping the "
+                                     + "first, ignoring the rest", daId.get());
+                        }
                     } else {
-                        // Defensive: one FILE source emits at most one legend. Never expected in
-                        // practice, but don't silently drop data if it somehow happens.
-                        LOG.warn("Multiple header-legend rows found for da_id={} — keeping the "
-                                 + "first, ignoring the rest", daId.get());
+                        allJsonRows.add(json);
                     }
-                } else {
-                    allJsonRows.add(json);
                 }
+    
+                long totalRows = allJsonRows.size();
+                int  pageNo    = 1;
+    
+                for (int start = 0; start < allJsonRows.size(); start += pageSize) {
+                    int end = Math.min(start + pageSize, allJsonRows.size());
+                    List<String> pageSlice = allJsonRows.subList(start, end);
+    
+                    // A FILE source with a header row builds {"Data":[...],"DataHeaders":[...]} — the
+                    // legend is appended to EVERY page so each page is independently self-describing.
+                    // Everything else (BQ/API, headerless FILE) keeps the original flat [{...},...]
+                    // shape; FileHeaderLegend.dataArrayExpr() reads both shapes uniformly.
+                    String pageJson = headerLegendContent != null
+                        ? FileHeaderLegend.buildPage(pageSlice, headerLegendContent)
+                        : "[" + String.join(",", pageSlice) + "]";
+    
+                    out.get(PAGES_TAG).output(new TableRow()
+                        .set("rec_id",         UUID.randomUUID().toString())
+                        .set("da_id",          daId.get())
+                        .set("page_no",        pageNo)
+                        .set("row_da_json_tx", pageJson)
+                        .set("load_dt",        loadDt)
+                        .set("lst_updt_ts",    lstUpdtTs));
+    
+                    pageNo++;
+                }
+    
+                // Emit total source row count exactly once (one element, not one per page).
+                // Excludes the header legend — it isn't a source row.
+                out.get(TOTAL_ROWS_TAG).output(totalRows);
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
-
-            long totalRows = allJsonRows.size();
-            int  pageNo    = 1;
-
-            for (int start = 0; start < allJsonRows.size(); start += pageSize) {
-                int end = Math.min(start + pageSize, allJsonRows.size());
-                List<String> pageSlice = allJsonRows.subList(start, end);
-
-                // A FILE source with a header row builds {"Data":[...],"DataHeaders":[...]} — the
-                // legend is appended to EVERY page so each page is independently self-describing.
-                // Everything else (BQ/API, headerless FILE) keeps the original flat [{...},...]
-                // shape; FileHeaderLegend.dataArrayExpr() reads both shapes uniformly.
-                String pageJson = headerLegendContent != null
-                    ? FileHeaderLegend.buildPage(pageSlice, headerLegendContent)
-                    : "[" + String.join(",", pageSlice) + "]";
-
-                out.get(PAGES_TAG).output(new TableRow()
-                    .set("rec_id",         UUID.randomUUID().toString())
-                    .set("da_id",          daId.get())
-                    .set("page_no",        pageNo)
-                    .set("row_da_json_tx", pageJson)
-                    .set("load_dt",        loadDt)
-                    .set("lst_updt_ts",    lstUpdtTs));
-
-                pageNo++;
-            }
-
-            // Emit total source row count exactly once (one element, not one per page).
-            // Excludes the header legend — it isn't a source row.
-            out.get(TOTAL_ROWS_TAG).output(totalRows);
         }
     }
 }

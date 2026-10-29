@@ -88,56 +88,61 @@ public final class LookupEnrichTransform extends PTransform<PCollection<Row>, PC
         }
 
         @ProcessElement
-        public void processElement(ProcessContext ctx) {
-            Row mainRow = ctx.element();
-            Map<String, String> lookupMap = ctx.sideInput(lookupView);
-
-            Object keyVal = mainRow.getValue(config.dataKeyField);
-            String lookupKey = keyVal != null ? keyVal.toString() : null;
-
-            String lookupJson = (lookupKey != null) ? lookupMap.get(lookupKey) : null;
-
-            if (lookupJson == null) {
-                // No match — pass main row through unchanged (left join)
-                ctx.output(mainRow);
-                return;
-            }
-
-            Map<String, Object> lookupRow;
+        public void processElement(ProcessContext ctx, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                lookupRow = objectMapper.readValue(lookupJson, MAP_TYPE);
-            } catch (Exception e) {
-                LOG.warn("Could not parse lookup row JSON for key {}: {}", lookupKey, e.getMessage());
-                ctx.output(mainRow);
-                return;
+                Row mainRow = ctx.element();
+                Map<String, String> lookupMap = ctx.sideInput(lookupView);
+    
+                Object keyVal = mainRow.getValue(config.dataKeyField);
+                String lookupKey = keyVal != null ? keyVal.toString() : null;
+    
+                String lookupJson = (lookupKey != null) ? lookupMap.get(lookupKey) : null;
+    
+                if (lookupJson == null) {
+                    // No match — pass main row through unchanged (left join)
+                    ctx.output(mainRow);
+                    return;
+                }
+    
+                Map<String, Object> lookupRow;
+                try {
+                    lookupRow = objectMapper.readValue(lookupJson, MAP_TYPE);
+                } catch (Exception e) {
+                    LOG.warn("Could not parse lookup row JSON for key {}: {}", lookupKey, e.getMessage());
+                    ctx.output(mainRow);
+                    return;
+                }
+    
+                // Determine which fields to merge
+                List<String> fieldsToAdd = config.mergeAllFields()
+                    ? new ArrayList<>(lookupRow.keySet())
+                    : config.outputFields;
+    
+                // Build merged schema and values
+                Schema mainSchema = mainRow.getSchema();
+                List<Schema.Field> mergedFields = new ArrayList<>(mainSchema.getFields());
+                List<Object> mergedValues = new ArrayList<>();
+    
+                for (Schema.Field f : mainSchema.getFields()) {
+                    mergedValues.add(mainRow.getValue(f.getName()));
+                }
+    
+                for (String lookupField : fieldsToAdd) {
+                    if (!lookupRow.containsKey(lookupField)) continue;
+                    String outputName = mainSchema.hasField(lookupField)
+                        ? "lookup_" + lookupField
+                        : lookupField;
+                    mergedFields.add(Schema.Field.nullable(outputName, Schema.FieldType.STRING));
+                    Object val = lookupRow.get(lookupField);
+                    mergedValues.add(val != null ? val.toString() : null);
+                }
+    
+                Schema mergedSchema = Schema.builder().addFields(mergedFields).build();
+                ctx.output(Row.withSchema(mergedSchema).addValues(mergedValues).build());
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
-
-            // Determine which fields to merge
-            List<String> fieldsToAdd = config.mergeAllFields()
-                ? new ArrayList<>(lookupRow.keySet())
-                : config.outputFields;
-
-            // Build merged schema and values
-            Schema mainSchema = mainRow.getSchema();
-            List<Schema.Field> mergedFields = new ArrayList<>(mainSchema.getFields());
-            List<Object> mergedValues = new ArrayList<>();
-
-            for (Schema.Field f : mainSchema.getFields()) {
-                mergedValues.add(mainRow.getValue(f.getName()));
-            }
-
-            for (String lookupField : fieldsToAdd) {
-                if (!lookupRow.containsKey(lookupField)) continue;
-                String outputName = mainSchema.hasField(lookupField)
-                    ? "lookup_" + lookupField
-                    : lookupField;
-                mergedFields.add(Schema.Field.nullable(outputName, Schema.FieldType.STRING));
-                Object val = lookupRow.get(lookupField);
-                mergedValues.add(val != null ? val.toString() : null);
-            }
-
-            Schema mergedSchema = Schema.builder().addFields(mergedFields).build();
-            ctx.output(Row.withSchema(mergedSchema).addValues(mergedValues).build());
         }
     }
 }

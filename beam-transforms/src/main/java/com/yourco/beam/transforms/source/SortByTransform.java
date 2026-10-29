@@ -80,8 +80,13 @@ public final class SortByTransform extends PTransform<PCollection<Row>, PCollect
         }
 
         @ProcessElement
-        public void processElement(@Element Row row) {
-            buffer.add(row);
+        public void processElement(@Element Row row, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+            try {
+                buffer.add(row);
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
+            }
         }
 
         @FinishBundle
