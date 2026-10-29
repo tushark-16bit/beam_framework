@@ -6,21 +6,20 @@ import org.slf4j.LoggerFactory;
 import java.util.*;
 
 /**
- * Loads and indexes all {@link BeamTransform} implementations found on the
- * classpath via Java SPI ({@link ServiceLoader}).
+ * Indexes {@link BeamTransform} implementations by {@link BeamTransform#name()} and resolves a
+ * comma-separated chain spec into them.
  *
  * <p>Used only in the <em>driver JVM</em> that builds the Beam graph — never
  * serialized to workers.
  *
- * <h2>Discovery</h2>
- * Every JAR that provides transforms must contain:
- * <pre>META-INF/services/com.yourco.beam.transform.BeamTransform</pre>
- * with one fully-qualified class name per line. The {@code maven-shade-plugin}'s
- * {@code ServicesResourceTransformer} merges these files across JARs automatically.
+ * <h2>Registration</h2>
+ * Transforms are declared and constructed explicitly by the caller — nothing is discovered via
+ * {@code ServiceLoader} (CLAUDE.md §12). {@code PipelineFactory} in {@code beam-runner} is the one
+ * place the shipped transforms are listed; a new transform is added to that list.
  *
  * <h2>Usage</h2>
  * <pre>{@code
- * TransformRegistry registry = TransformRegistry.load();
+ * TransformRegistry registry = TransformRegistry.of(new FilterNullsTransform(), new MaskPiiTransform());
  * List<BeamTransform> chain  = registry.resolve("filter-nulls,mask-pii");
  * }</pre>
  */
@@ -34,21 +33,12 @@ public final class TransformRegistry {
         this.registry = registry;
     }
 
-    /** Loads transforms visible to the current thread's context class loader. */
-    public static TransformRegistry load() {
-        return load(Thread.currentThread().getContextClassLoader());
-    }
-
     /**
-     * Loads transforms using an explicit {@link ClassLoader}.
-     * Useful for loading transforms from a supplemental JAR at runtime.
-     *
      * @throws IllegalStateException if two transforms share the same {@link BeamTransform#name()}
      */
-    public static TransformRegistry load(ClassLoader classLoader) {
+    public static TransformRegistry of(BeamTransform... transforms) {
         Map<String, BeamTransform> map = new LinkedHashMap<>();
-
-        ServiceLoader.load(BeamTransform.class, classLoader).forEach(transform -> {
+        for (BeamTransform transform : transforms) {
             String transformName = transform.name();
             if (map.containsKey(transformName)) {
                 throw new IllegalStateException(
@@ -57,9 +47,8 @@ public final class TransformRegistry {
             }
             map.put(transformName, transform);
             LOG.info("Registered transform: '{}'", transformName);
-        });
-
-        LOG.info("TransformRegistry loaded {} transform(s): {}", map.size(), map.keySet());
+        }
+        LOG.info("TransformRegistry holds {} transform(s): {}", map.size(), map.keySet());
         return new TransformRegistry(Collections.unmodifiableMap(map));
     }
 

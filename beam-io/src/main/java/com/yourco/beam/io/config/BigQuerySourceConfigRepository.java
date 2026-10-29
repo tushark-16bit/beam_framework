@@ -1,23 +1,32 @@
 package com.yourco.beam.io.config;
 
+import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.FieldValueList;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
-import com.yourco.beam.model.AggregationConfig;
-import com.yourco.beam.model.ApiSourceConfig;
-import com.yourco.beam.model.BncRule;
-import com.yourco.beam.model.BqFetchConfig;
-import com.yourco.beam.model.FileSourceConfig;
-import com.yourco.beam.model.LookupConfig;
-import com.yourco.beam.model.QueryConfig;
-import com.yourco.beam.model.SourceConfig;
-import com.yourco.beam.model.SourceTransformConfig;
-import com.yourco.beam.model.ValidationConfig;
+import com.yourco.beam.model.api.ApiSourceConfig;
+import com.yourco.beam.model.bq.BqFetchConfig;
+import com.yourco.beam.model.bq.BqSettings;
+import com.yourco.beam.model.bq.SourceSchemaField;
+import com.yourco.beam.model.datatransform.AggregationConfig;
+import com.yourco.beam.model.datatransform.DataTransformConfig;
+import com.yourco.beam.model.datatransform.LookupConfig;
+import com.yourco.beam.model.datatransform.SourceTransformConfig;
+import com.yourco.beam.model.email.SourceFailureEmailConfig;
+import com.yourco.beam.model.file.FileSourceConfig;
+import com.yourco.beam.model.query.DateParamConfig;
+import com.yourco.beam.model.query.QueryConfig;
+import com.yourco.beam.model.schedule.RunScheduleConfig;
+import com.yourco.beam.model.source.SourceConfig;
+import com.yourco.beam.model.validation.BncConfig;
+import com.yourco.beam.model.validation.BncRule;
+import com.yourco.beam.model.validation.ValidationConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.options.SourceType;
 import org.slf4j.Logger;
@@ -25,32 +34,137 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Fetches source configuration from the {@code source_config} BigQuery table.
+ * Fetches source configuration from the {@code parameter_store} BigQuery table.
  *
- * <p>All source configuration lives in the BQ dataset specified by
- * {@code --paramBqProject} and {@code --paramBqDataset}.
+ * <p>Source configs are stored as JSON in {@code parameters_val_json}, keyed by
+ * ({@code parameter_group_name=parentId}, {@code parameter_data_source=subprocessName},
+ * {@code parameter_name=datasourceName}). Required fields are declared in {@code schema_of_json}.
  *
- * <h2>Required BQ table</h2>
- * {@code source_config} — one row per (parent_id, subprocess_name, datasource_name, period_id).
- * Three-identifier key: {@code parent_id} (--parentId), {@code subprocess_name} (--subprocessName),
- * {@code datasource_name} (--datasourceName). Also filtered by {@code period_id} (--periodId, from MSTR_Per).
- * Table name configured via {@code --paramSourceConfigTable} (default: {@code source_config}).
+ * <p>{@code periodId} is not part of the lookup key — source configs are period-agnostic.
+ * Period-specific filtering is applied via {@code {periodStart}}/{@code {periodEnd}} token
+ * substitution inside the query at runtime.
+ *
+ * <h2>parameters_val_json structure</h2>
+ * <pre>
+ * {
+ *   "source_type":              "BQ" | "API" | "FILE",
+ *   // BQ source
+ *   "bq_project_id":            "my-project",
+ *   "bq_dataset":               "raw_data",
+ *   "bq_table":                 "trades",
+ *   "bq_query":                 "SELECT * FROM ... WHERE trade_date BETWEEN '{periodStart}' ...",
+ *   "query_params_json":        "{\"key\": \"value\"}",
+ *   "bq_schema_json":           "[{\"name\":\"trade_id\",\"type\":\"STRING\"},
+ *                                 {\"name\":\"amount\",\"type\":\"FLOAT64\"},
+ *                                 {\"name\":\"trade_date\",\"type\":\"DATE\"}]",
+ *   // API source
+ *   "api_endpoint":             "https://api.example.com/v1/data",
+ *   "api_auth_type":            "BEARER",
+ *   "api_auth_secret_id":       "projects/.../secrets/.../versions/latest",
+ *   "api_headers_json":         "{\"Accept\": \"application/json\"}",
+ *   "api_query_params_json":    "{}",
+ *   "api_pagination_enabled":   "true",
+ *   "api_pagination_strategy":  "PAGE_NUMBER",
+ *   "api_page_size":            "100",
+ *   "api_next_page_field":      "nextPage",
+ *   "api_data_array_field":     "data",
+ *   // FILE source
+ *   "file_type":                "CSV",
+ *   "file_location":            "gs://bucket/files/",
+ *   "file_prefix":              "trades_",
+ *   "file_suffix":              ".csv",
+ *   "file_delimiter":           ",",
+ *   "file_has_header":          "true",
+ *   "file_sheet_index":         "0",
+ *   "file_first_row":           "1",
+ *   "file_last_column":         "T",
+ *   "file_date_pattern":        "yyyyMM",
+ *   // Transforms + validation
+ *   "source_transforms_json":   "[{\"type\":\"GROUP_BY\", ...}]",
+ *   "min_row_count":            "1",
+ *   "max_row_count":            "100000",
+ *   "required_headers_json":    "[\"trade_id\",\"amount\"]",
+ *   "bnc_rules_json":           "[{\"field\":\"amount\",\"expectedTotal\":5000000}]",
+ *   // Post-storage data transform (optional; see DataTransformConfig)
+ *   "data_transform_query":          "SELECT JSON_VALUE(row_json,'$.trade_id') AS trade_id,
+ *                                     ROUND(CAST(JSON_VALUE(row_json,'$.amount') AS FLOAT64) * 1.1, 2)
+ *                                     AS amount_with_tax FROM data",
+ *   "data_transform_min_row_count":  "1",
+ *   "data_transform_max_row_count":  "100000",
+ *   // Optional per-source run-scheduling config (see RunScheduleConfig)
+ *   "run_details_json":         "{\"frequency\":\"MONTHLY\",\"freqRunDay\":\"WD+3\",
+ *                                  \"maxFreqRunDay\":\"WD+5\",\"dayLag\":\"\",
+ *                                  \"dateType\":\"lastBusDayMonth\",\"calendarKey\":\"Calendar_EPS\"}"
+ * }
+ * </pre>
+ *
+ * <h2>schema_of_json structure</h2>
+ * <pre>
+ * {
+ *   "source_type": {"required": true, "type": "string"},
+ *   "bq_query":    {"required": true, "type": "string"}
+ * }
+ * </pre>
+ *
+ * <h2>bq_schema_json — explicit column schema (optional, BQ sources only)</h2>
+ * <p>A JSON array of {@code {"name": "<column>", "type": "<BQ SQL type>"}} objects. When
+ * present, {@code DataSourcePipelineFactory.fetchBqSchema()} uses it directly instead of
+ * calling {@code BigQuerySchemaUtils.fetchBeamSchema()} — no {@code bigquery.tables.get}
+ * permission is needed, and the fetched rows are converted strictly against the declared
+ * types (see {@link com.yourco.beam.model.bq.SourceSchemaField}). {@code type} must be one of
+ * the real BigQuery SQL type names: {@code STRING}, {@code INT64}, {@code FLOAT64},
+ * {@code BOOLEAN}, {@code BYTES}, {@code DATE}, {@code DATETIME}, {@code TIME},
+ * {@code TIMESTAMP}, {@code NUMERIC}, {@code BIGNUMERIC}. When absent, schema resolution
+ * falls back to the existing behaviour
+ * (metadata fetch, then a name-only preview-query fallback).
+ *
+ * <h2>data_transform_query — optional post-storage SQL transform</h2>
+ * <p>Real BigQuery Standard SQL, run by {@code PostDownloadFinalizeTransform} after this run's
+ * rows are written to {@code DaRec} and the row-count/BnC storage-integrity checks pass, but
+ * before the checkpoint is marked {@code COMPLETED} — see
+ * {@link com.yourco.beam.model.datatransform.DataTransformConfig}. A {@code WITH data AS (...)} CTE reunifying
+ * every paginated {@code DaRec} page for this run into one flat rowset of JSON row strings is
+ * always prepended before this query runs — unconditionally, not contingent on the query text
+ * referencing any placeholder — so pagination is invisible to the query and unnesting can never
+ * be skipped by omission; the query just does {@code FROM data} like any other table. The
+ * transform's output row count is validated against {@code data_transform_min_row_count} /
+ * {@code data_transform_max_row_count} before it replaces the stored rows — on failure, the
+ * original rows are left untouched and the run fails with {@code FAILED_TRANSFORM}.
+ *
+ * <h2>run_details_json — optional per-source run-scheduling config</h2>
+ * <p>A single nested JSON object (unlike this framework's other {@code *_json} keys, which hold
+ * arrays or flat maps) carrying {@code frequency}/{@code freqRunDay}/
+ * {@code maxFreqRunDay}/{@code dayLag}/{@code dateType}/{@code calendarKey} — see
+ * {@link com.yourco.beam.model.schedule.RunScheduleConfig} for what each means. This repository only
+ * retrieves the values; the Finance Automation scheduling rules that interpret them are in
+ * {@code RunDateCalculator} (beam-utils).
  *
  * <p>All queries use named BQ parameters ({@code @name}) to prevent injection.
  */
 public final class BigQuerySourceConfigRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(BigQuerySourceConfigRepository.class);
-    private static final ObjectMapper JSON = new ObjectMapper();
+    /**
+     * Reads stored config JSON. Tolerates raw line breaks and tabs inside string values — what an
+     * operator gets when a multi-line SQL query is pasted into {@code parameters_val_json} without
+     * escaping each line break as {@code \n} — which strict JSON rejects ("Illegal unquoted
+     * character (CTRL-CHAR, code 10)"). Shared with {@link BigQueryReportRepository}.
+     */
+    static final ObjectMapper CONFIG_JSON = JsonMapper.builder()
+        .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
+        .build();
+
+    private static final ObjectMapper JSON = CONFIG_JSON;
     private static final TypeReference<Map<String, String>> STR_MAP  = new TypeReference<>() {};
     private static final TypeReference<List<String>>        STR_LIST = new TypeReference<>() {};
 
     private final BigQuery bigquery;
-    private final String sourceConfigTable;
+    private final String storeTable; // parameter_store fully-qualified: `project.dataset.table`
 
     public BigQuerySourceConfigRepository(FrameworkOptions options) {
         this(BigQueryOptions.getDefaultInstance().getService(), options);
@@ -60,102 +174,91 @@ public final class BigQuerySourceConfigRepository {
         this.bigquery = bigquery;
         String project = options.getParamBqProject() != null && !options.getParamBqProject().isBlank()
                          ? options.getParamBqProject() : options.getProject();
-        String dataset = options.getParamBqDataset();
-        this.sourceConfigTable = project + "." + dataset + "." + options.getParamSourceConfigTable();
-    }
-
-    // ── Validation ────────────────────────────────────────────────────────────
-
-    /**
-     * Returns a non-empty list if no {@code source_config} row exists for this
-     * (datasource, period, subprocess) combination. Empty list means the config is present.
-     *
-     * <p>Required-field validation for runtime parameters is handled separately by
-     * {@code BigQueryParameterAdapter.fetchRequiredParameters()}, which reads
-     * {@code SchemaOfJson} from the {@code parameter_store} table.
-     */
-    public List<String> getMissingParameters(String parentId, String datasource,
-                                              String subprocess, String periodId) {
-        String sql = "SELECT COUNT(*) AS cnt FROM `" + sourceConfigTable + "`"
-            + " WHERE parent_id = @parentId AND datasource_name = @datasource"
-            + " AND subprocess_name = @subprocess AND period_id = @periodId";
-
-        try {
-            for (FieldValueList row : bigquery.query(
-                    qConfig(sql, parentId, datasource, subprocess, periodId)).iterateAll()) {
-                if (row.get("cnt").getLongValue() == 0) {
-                    LOG.warn("No source_config row for parent={}, datasource={}, subprocess={}, period={}",
-                             parentId, datasource, subprocess, periodId);
-                    return List.of("source_config row missing for ("
-                        + parentId + ", " + datasource + ", " + subprocess + ", " + periodId + ")");
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("BQ query interrupted", e);
-        }
-        return Collections.emptyList();
+        this.storeTable = "`" + project + "." + options.getParamBqDataset()
+                        + "." + options.getParamStoreTable() + "`";
     }
 
     // ── Config fetch ──────────────────────────────────────────────────────────
 
+    /**
+     * Fetches and parses the source config from {@code parameter_store}.
+     *
+     * <p>{@code periodId} is passed into the resulting {@link SourceConfig} for
+     * checkpoint keying but is not used to filter the {@code parameter_store} row.
+     */
     public List<SourceConfig> fetchSourceConfigs(String parentId, String datasource,
-                                                   String subprocess, String periodId) {
-        String sql = "SELECT * FROM `" + sourceConfigTable + "`"
-            + " WHERE parent_id = @parentId AND datasource_name = @datasource"
-            + " AND subprocess_name = @subprocess AND period_id = @periodId";
+                                                   String subprocess, int periodId) {
+        String sql = "SELECT parameters_val_json, schema_of_json FROM " + storeTable
+            + " WHERE parameter_group_name = @parentId"
+            + "   AND parameter_data_source = @subprocess"
+            + "   AND parameter_name = @datasource"
+            + " LIMIT 1";
 
-        List<SourceConfig> configs = new ArrayList<>();
         try {
             for (FieldValueList row : bigquery.query(
-                    qConfig(sql, parentId, datasource, subprocess, periodId)).iterateAll()) {
-                configs.add(rowToSourceConfig(row));
+                    qConfig(sql, parentId, datasource, subprocess)).iterateAll()) {
+                Map<String, String> params = parseValJson(row, parentId, datasource, subprocess);
+                validateRequiredFields(row, params, parentId, datasource, subprocess);
+                SourceConfig config = mapToSourceConfig(params, parentId, datasource, subprocess, periodId);
+                LOG.info("Fetched source config for parent={}, datasource={}, subprocess={}, period={}",
+                         parentId, datasource, subprocess, periodId);
+                return List.of(config);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("BQ query interrupted", e);
         }
 
-        if (configs.isEmpty()) {
-            throw new IllegalStateException(
-                "No source_config found for parent=" + parentId + ", datasource=" + datasource
-                + ", subprocess=" + subprocess + ", period=" + periodId);
-        }
-        LOG.info("Fetched {} source config(s) for parent={}, datasource={}, subprocess={}, period={}",
-                 configs.size(), parentId, datasource, subprocess, periodId);
-        return configs;
+        throw new IllegalStateException(
+            "No parameter_store row found for parent=" + parentId
+            + ", datasource=" + datasource + ", subprocess=" + subprocess);
     }
 
     // ── Row mapping ───────────────────────────────────────────────────────────
 
-    private SourceConfig rowToSourceConfig(FieldValueList row) {
-        String parentId       = str(row, "parent_id");
-        String datasourceName = str(row, "datasource_name");
-        String periodId       = str(row, "period_id");
-        String subprocessName = str(row, "subprocess_name");
-        String sourceTypeStr  = str(row, "source_type");
+    SourceConfig mapToSourceConfig(Map<String, String> params, String parentId,
+                                            String datasource, String subprocess, int periodId) {
+        String sourceTypeStr = params.get("source_type");
+        if (sourceTypeStr == null || sourceTypeStr.isBlank()) {
+            throw new IllegalStateException(
+                "source_type is missing in parameters_val_json for "
+                + parentId + "/" + subprocess + "/" + datasource);
+        }
 
         SourceType sourceType;
         try {
             sourceType = SourceType.valueOf(sourceTypeStr.toUpperCase());
         } catch (IllegalArgumentException e) {
-            throw new IllegalStateException("Unknown source_type '" + sourceTypeStr + "' in source_config");
+            throw new IllegalStateException(
+                "Unknown source_type '" + sourceTypeStr + "' in parameter_store for "
+                + parentId + "/" + subprocess + "/" + datasource);
         }
+
+        JsonNode queryDetails = objectParam(params, "query_details");
+        JsonNode fileDetails  = objectParam(params, "file_details");
+        requireOnlyOwnDetails(sourceType, queryDetails, fileDetails, parentId, subprocess, datasource);
+        BqSettings bqSettings = toBqSettings(params);
 
         SourceConfig.Builder builder = SourceConfig.builder()
             .parentId(parentId)
-            .datasourceName(datasourceName)
+            .datasourceName(datasource)
             .periodId(periodId)
-            .subprocessName(subprocessName)
+            .subprocessName(subprocess)
             .sourceType(sourceType)
-            .queryConfig(toQueryConfig(row))
-            .sourceTransforms(toSourceTransforms(str(row, "source_transforms_json")))
-            .validationConfig(toValidationConfig(row));
+            .queryConfig(toQueryConfig(params, queryDetails))
+            .sourceTransforms(toSourceTransforms(params.get("source_transforms_json")))
+            .validationConfig(toValidationConfig(params))
+            .failureEmailConfig(toFailureEmailConfig(params))
+            .dataTransformConfig(toDataTransformConfig(params))
+            .runScheduleConfig(toRunScheduleConfig(params))
+            .dateParams(toDateParams(params))
+            .bqSettings(bqSettings)
+            .bncConfig(toBncConfig(params));
 
         switch (sourceType) {
-            case API  -> builder.apiConfig(toApiConfig(row));
-            case FILE -> builder.fileConfig(toFileConfig(row));
-            case BQ   -> builder.bqFetchConfig(toBqConfig(row));
+            case API  -> builder.apiConfig(toApiConfig(params));
+            case FILE -> builder.fileConfig(toFileConfig(params, fileDetails));
+            case BQ   -> builder.bqFetchConfig(toBqConfig(params, queryDetails, bqSettings));
             default   -> throw new IllegalStateException(
                 "source_type " + sourceType + " is not supported in DATA_SOURCE_DOWNLOAD");
         }
@@ -163,58 +266,482 @@ public final class BigQuerySourceConfigRepository {
         return builder.build();
     }
 
-    private ApiSourceConfig toApiConfig(FieldValueList row) {
+    private ApiSourceConfig toApiConfig(Map<String, String> p) {
         return new ApiSourceConfig(
-            str(row, "api_endpoint"),
-            str(row, "api_auth_type"),
-            str(row, "api_auth_secret_id"),
-            parseJsonMap(str(row, "api_headers_json")),
-            parseJsonMap(str(row, "api_query_params_json")),
-            bool(row, "api_pagination_enabled"),
-            str(row, "api_pagination_strategy"),
-            toInt(row, "api_page_size", 100),
-            str(row, "api_next_page_field"),
-            str(row, "api_data_array_field")
+            p.get("api_endpoint"),
+            p.get("api_auth_type"),
+            p.get("api_auth_secret_id"),
+            parseJsonMap(p.get("api_headers_json")),
+            parseJsonMap(p.get("api_query_params_json")),
+            parseBool(p.get("api_pagination_enabled"), false),
+            p.get("api_pagination_strategy"),
+            parseIntOrDefault(p.get("api_page_size"), 100),
+            p.get("api_next_page_field"),
+            p.get("api_data_array_field")
         );
     }
 
-    private FileSourceConfig toFileConfig(FieldValueList row) {
+    /**
+     * {@code file_details} (FILE sources) with the legacy flat {@code file_*} keys as a fallback
+     * per field: {@code type}, {@code location}, {@code prefix}, {@code suffix}, {@code delimiter},
+     * {@code has_header}, {@code sheet_index}, {@code first_row}, {@code last_column},
+     * {@code date_pattern}.
+     */
+    private FileSourceConfig toFileConfig(Map<String, String> p, JsonNode fd) {
         return new FileSourceConfig(
-            str(row, "file_type"),
-            str(row, "file_location"),
-            str(row, "file_prefix"),
-            str(row, "file_suffix"),
-            str(row, "file_delimiter"),
-            bool(row, "file_has_header"),
-            toInt(row, "file_sheet_index", 0)
+            firstNonBlank(text(fd, "type"),          p.get("file_type")),
+            firstNonBlank(text(fd, "location"),      p.get("file_location")),
+            firstNonBlank(text(fd, "prefix"),        p.get("file_prefix")),
+            firstNonBlank(text(fd, "suffix"),        p.get("file_suffix")),
+            firstNonBlank(text(fd, "delimiter"),     p.get("file_delimiter")),
+            parseBool(firstNonBlank(text(fd, "has_header"), p.get("file_has_header")), false),
+            parseIntOrDefault(firstNonBlank(text(fd, "sheet_index"), p.get("file_sheet_index")), 0),
+            parseIntOrDefault(firstNonBlank(text(fd, "first_row"),   p.get("file_first_row")), 1),
+            firstNonBlank(text(fd, "last_column"),   p.get("file_last_column")),
+            firstNonBlank(text(fd, "date_pattern"),  p.get("file_date_pattern"))
         );
     }
 
-    private BqFetchConfig toBqConfig(FieldValueList row) {
+    /**
+     * {@code query_details} (BQ sources) — {@code table} (bare, or qualified as
+     * {@code project.dataset.table}), {@code query}, {@code query_params}, {@code schema} — with
+     * the legacy flat {@code bq_*} keys as a fallback per field. The default project/dataset a bare
+     * table is resolved against come from {@code bq_settings.fetch_options} (legacy:
+     * {@code bq_project_id}/{@code bq_dataset}).
+     */
+    private BqFetchConfig toBqConfig(Map<String, String> p, JsonNode qd, BqSettings settings) {
         return new BqFetchConfig(
-            str(row, "bq_project_id"),
-            str(row, "bq_dataset"),
-            str(row, "bq_table"),
-            str(row, "bq_query"),
-            parseJsonMap(str(row, "query_params_json"))
+            firstNonBlank(settings.fetch.projectId, p.get("bq_project_id")),
+            firstNonBlank(settings.fetch.dataset,   p.get("bq_dataset")),
+            firstNonBlank(text(qd, "table"), p.get("bq_table")),
+            firstNonBlank(text(qd, "query"), p.get("bq_query")),
+            queryParams(p, qd),
+            qd.has("schema") ? parseSchemaNode(qd.get("schema")) : parseSchemaFields(p.get("bq_schema_json")),
+            settings.fetch.location
         );
     }
 
-    private QueryConfig toQueryConfig(FieldValueList row) {
+    private Map<String, String> queryParams(Map<String, String> p, JsonNode qd) {
+        JsonNode node = qd.get("query_params");
+        if (node == null || node.isNull()) return parseJsonMap(p.get("query_params_json"));
+        if (node.isTextual()) return parseJsonMap(node.asText());
+        if (!node.isObject()) {
+            throw new IllegalArgumentException("query_details.query_params must be a JSON object");
+        }
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        node.fields().forEachRemaining(e -> result.put(e.getKey(), e.getValue().asText()));
+        return result;
+    }
+
+    /**
+     * Parses {@code bq_schema_json} into an ordered list of {@link SourceSchemaField}.
+     * Entries missing {@code name} or {@code type} are skipped with a warning rather than
+     * failing the whole config fetch — a malformed schema entry surfaces later, and more
+     * clearly, when {@code BigQuerySchemaUtils.toBeamSchema()} rejects an unrecognised type.
+     */
+    private List<SourceSchemaField> parseSchemaFields(String json) {
+        if (json == null || json.isBlank()) return Collections.emptyList();
+        try {
+            return parseSchemaNode(JSON.readTree(json));
+        } catch (Exception e) {
+            LOG.error("Failed to parse bq_schema_json: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /** A schema array ({@code query_details.schema}, or the parsed {@code bq_schema_json}). */
+    private List<SourceSchemaField> parseSchemaNode(JsonNode array) {
+        if (array == null) return Collections.emptyList();
+        try {
+            if (array.isTextual()) array = JSON.readTree(array.asText());
+        } catch (Exception e) {
+            LOG.error("Failed to parse the declared schema: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+        if (!array.isArray()) return Collections.emptyList();
+        List<SourceSchemaField> fields = new ArrayList<>();
+        for (JsonNode node : array) {
+            String name = node.path("name").asText(null);
+            String type = node.path("type").asText(null);
+            if (name == null || name.isBlank() || type == null || type.isBlank()) {
+                LOG.warn("Skipping malformed schema entry (missing name/type): {}", node);
+                continue;
+            }
+            fields.add(new SourceSchemaField(name, type));
+        }
+        return fields;
+    }
+
+    private QueryConfig toQueryConfig(Map<String, String> p, JsonNode qd) {
         return new QueryConfig(
-            str(row, "bq_query"),
-            parseJsonMap(str(row, "query_params_json"))
+            firstNonBlank(text(qd, "query"), p.get("bq_query")),
+            queryParams(p, qd)
         );
     }
 
-    private ValidationConfig toValidationConfig(FieldValueList row) {
-        long minRows  = toLong(row, "min_row_count");
-        long maxRows  = row.get("max_row_count").isNull()
-                        ? ValidationConfig.NO_MAX
-                        : row.get("max_row_count").getLongValue();
-        List<String> requiredHeaders = parseStringList(str(row, "required_headers_json"));
-        List<BncRule> bncRules       = parseBncRules(str(row, "bnc_rules_json"));
+    /**
+     * {@code bq_settings}: the default BigQuery settings, split into {@code fetch_options}
+     * ({@code project_id}, {@code dataset}, {@code location} — reading the source) and
+     * {@code storage_options} ({@code page_size} — storing rows in DaRec). A bad
+     * {@code page_size} fails the config load.
+     */
+    private BqSettings toBqSettings(Map<String, String> p) {
+        JsonNode settings = objectParam(p, "bq_settings");
+        JsonNode fetch    = nested(settings, "fetch_options");
+        JsonNode storage  = nested(settings, "storage_options");
+        BqSettings.FetchOptions fo = new BqSettings.FetchOptions(
+            text(fetch, "project_id"), text(fetch, "dataset"), text(fetch, "location"));
+        int pageSize = BqSettings.DEFAULT_PAGE_SIZE;
+        String ps = text(storage, "page_size");
+        if (ps != null) {
+            try {
+                pageSize = Integer.parseInt(ps);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "bq_settings.storage_options.page_size '" + ps + "' is not a whole number");
+            }
+        }
+        return new BqSettings(fo, new BqSettings.StorageOptions(pageSize));
+    }
+
+    /** {@code bnc} — see {@link BncConfig} and BNC_RULES.md. Absent/empty → no check. */
+    private BncConfig toBncConfig(Map<String, String> p) {
+        JsonNode bnc = objectParam(p, "bnc");
+        if (isEmpty(bnc)) return BncConfig.none();
+        return new BncConfig(
+            text(bnc, "type"), text(bnc, "source_query"), text(bnc, "dest_column"),
+            text(bnc, "variance_allowed"), text(bnc, "error_on_failure"));
+    }
+
+    // ── Structured-value helpers ──────────────────────────────────────────────
+
+    /**
+     * The JSON object stored under {@code key} (an object or a string holding one), or an empty
+     * object when absent. A value that is not an object fails the config load.
+     */
+    private static JsonNode objectParam(Map<String, String> p, String key) {
+        String json = p.get(key);
+        if (json == null || json.isBlank()) return JSON.createObjectNode();
+        JsonNode node;
+        try {
+            node = JSON.readTree(json);
+        } catch (Exception e) {
+            throw new IllegalArgumentException(key + " is not valid JSON: " + e.getMessage(), e);
+        }
+        if (node == null || node.isNull()) return JSON.createObjectNode();
+        if (!node.isObject()) {
+            throw new IllegalArgumentException(key + " must be a JSON object");
+        }
+        return node;
+    }
+
+    private static JsonNode nested(JsonNode parent, String key) {
+        JsonNode n = parent.get(key);
+        return (n != null && n.isObject()) ? n : JSON.createObjectNode();
+    }
+
+    private static boolean isEmpty(JsonNode node) {
+        return node == null || node.size() == 0;
+    }
+
+    /** Text of {@code node.key}; null when absent, JSON null or blank. */
+    private static String text(JsonNode node, String key) {
+        JsonNode v = node.get(key);
+        if (v == null || v.isNull() || v.isContainerNode()) return null;
+        String t = v.asText();
+        return t.isBlank() ? null : t;
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isBlank()) return v;
+        }
+        return null;
+    }
+
+    /**
+     * One source has one input: a BQ source populates {@code query_details}, a FILE source
+     * {@code file_details}, and the other block must stay empty — a populated block for the wrong
+     * type is almost always a copy-paste mistake, so it fails the config load rather than being
+     * silently ignored. (API sources use neither.)
+     */
+    private static void requireOnlyOwnDetails(SourceType type, JsonNode queryDetails, JsonNode fileDetails,
+                                              String parentId, String subprocess, String datasource) {
+        String where = parentId + "/" + subprocess + "/" + datasource;
+        if (type != SourceType.BQ && !isEmpty(queryDetails)) {
+            throw new IllegalStateException("query_details must be empty for source_type=" + type
+                + " (it is only for BQ sources) in " + where);
+        }
+        if (type != SourceType.FILE && !isEmpty(fileDetails)) {
+            throw new IllegalStateException("file_details must be empty for source_type=" + type
+                + " (it is only for FILE sources) in " + where);
+        }
+    }
+
+    private ValidationConfig toValidationConfig(Map<String, String> p) {
+        long minRows = parseLongOrDefault(p.get("min_row_count"), 0L);
+        long maxRows = (p.containsKey("max_row_count") && p.get("max_row_count") != null)
+                       ? parseLongOrDefault(p.get("max_row_count"), ValidationConfig.NO_MAX)
+                       : ValidationConfig.NO_MAX;
+        List<String>  requiredHeaders = parseStringList(p.get("required_headers_json"));
+        List<BncRule> bncRules        = parseBncRules(p.get("bnc_rules_json"));
         return new ValidationConfig(minRows, maxRows, requiredHeaders, bncRules);
+    }
+
+    private DataTransformConfig toDataTransformConfig(Map<String, String> p) {
+        String query = p.get("data_transform_query");
+        long minRows = parseLongOrDefault(p.get("data_transform_min_row_count"), DataTransformConfig.NO_MIN);
+        long maxRows = (p.containsKey("data_transform_max_row_count") && p.get("data_transform_max_row_count") != null)
+                       ? parseLongOrDefault(p.get("data_transform_max_row_count"), DataTransformConfig.NO_MAX)
+                       : DataTransformConfig.NO_MAX;
+        return new DataTransformConfig(query, minRows, maxRows);
+    }
+
+    /**
+     * Parses {@code run_details_json} — a single nested JSON object, unlike the framework's
+     * other {@code *_json} keys which hold arrays or flat maps — into a {@link RunScheduleConfig}.
+     * Absent → {@link RunScheduleConfig#none()}, which {@code RunDateCalculator} treats as "not
+     * processed" (every item needs a schedule and a calendar). Malformed → throws, so a broken
+     * schedule fails the config fetch loudly instead of being mistaken for an absent one.
+     */
+    private RunScheduleConfig toRunScheduleConfig(Map<String, String> p) {
+        String json = p.get("run_details_json");
+        if (json == null || json.isBlank()) return RunScheduleConfig.none();
+        JsonNode node;
+        try {
+            node = JSON.readTree(json);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("run_details_json is not valid JSON: " + json, e);
+        }
+        if (!node.isObject()) {
+            throw new IllegalArgumentException("run_details_json must be a JSON object: " + json);
+        }
+        return parseRunSchedule(node, SOURCE_RUN_DAY_KEY);
+    }
+
+    private List<DateParamConfig> toDateParams(Map<String, String> p) {
+        String json = p.get("date_params");
+        if (json == null || json.isBlank()) return Collections.emptyList();
+        try {
+            return parseDateParams(JSON.readTree(json));
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("date_params is not valid JSON: " + json, e);
+        }
+    }
+
+    /**
+     * Parses a {@code date_params} value — an array of
+     * {@code {"token", "source", "format"?, "apply_to"?}} objects, or a string containing such an
+     * array (the {@code *_json} convention) — into {@link DateParamConfig}s. Shared with
+     * {@link BigQueryReportRepository}. Absent/empty → no parameters; anything malformed (no
+     * token, unknown source, bad format) throws so the config fetch fails loudly.
+     */
+    static List<DateParamConfig> parseDateParams(JsonNode node) throws java.io.IOException {
+        if (node == null || node.isMissingNode() || node.isNull()) return Collections.emptyList();
+        if (node.isTextual()) {
+            return node.asText().isBlank() ? Collections.emptyList() : parseDateParams(JSON.readTree(node.asText()));
+        }
+        if (!node.isArray()) {
+            throw new IllegalArgumentException("date_params must be a JSON array of objects");
+        }
+        List<DateParamConfig> result = new ArrayList<>();
+        for (JsonNode entry : node) {
+            if (!entry.isObject()) {
+                throw new IllegalArgumentException("each date_params entry must be a JSON object");
+            }
+            List<String> applyTo = new ArrayList<>();
+            JsonNode scope = entry.get("apply_to");
+            if (scope != null && scope.isArray()) {
+                scope.forEach(n -> applyTo.add(n.asText()));
+            } else if (scope != null && !scope.isNull() && !scope.asText().isBlank()) {
+                applyTo.add(scope.asText());
+            }
+            result.add(new DateParamConfig(textOrNull(entry, "token"), textOrNull(entry, "source"),
+                                           textOrNull(entry, "format"), textOrNull(entry, "case"), applyTo));
+        }
+        return result;
+    }
+
+    /** Data sources store the run-window start as {@code freqRunDay} (BAU naming). */
+    static final String SOURCE_RUN_DAY_KEY = "freqRunDay";
+    /** Reports store the run-window start as {@code freqDtl} (BAU naming). */
+    static final String REPORT_RUN_DAY_KEY = "freqDtl";
+
+    /**
+     * Maps a run-details JSON object to {@link RunScheduleConfig}. Shared with
+     * {@link BigQueryReportRepository} (a report's nested {@code run_details} object) so sources
+     * and reports read the same fields the same way — except the run-window start, which BAU
+     * names differently: {@code runDayKey} is {@link #SOURCE_RUN_DAY_KEY} ({@code freqRunDay}) for
+     * a data source, {@link #REPORT_RUN_DAY_KEY} ({@code freqDtl}) for a report.
+     *
+     * <p>Values are kept as raw text ({@code maxFreqRunDay} too — it is a {@code WD±n}
+     * expression, e.g. {@code "WD+5"}); a JSON number such as {@code 5} becomes {@code "5"} and
+     * is rejected as not evaluable by {@code RunDateCalculator} rather than guessed at.
+     */
+    static RunScheduleConfig parseRunSchedule(JsonNode node, String runDayKey) {
+        if (node == null || !node.isObject()) return RunScheduleConfig.none();
+        return new RunScheduleConfig(
+            textOrNull(node, "frequency"),
+            textOrNull(node, runDayKey),
+            textOrNull(node, "maxFreqRunDay"),
+            textOrNull(node, "dayLag"),
+            textOrNull(node, "dateType"),
+            textOrNull(node, "calendarKey")
+        );
+    }
+
+    private static String textOrNull(JsonNode node, String key) {
+        JsonNode v = node.get(key);
+        return (v == null || v.isNull()) ? null : v.asText();
+    }
+
+    private SourceFailureEmailConfig toFailureEmailConfig(Map<String, String> p) {
+        List<String> toList = splitCsv(p.get("failure_email_to"));
+        if (toList.isEmpty()) return null;
+        return new SourceFailureEmailConfig(
+            toList,
+            splitCsv(p.get("failure_email_cc")),
+            p.getOrDefault("failure_email_subject",
+                "FAILED: {datasourceName} download for period {periodId}"),
+            p.getOrDefault("failure_email_body",
+                "Data source download failed.\n\n"
+                + "Datasource : {datasourceName}\n"
+                + "Period     : {periodId}\n"
+                + "Status     : {staCd}\n\n"
+                + "Error:\n{errorMessage}\n\n"
+                + "BnC Summary:\n{bncSummary}"),
+            p.getOrDefault("email_smtp_host", "smtp.gmail.com"),
+            parseIntOrDefault(p.get("email_smtp_port"), 587),
+            p.get("smtp_password_secret_id"),
+            p.get("from_address")
+        );
+    }
+
+    private static List<String> splitCsv(String value) {
+        if (value == null || value.isBlank()) return Collections.emptyList();
+        List<String> result = new ArrayList<>();
+        for (String part : value.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) result.add(trimmed);
+        }
+        return result;
+    }
+
+    // ── Schema validation ─────────────────────────────────────────────────────
+
+    private void validateRequiredFields(FieldValueList row, Map<String, String> params,
+                                         String parentId, String datasource, String subprocess) {
+        String schemaJson = row.get("schema_of_json").isNull()
+                            ? null : row.get("schema_of_json").getStringValue();
+        if (schemaJson == null || schemaJson.isBlank()) return;
+
+        try {
+            JsonNode schema = JSON.readTree(schemaJson);
+            if (!schema.isObject()) return;
+
+            List<String> missing = new ArrayList<>();
+            schema.fields().forEachRemaining(entry -> {
+                if (entry.getValue().path("required").asBoolean(false)) {
+                    String key = entry.getKey();
+                    String val = lookupParam(params, key);
+                    if (val == null || val.isBlank()) {
+                        missing.add(key);
+                    }
+                }
+            });
+
+            if (!missing.isEmpty()) {
+                throw new IllegalStateException(
+                    "Required source config fields missing in parameters_val_json for "
+                    + parentId + "/" + subprocess + "/" + datasource + ": " + missing);
+            }
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.warn("Failed to parse schema_of_json for source config {}/{}/{}: {}",
+                     parentId, subprocess, datasource, e.getMessage());
+        }
+    }
+
+    /** Legacy flat key → where the same setting lives in the structured config. */
+    private static final Map<String, String> STRUCTURED_ALIAS = Map.ofEntries(
+        Map.entry("bq_project_id",    "bq_settings.fetch_options.project_id"),
+        Map.entry("bq_dataset",       "bq_settings.fetch_options.dataset"),
+        Map.entry("bq_table",         "query_details.table"),
+        Map.entry("bq_query",         "query_details.query"),
+        Map.entry("bq_schema_json",   "query_details.schema"),
+        Map.entry("query_params_json","query_details.query_params"),
+        Map.entry("file_type",        "file_details.type"),
+        Map.entry("file_location",    "file_details.location"),
+        Map.entry("file_prefix",      "file_details.prefix"),
+        Map.entry("file_suffix",      "file_details.suffix"),
+        Map.entry("file_delimiter",   "file_details.delimiter"),
+        Map.entry("file_has_header",  "file_details.has_header"),
+        Map.entry("file_sheet_index", "file_details.sheet_index"),
+        Map.entry("file_first_row",   "file_details.first_row"),
+        Map.entry("file_last_column", "file_details.last_column"),
+        Map.entry("file_date_pattern","file_details.date_pattern"));
+
+    /**
+     * A config value by key, for the {@code schema_of_json} required-field check. Accepts a
+     * dotted path into a structured object ({@code query_details.query}), and for a legacy flat
+     * key ({@code bq_query}) also looks where the structured config keeps it — so an existing
+     * {@code schema_of_json} that lists {@code bq_query} as required keeps working after a
+     * source is moved to the structured shape.
+     */
+    static String lookupParam(Map<String, String> params, String key) {
+        String direct = params.get(key);
+        if (direct != null && !direct.isBlank()) return direct;
+        String path = key.indexOf('.') >= 0 ? key : STRUCTURED_ALIAS.get(key);
+        if (path == null) return direct;
+        String[] parts = path.split("\\.");
+        String json = params.get(parts[0]);
+        if (json == null || json.isBlank()) return direct;
+        try {
+            JsonNode node = JSON.readTree(json);
+            for (int i = 1; i < parts.length && node != null; i++) node = node.get(parts[i]);
+            if (node == null || node.isNull()) return direct;
+            return node.isContainerNode() ? node.toString() : node.asText();
+        } catch (Exception e) {
+            return direct;
+        }
+    }
+
+    // ── JSON / type parsing ───────────────────────────────────────────────────
+
+    private Map<String, String> parseValJson(FieldValueList row, String parentId,
+                                              String datasource, String subprocess) {
+        String valJson = row.get("parameters_val_json").isNull()
+                         ? null : row.get("parameters_val_json").getStringValue();
+        if (valJson == null || valJson.isBlank()) {
+            LOG.warn("parameters_val_json is empty for source config {}/{}/{}", parentId, subprocess, datasource);
+            return Collections.emptyMap();
+        }
+        try {
+            return flattenParams(valJson);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                "Failed to parse parameters_val_json for source config "
+                + parentId + "/" + subprocess + "/" + datasource + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Top-level keys of parameters_val_json → string values. A native array/object value
+     * (e.g. {@code date_params} written as a real JSON array rather than a string) is kept as its
+     * JSON text; {@code asText()} would turn it into "" and the setting would silently vanish.
+     */
+    static Map<String, String> flattenParams(String valJson) throws java.io.IOException {
+        JsonNode node = JSON.readTree(valJson);
+        if (!node.isObject()) return Collections.emptyMap();
+        Map<String, String> result = new HashMap<>();
+        node.fields().forEachRemaining(e -> result.put(e.getKey(),
+            e.getValue().isNull() ? null
+            : e.getValue().isContainerNode() ? e.getValue().toString()
+            : e.getValue().asText()));
+        return result;
     }
 
     private List<SourceTransformConfig> toSourceTransforms(String json) {
@@ -228,8 +755,8 @@ public final class BigQuerySourceConfigRepository {
                 String type = node.path("type").asText();
                 switch (type.toUpperCase()) {
                     case SourceTransformConfig.GROUP_BY -> {
-                        List<String> fields = parseStringList(node.path("groupByFields").toString());
-                        List<AggregationConfig> aggs = parseAggregations(node.path("aggregations").toString());
+                        List<String>           fields = parseStringList(node.path("groupByFields").toString());
+                        List<AggregationConfig> aggs  = parseAggregations(node.path("aggregations").toString());
                         transforms.add(SourceTransformConfig.groupBy(fields, aggs));
                     }
                     case SourceTransformConfig.SORT_BY -> {
@@ -237,10 +764,10 @@ public final class BigQuerySourceConfigRepository {
                         boolean desc = node.path("sortDescending").asBoolean(false);
                         transforms.add(SourceTransformConfig.sortBy(fields, desc));
                     }
-                    case SourceTransformConfig.LOOKUP -> {
+                    case SourceTransformConfig.LOOKUP ->
                         transforms.add(SourceTransformConfig.lookup(parseLookupConfig(node)));
-                    }
-                    default -> LOG.warn("Unknown source transform type '{}' — skipping", type);
+                    default ->
+                        LOG.warn("Unknown source transform type '{}' — skipping", type);
                 }
             }
             return transforms;
@@ -299,41 +826,28 @@ public final class BigQuerySourceConfigRepository {
         }
     }
 
-    // ── Type helpers ──────────────────────────────────────────────────────────
+    // ── Type coercion helpers ─────────────────────────────────────────────────
 
-    private static String str(FieldValueList row, String col) {
-        try {
-            var fv = row.get(col);
-            return fv.isNull() ? null : fv.getStringValue();
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
+    private static boolean parseBool(String value, boolean defaultValue) {
+        if (value == null || value.isBlank()) return defaultValue;
+        return Boolean.parseBoolean(value.trim());
     }
 
-    private static boolean bool(FieldValueList row, String col) {
+    private static int parseIntOrDefault(String value, int defaultValue) {
+        if (value == null || value.isBlank()) return defaultValue;
         try {
-            var fv = row.get(col);
-            return !fv.isNull() && fv.getBooleanValue();
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
-    }
-
-    private static int toInt(FieldValueList row, String col, int defaultValue) {
-        try {
-            var fv = row.get(col);
-            return fv.isNull() ? defaultValue : (int) fv.getLongValue();
-        } catch (IllegalArgumentException e) {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
             return defaultValue;
         }
     }
 
-    private static long toLong(FieldValueList row, String col) {
+    private static long parseLongOrDefault(String value, long defaultValue) {
+        if (value == null || value.isBlank()) return defaultValue;
         try {
-            var fv = row.get(col);
-            return fv.isNull() ? 0L : fv.getLongValue();
-        } catch (IllegalArgumentException e) {
-            return 0L;
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            return defaultValue;
         }
     }
 
@@ -355,13 +869,12 @@ public final class BigQuerySourceConfigRepository {
         }
     }
 
-    private static QueryJobConfiguration qConfig(String sql, String parentId, String datasource,
-                                                  String subprocess, String periodId) {
+    private static QueryJobConfiguration qConfig(String sql, String parentId,
+                                                   String datasource, String subprocess) {
         return QueryJobConfiguration.newBuilder(sql)
             .addNamedParameter("parentId",   QueryParameterValue.string(parentId))
             .addNamedParameter("datasource", QueryParameterValue.string(datasource))
             .addNamedParameter("subprocess", QueryParameterValue.string(subprocess))
-            .addNamedParameter("periodId",   QueryParameterValue.string(periodId))
             .setUseLegacySql(false)
             .build();
     }

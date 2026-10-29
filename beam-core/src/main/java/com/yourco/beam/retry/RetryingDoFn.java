@@ -1,6 +1,6 @@
 package com.yourco.beam.retry;
 
-import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.pipeline.FailedRecord;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.Row;
@@ -52,34 +52,39 @@ public final class RetryingDoFn extends DoFn<Row, Row> {
     }
 
     @ProcessElement
-    public void processElement(@Element Row row, MultiOutputReceiver out) {
-        int attempt = 0;
-
-        while (true) {
-            try {
-                out.get(SUCCESS).output(fn.apply(row));
-                return;
-            } catch (Exception e) {
-                attempt++;
-                if (!retryPolicy.shouldRetry(attempt, e)) {
-                    LOG.warn("Element failed after {} attempt(s) — routing to DLQ. Error: {}",
-                             attempt, e.getMessage());
-                    out.get(DEAD_LETTER).output(FailedRecord.of(row, e, attempt));
+    public void processElement(@Element Row row, MultiOutputReceiver out, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+        com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+        try {
+            int attempt = 0;
+    
+            while (true) {
+                try {
+                    out.get(SUCCESS).output(fn.apply(row));
                     return;
-                }
-
-                long delay = retryPolicy.delayMs(attempt);
-                LOG.debug("Attempt {} failed ({}); retrying in {}ms…", attempt, e.getMessage(), delay);
-                if (delay > 0) {
-                    try {
-                        Thread.sleep(delay);   // safe: capped at MAX_DELAY_MS (200ms)
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        out.get(DEAD_LETTER).output(FailedRecord.of(row, ie, attempt));
+                } catch (Exception e) {
+                    attempt++;
+                    if (!retryPolicy.shouldRetry(attempt, e)) {
+                        LOG.warn("Element failed after {} attempt(s) — routing to DLQ. Error: {}",
+                                 attempt, e.getMessage());
+                        out.get(DEAD_LETTER).output(FailedRecord.of(row, e, attempt));
                         return;
+                    }
+    
+                    long delay = retryPolicy.delayMs(attempt);
+                    LOG.debug("Attempt {} failed ({}); retrying in {}ms…", attempt, e.getMessage(), delay);
+                    if (delay > 0) {
+                        try {
+                            Thread.sleep(delay);   // safe: capped at MAX_DELAY_MS (200ms)
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            out.get(DEAD_LETTER).output(FailedRecord.of(row, ie, attempt));
+                            return;
+                        }
                     }
                 }
             }
+        } finally {
+            com.yourco.beam.context.WorkerLogging.close();
         }
     }
 }

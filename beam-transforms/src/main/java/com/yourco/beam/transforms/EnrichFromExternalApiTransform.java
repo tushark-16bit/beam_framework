@@ -1,6 +1,7 @@
 package com.yourco.beam.transforms;
 
-import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.pipeline.FailedRecord;
+import com.yourco.beam.model.pipeline.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.transform.BeamTransform;
 import org.apache.beam.sdk.schemas.Schema;
@@ -63,7 +64,7 @@ import java.util.List;
  *   <li>Replace {@link HttpClient} with your actual client (JDBC, gRPC, Redis, etc.).</li>
  *   <li>Replace {@code callApi()} with your actual enrichment logic.</li>
  *   <li>Replace {@code mergeEnrichment()} with your field-mapping logic.</li>
- *   <li>Register in {@code META-INF/services} and add your CLI options.</li>
+ *   <li>Add it to {@code TransformRegistry.of(...)} in {@code PipelineFactory} and add your CLI options.</li>
  * </ol>
  *
  * <h2>Thread safety</h2>
@@ -80,15 +81,12 @@ public final class EnrichFromExternalApiTransform implements BeamTransform {
     }
 
     @Override
-    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options) {
-        // Read config from options — these are serializable Strings/ints,
-        // safe to pass to the composite and then to the DoFn.
-        //
-        // To add your own flags: declare them in FrameworkOptions, then read here.
-        // Example: options.as(EnrichApiOptions.class).getApiEndpoint()
-        String endpoint      = "https://api.example.com/enrich";  // replace with options flag
-        String lookupField   = "customer_id";                      // replace with options flag
-        int    timeoutSecs   = 5;                                  // replace with options flag
+    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig) {
+        // Read config from runConfig — use runConfig.get("api_endpoint") etc.
+        // Example: String endpoint = runConfig.get("enrich_api_endpoint", "https://api.example.com/enrich");
+        String endpoint      = "https://api.example.com/enrich";  // replace with runConfig.get(...)
+        String lookupField   = "customer_id";                      // replace with runConfig.get(...)
+        int    timeoutSecs   = 5;                                  // replace with runConfig.get(...)
 
         return new EnrichComposite(endpoint, lookupField, timeoutSecs);
     }
@@ -195,29 +193,34 @@ public final class EnrichFromExternalApiTransform implements BeamTransform {
          * because {@code @Setup} has already run.
          */
         @ProcessElement
-        public void processElement(@Element Row row, MultiOutputReceiver out) {
-            Object lookupKey = row.getValue(lookupFieldName);
-            if (lookupKey == null) {
-                // Can't enrich without a key — route to DLQ
-                out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row,
-                        new IllegalArgumentException(
-                            "Lookup field '" + lookupFieldName + "' is null — cannot enrich"),
-                        0));
-                return;
-            }
-
+        public void processElement(@Element Row row, MultiOutputReceiver out, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                // Call the external API with the lookup key
-                String enrichmentJson = callApi(lookupKey.toString());
-
-                // Merge the API response fields into a new Row with the output schema
-                Row enriched = mergeEnrichment(row, enrichmentJson, outputSchema);
-                out.get(SUCCESS_TAG).output(enriched);
-
-            } catch (Exception e) {
-                // API call failed — route to DLQ for inspection and possible replay
-                LOG.warn("API enrichment failed for key '{}': {}", lookupKey, e.getMessage());
-                out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row, e, 1));
+                Object lookupKey = row.getValue(lookupFieldName);
+                if (lookupKey == null) {
+                    // Can't enrich without a key — route to DLQ
+                    out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row,
+                            new IllegalArgumentException(
+                                "Lookup field '" + lookupFieldName + "' is null — cannot enrich"),
+                            0));
+                    return;
+                }
+    
+                try {
+                    // Call the external API with the lookup key
+                    String enrichmentJson = callApi(lookupKey.toString());
+    
+                    // Merge the API response fields into a new Row with the output schema
+                    Row enriched = mergeEnrichment(row, enrichmentJson, outputSchema);
+                    out.get(SUCCESS_TAG).output(enriched);
+    
+                } catch (Exception e) {
+                    // API call failed — route to DLQ for inspection and possible replay
+                    LOG.warn("API enrichment failed for key '{}': {}", lookupKey, e.getMessage());
+                    out.get(DEAD_LETTER_TAG).output(FailedRecord.of(row, e, 1));
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

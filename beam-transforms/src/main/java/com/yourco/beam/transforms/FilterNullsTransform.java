@@ -1,6 +1,7 @@
 package com.yourco.beam.transforms;
 
-import com.yourco.beam.model.FailedRecord;
+import com.yourco.beam.model.pipeline.FailedRecord;
+import com.yourco.beam.model.pipeline.PipelineRunConfig;
 import com.yourco.beam.options.FrameworkOptions;
 import com.yourco.beam.transform.BeamTransform;
 import org.apache.beam.sdk.metrics.Counter;
@@ -37,7 +38,7 @@ public final class FilterNullsTransform implements BeamTransform {
     }
 
     @Override
-    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options) {
+    public PTransform<PCollection<Row>, PCollectionTuple> toComposite(FrameworkOptions options, PipelineRunConfig runConfig) {
         return new FilterNullsComposite();
     }
 
@@ -67,18 +68,23 @@ public final class FilterNullsTransform implements BeamTransform {
                 Metrics.counter("filter-nulls", "rows_dropped_null_field");
 
         @ProcessElement
-        public void processElement(@Element Row row, MultiOutputReceiver out) {
-            boolean hasNull = row.getSchema().getFields().stream()
-                    .anyMatch(field -> row.getValue(field.getName()) == null);
-
-            if (hasNull) {
-                nullRowsDropped.inc();
-                // Route to DLQ so dropped rows are auditable and replayable
-                out.get(DEAD_LETTER_TAG).output(
-                        FailedRecord.ofRaw(row.toString(),
-                                new IllegalArgumentException("Row contains null field(s)"), 0));
-            } else {
-                out.get(SUCCESS_TAG).output(row);
+        public void processElement(@Element Row row, MultiOutputReceiver out, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+            try {
+                boolean hasNull = row.getSchema().getFields().stream()
+                        .anyMatch(field -> row.getValue(field.getName()) == null);
+    
+                if (hasNull) {
+                    nullRowsDropped.inc();
+                    // Route to DLQ so dropped rows are auditable and replayable
+                    out.get(DEAD_LETTER_TAG).output(
+                            FailedRecord.ofRaw(row.toString(),
+                                    new IllegalArgumentException("Row contains null field(s)"), 0));
+                } else {
+                    out.get(SUCCESS_TAG).output(row);
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
     }

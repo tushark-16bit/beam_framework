@@ -5,7 +5,7 @@ package com.yourco.beam.options;
  *
  * <p>For {@link ProcessType#REPORT_PROCESSING}, pass {@code --sourceType} on the CLI.
  * For {@link ProcessType#DATA_SOURCE_DOWNLOAD}, source types come from the parameter DB
- * (one per {@link com.yourco.beam.model.SourceConfig}); {@code --sourceType} is ignored.
+ * (one per {@link com.yourco.beam.model.source.SourceConfig}); {@code --sourceType} is ignored.
  */
 public enum SourceType {
     /** Newline-delimited JSON files on GCS. */

@@ -1,0 +1,181 @@
+package com.yourco.beam.utils.bq;
+
+import com.google.cloud.bigquery.BigQuery;
+import com.google.cloud.bigquery.BigQueryOptions;
+import com.google.cloud.bigquery.Field;
+import com.google.cloud.bigquery.StandardTableDefinition;
+import com.google.cloud.bigquery.Table;
+import com.google.cloud.bigquery.TableId;
+import com.yourco.beam.model.bq.SourceSchemaField;
+import org.apache.beam.sdk.schemas.Schema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+
+/**
+ * Utilities for fetching and converting BigQuery table schemas at pipeline-assembly time.
+ *
+ * <h2>When to use this</h2>
+ * Call these methods inside source or transform constructors — in the <em>driver JVM</em>
+ * before the pipeline is submitted to Dataflow. Do NOT call them inside a {@code DoFn}
+ * because each worker would make a separate BQ API call, causing unnecessary load and latency.
+ *
+ * <h2>Type mapping</h2>
+ * Numeric and boolean BQ types map to their native Beam equivalents (INT64, DOUBLE, BOOLEAN).
+ * Temporal types (TIMESTAMP, DATE, DATETIME, TIME) map to STRING — {@code BigQueryIO.readTableRows()}
+ * returns them as ISO strings in the {@code TableRow} JSON encoding, not as epoch numbers,
+ * and preserving them as strings avoids conversion errors in Beam's type adapters.
+ * {@code NUMERIC} (up to 38 digits) and {@code BIGNUMERIC} (up to 76.76 digits) also map to
+ * STRING, for the same reason plus precision: both can exceed what a Beam {@code DOUBLE} (a
+ * Java {@code double}, ~15-17 significant digits) can represent without loss — the exact
+ * decimal text is preserved as-is instead.
+ *
+ * <h2>Integration</h2>
+ * Fetch the schema at driver-JVM time in beam-runner (e.g. {@code DataSourcePipelineFactory}
+ * or {@code PipelineFactory}) and pass it to {@code BigQuerySourceTransform} via
+ * {@code SourceRouter.routeFromConfig(schema)} or {@code SourceRouter.route(runConfig, schema)}.
+ * The transform does its own type-safe conversion from the JSON-encoded {@code TableRow}.
+ */
+public final class BigQuerySchemaUtils {
+
+    private static final Logger LOG = LoggerFactory.getLogger(BigQuerySchemaUtils.class);
+
+    // BQ field type → Beam Schema field type mapping.
+    //
+    // Temporal types (TIMESTAMP, DATE, DATETIME, TIME) are mapped to STRING because
+    // BigQueryIO.readTableRows() returns their values as ISO strings in TableRow JSON encoding:
+    //   TIMESTAMP → "1.704585600E9"  (epoch seconds as float string)
+    //   DATE      → "2024-01-07"
+    //   DATETIME  → "2024-01-07T00:00:00"
+    //   TIME      → "12:30:00"
+    // BigQueryUtils.toBeamRow() assumes DATETIME means epoch-float, which causes
+    // NumberFormatException on these ISO strings. Keeping them as STRING is safe and
+    // preserves the full value for downstream BQ transforms.
+    //
+    // NUMERIC and BIGNUMERIC are also mapped to STRING: they hold up to 38 and 76.76 decimal
+    // digits respectively, more precision than a Java double (Schema.FieldType.DOUBLE) can
+    // represent losslessly, so the exact decimal text from the TableRow JSON encoding is kept
+    // as-is rather than risking silent precision loss.
+    private static final Map<String, Schema.FieldType> TYPE_MAP = Map.ofEntries(
+            Map.entry("STRING",     Schema.FieldType.STRING),
+            Map.entry("INTEGER",    Schema.FieldType.INT64),
+            Map.entry("INT64",      Schema.FieldType.INT64),
+            Map.entry("FLOAT",      Schema.FieldType.DOUBLE),
+            Map.entry("FLOAT64",    Schema.FieldType.DOUBLE),
+            Map.entry("BOOLEAN",    Schema.FieldType.BOOLEAN),
+            Map.entry("BOOL",       Schema.FieldType.BOOLEAN),
+            Map.entry("BYTES",      Schema.FieldType.BYTES),
+            Map.entry("TIMESTAMP",  Schema.FieldType.STRING),
+            Map.entry("DATE",       Schema.FieldType.STRING),
+            Map.entry("DATETIME",   Schema.FieldType.STRING),
+            Map.entry("TIME",       Schema.FieldType.STRING),
+            Map.entry("NUMERIC",    Schema.FieldType.STRING),
+            Map.entry("BIGNUMERIC", Schema.FieldType.STRING)
+    );
+
+    private BigQuerySchemaUtils() {}
+
+    /**
+     * Fetches the Beam {@link Schema} for a BigQuery table using application-default credentials.
+     *
+     * <p>Call this in the driver JVM at pipeline-assembly time, not inside a DoFn.
+     *
+     * @param tableRef BigQuery table reference in format {@code project:dataset.table}
+     *                 or {@code project.dataset.table}
+     * @return Beam {@link Schema} with all top-level columns as nullable fields
+     * @throws IllegalArgumentException if the table does not exist or is not accessible
+     */
+    public static Schema fetchBeamSchema(String tableRef) {
+        LOG.info("Fetching BQ schema for table: {}", tableRef);
+
+        BigQuery bq = BigQueryOptions.getDefaultInstance().getService();
+        TableId tableId = parseTableRef(tableRef);
+        Table table = bq.getTable(tableId);
+
+        if (table == null) {
+            throw new IllegalArgumentException(
+                "BigQuery table not found or not accessible: " + tableRef);
+        }
+
+        com.google.cloud.bigquery.Schema bqSchema =
+                table.<StandardTableDefinition>getDefinition().getSchema();
+
+        if (bqSchema == null) {
+            throw new IllegalArgumentException(
+                "Table has no schema (external or partitioned without schema?): " + tableRef);
+        }
+
+        Schema.Builder builder = Schema.builder();
+        for (Field field : bqSchema.getFields()) {
+            Schema.FieldType beamType = TYPE_MAP.getOrDefault(
+                    field.getType().name(), Schema.FieldType.STRING);
+            builder.addNullableField(field.getName(), beamType);
+        }
+
+        Schema schema = builder.build();
+        LOG.info("Fetched {} field(s) from {}", schema.getFieldCount(), tableRef);
+        return schema;
+    }
+
+    /**
+     * Builds a Beam {@link Schema} from an operator-declared column list
+     * ({@code bq_schema_json} in {@code parameter_store} — see
+     * {@code com.yourco.beam.model.bq.BqFetchConfig#schema}), instead of querying BigQuery
+     * table metadata.
+     *
+     * <p>Unlike {@link #fetchBeamSchema}, this makes no BigQuery API call and needs no
+     * {@code bigquery.tables.get} permission — the schema is exactly what was declared.
+     * Because it is user-entered, an unrecognised type name fails loudly here rather than
+     * being silently coerced to STRING (as {@link #fetchBeamSchema} does for BQ-reported
+     * types it doesn't recognise) — a typo in {@code bq_schema_json} should surface
+     * immediately as a config error, not produce silently wrong data downstream.
+     *
+     * @param declaredFields column list from {@code bq_schema_json}; must be non-empty
+     * @return Beam {@link Schema} with one nullable field per declared column
+     * @throws IllegalArgumentException if {@code declaredFields} is empty, or a field's
+     *         {@code bqType} is not a recognised BigQuery SQL type name
+     */
+    public static Schema toBeamSchema(List<SourceSchemaField> declaredFields) {
+        if (declaredFields == null || declaredFields.isEmpty()) {
+            throw new IllegalArgumentException("Declared schema (bq_schema_json) is empty");
+        }
+        Schema.Builder builder = Schema.builder();
+        for (SourceSchemaField field : declaredFields) {
+            Schema.FieldType beamType = TYPE_MAP.get(field.bqType.toUpperCase());
+            if (beamType == null) {
+                throw new IllegalArgumentException(
+                    "Unknown BQ type '" + field.bqType + "' declared for column '"
+                    + field.columnName + "' in bq_schema_json. Supported types: "
+                    + TYPE_MAP.keySet());
+            }
+            builder.addNullableField(field.columnName, beamType);
+        }
+        Schema schema = builder.build();
+        LOG.info("Built Beam schema from {} declared column(s)", schema.getFieldCount());
+        return schema;
+    }
+
+    // ── Private helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Parses a BQ table reference in either {@code project:dataset.table}
+     * or {@code project.dataset.table} format.
+     */
+    private static TableId parseTableRef(String tableRef) {
+        // Normalise project:dataset.table → project.dataset.table
+        String normalised = tableRef.replace(':', '.');
+        String[] parts = normalised.split("\\.");
+        if (parts.length == 3) {
+            return TableId.of(parts[0], parts[1], parts[2]);
+        }
+        if (parts.length == 2) {
+            return TableId.of(parts[0], parts[1]);
+        }
+        throw new IllegalArgumentException(
+            "Invalid BigQuery table reference: '" + tableRef
+            + "'. Expected format: project:dataset.table or dataset.table");
+    }
+}

@@ -1,7 +1,6 @@
 package com.yourco.beam.transforms.side;
 
-import com.yourco.beam.options.FrameworkOptions;
-import com.yourco.beam.utils.SecretManagerUtils;
+import com.yourco.beam.utils.gcp.SecretManagerUtils;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
 import jakarta.mail.Session;
@@ -42,7 +41,8 @@ import java.util.Properties;
  * // Send notification when pipeline completes (branch off success path)
  * PCollection<Row> notification = successRows.apply("BuildNotification",
  *     new BuildEmailRowTransform(options));
- * notification.apply("SendEmail", new SideEffectEmailTransform(options));
+ * notification.apply("SendEmail",
+ *     new SideEffectEmailTransform(smtpHost, smtpPort, smtpPasswordSecretId, fromAddress));
  * }</pre>
  *
  * <h2>Serialization</h2>
@@ -56,13 +56,18 @@ public final class SideEffectEmailTransform extends PTransform<PCollection<Row>,
     private final String smtpPasswordSecretId;
     private final String fromAddress;
 
-    public SideEffectEmailTransform(FrameworkOptions options) {
-        this.smtpHost             = options.getEmailSmtpHost();
-        this.smtpPort             = options.getEmailSmtpPort();
-        this.smtpPasswordSecretId = options.getSmtpPasswordSecretId();
-        // Use the dev email as the "from" address; falls back to businessEmail
-        String from = options.getDevErrorEmail();
-        this.fromAddress = (from != null && !from.isBlank()) ? from : options.getBusinessEmail();
+    /**
+     * @param smtpHost             SMTP relay hostname (e.g. smtp.gmail.com)
+     * @param smtpPort             SMTP port (typically 587)
+     * @param smtpPasswordSecretId Secret Manager resource name for the SMTP password
+     * @param fromAddress          Sender address used for From: and SMTP auth
+     */
+    public SideEffectEmailTransform(String smtpHost, int smtpPort,
+                                    String smtpPasswordSecretId, String fromAddress) {
+        this.smtpHost             = smtpHost;
+        this.smtpPort             = smtpPort;
+        this.smtpPasswordSecretId = smtpPasswordSecretId;
+        this.fromAddress          = fromAddress;
     }
 
     @Override
@@ -116,34 +121,39 @@ public final class SideEffectEmailTransform extends PTransform<PCollection<Row>,
         }
 
         @ProcessElement
-        public void processElement(@Element Row row) {
-            String to      = row.getString("to");
-            String subject = row.getString("subject");
-            String body    = row.getString("body");
-            String cc      = row.getSchema().hasField("cc") ? row.getString("cc") : null;
-
-            if (to == null || to.isBlank()) {
-                LOG.warn("Skipping email — 'to' field is blank");
-                return;
-            }
-
+        public void processElement(@Element Row row, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
             try {
-                MimeMessage message = new MimeMessage(mailSession);
-                message.setFrom(new InternetAddress(fromAddress));
-                message.addRecipient(Message.RecipientType.TO, new InternetAddress(to));
-                if (cc != null && !cc.isBlank()) {
-                    for (String ccAddr : cc.split(",")) {
-                        message.addRecipient(Message.RecipientType.CC,
-                            new InternetAddress(ccAddr.trim()));
-                    }
+                String to      = row.getString("to");
+                String subject = row.getString("subject");
+                String body    = row.getString("body");
+                String cc      = row.getSchema().hasField("cc") ? row.getString("cc") : null;
+    
+                if (to == null || to.isBlank()) {
+                    LOG.warn("Skipping email — 'to' field is blank");
+                    return;
                 }
-                message.setSubject(subject);
-                message.setText(body);
-                Transport.send(message);
-                LOG.info("Email sent to '{}' with subject '{}'", to, subject);
-            } catch (MessagingException e) {
-                // Log but don't fail the pipeline — email is best-effort
-                LOG.error("Failed to send email to '{}': {}", to, e.getMessage(), e);
+    
+                try {
+                    MimeMessage message = new MimeMessage(mailSession);
+                    message.setFrom(new InternetAddress(fromAddress));
+                    message.addRecipient(Message.RecipientType.TO, new InternetAddress(to));
+                    if (cc != null && !cc.isBlank()) {
+                        for (String ccAddr : cc.split(",")) {
+                            message.addRecipient(Message.RecipientType.CC,
+                                new InternetAddress(ccAddr.trim()));
+                        }
+                    }
+                    message.setSubject(subject);
+                    message.setText(body);
+                    Transport.send(message);
+                    LOG.info("Email sent to '{}' with subject '{}'", to, subject);
+                } catch (MessagingException e) {
+                    // Log but don't fail the pipeline — email is best-effort
+                    LOG.error("Failed to send email to '{}': {}", to, e.getMessage(), e);
+                }
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
         }
 

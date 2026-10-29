@@ -1,7 +1,7 @@
 package com.yourco.beam.transforms.source;
 
-import com.yourco.beam.model.AggregationConfig;
-import com.yourco.beam.model.SourceTransformConfig;
+import com.yourco.beam.model.datatransform.AggregationConfig;
+import com.yourco.beam.model.datatransform.SourceTransformConfig;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupByKey;
@@ -124,56 +124,62 @@ public final class GroupByTransform extends PTransform<PCollection<Row>, PCollec
 
         @ProcessElement
         public void processElement(@Element KV<String, Iterable<Row>> kv,
-                                   OutputReceiver<Row> out) {
-            String key = kv.getKey();
-            Iterable<Row> rows = kv.getValue();
-
-            // Split the pipe-delimited key back into field values
-            String[] keyParts = key.split("\\|", -1);
-
-            // Accumulators per aggregation
-            double[] sums  = new double[aggregations.size()];
-            double[] mins  = new double[aggregations.size()];
-            double[] maxes = new double[aggregations.size()];
-            long[]   counts = new long[aggregations.size()];
-            boolean[] initialized = new boolean[aggregations.size()];
-
-            for (Row row : rows) {
-                for (int i = 0; i < aggregations.size(); i++) {
-                    AggregationConfig agg = aggregations.get(i);
-                    counts[i]++;
-                    if (!AggregationConfig.COUNT.equals(agg.function)) {
-                        double val = toDouble(row, agg.field);
-                        sums[i] += val;
-                        if (!initialized[i]) {
-                            mins[i] = val;
-                            maxes[i] = val;
-                            initialized[i] = true;
-                        } else {
-                            mins[i]  = Math.min(mins[i],  val);
-                            maxes[i] = Math.max(maxes[i], val);
+                                   OutputReceiver<Row> out,
+                org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+            try {
+                String key = kv.getKey();
+                Iterable<Row> rows = kv.getValue();
+    
+                // Split the pipe-delimited key back into field values
+                String[] keyParts = key.split("\\|", -1);
+    
+                // Accumulators per aggregation
+                double[] sums  = new double[aggregations.size()];
+                double[] mins  = new double[aggregations.size()];
+                double[] maxes = new double[aggregations.size()];
+                long[]   counts = new long[aggregations.size()];
+                boolean[] initialized = new boolean[aggregations.size()];
+    
+                for (Row row : rows) {
+                    for (int i = 0; i < aggregations.size(); i++) {
+                        AggregationConfig agg = aggregations.get(i);
+                        counts[i]++;
+                        if (!AggregationConfig.COUNT.equals(agg.function)) {
+                            double val = toDouble(row, agg.field);
+                            sums[i] += val;
+                            if (!initialized[i]) {
+                                mins[i] = val;
+                                maxes[i] = val;
+                                initialized[i] = true;
+                            } else {
+                                mins[i]  = Math.min(mins[i],  val);
+                                maxes[i] = Math.max(maxes[i], val);
+                            }
                         }
                     }
                 }
-            }
-
-            // Build output row
-            Row.Builder rowBuilder = Row.withSchema(outputSchema);
-            for (int i = 0; i < groupByFields.size() && i < keyParts.length; i++) {
-                rowBuilder.addValue(keyParts[i]);
-            }
-            for (int i = 0; i < aggregations.size(); i++) {
-                AggregationConfig agg = aggregations.get(i);
-                switch (agg.function) {
-                    case AggregationConfig.SUM   -> rowBuilder.addValue(sums[i]);
-                    case AggregationConfig.COUNT -> rowBuilder.addValue(counts[i]);
-                    case AggregationConfig.AVG   -> rowBuilder.addValue(counts[i] > 0 ? sums[i] / counts[i] : 0.0);
-                    case AggregationConfig.MIN   -> rowBuilder.addValue(initialized[i] ? mins[i]  : 0.0);
-                    case AggregationConfig.MAX   -> rowBuilder.addValue(initialized[i] ? maxes[i] : 0.0);
-                    default -> rowBuilder.addValue(0.0);
+    
+                // Build output row
+                Row.Builder rowBuilder = Row.withSchema(outputSchema);
+                for (int i = 0; i < groupByFields.size() && i < keyParts.length; i++) {
+                    rowBuilder.addValue(keyParts[i]);
                 }
+                for (int i = 0; i < aggregations.size(); i++) {
+                    AggregationConfig agg = aggregations.get(i);
+                    switch (agg.function) {
+                        case AggregationConfig.SUM   -> rowBuilder.addValue(sums[i]);
+                        case AggregationConfig.COUNT -> rowBuilder.addValue(counts[i]);
+                        case AggregationConfig.AVG   -> rowBuilder.addValue(counts[i] > 0 ? sums[i] / counts[i] : 0.0);
+                        case AggregationConfig.MIN   -> rowBuilder.addValue(initialized[i] ? mins[i]  : 0.0);
+                        case AggregationConfig.MAX   -> rowBuilder.addValue(initialized[i] ? maxes[i] : 0.0);
+                        default -> rowBuilder.addValue(0.0);
+                    }
+                }
+                out.output(rowBuilder.build());
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
             }
-            out.output(rowBuilder.build());
         }
 
         private static double toDouble(Row row, String field) {

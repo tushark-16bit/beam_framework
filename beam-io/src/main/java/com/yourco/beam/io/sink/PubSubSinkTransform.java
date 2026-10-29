@@ -1,7 +1,6 @@
 package com.yourco.beam.io.sink;
 
 import com.yourco.beam.io.util.JsonUtils;
-import com.yourco.beam.options.FrameworkOptions;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -28,11 +27,9 @@ public final class PubSubSinkTransform extends PTransform<PCollection<Row>, PDon
 
     private final String topic;
 
-    public PubSubSinkTransform(FrameworkOptions options) {
-        Objects.requireNonNull(options, "options must not be null");
-        this.topic = Objects.requireNonNull(
-                options.getPubSubTopic(),
-                "sinkType=PUBSUB requires --pubSubTopic");
+    public PubSubSinkTransform(String topic) {
+        this.topic = Objects.requireNonNull(topic,
+                "sinkType=PUBSUB requires pubsub_topic in parameter_store");
     }
 
     @Override

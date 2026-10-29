@@ -1,6 +1,6 @@
 package com.yourco.beam.transforms.source;
 
-import com.yourco.beam.model.SourceTransformConfig;
+import com.yourco.beam.model.datatransform.SourceTransformConfig;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -80,8 +80,13 @@ public final class SortByTransform extends PTransform<PCollection<Row>, PCollect
         }
 
         @ProcessElement
-        public void processElement(@Element Row row) {
-            buffer.add(row);
+        public void processElement(@Element Row row, org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            com.yourco.beam.context.WorkerLogging.open(pipelineOptions);
+            try {
+                buffer.add(row);
+            } finally {
+                com.yourco.beam.context.WorkerLogging.close();
+            }
         }
 
         @FinishBundle
